@@ -145,7 +145,7 @@ inline Vec8uM Hashmap::find_chain_tagged(Vec8u hashes) {
    auto pos = hashes & Vec8u(mask);
    Vec8u candidates = _mm512_i64gather_epi64(pos, (const long long int*)entries, 8);
    Vec8u filterMatch = candidates & tag(hashes);
-   __mmask8 matches = filterMatch != Vec8u(uint64_t(0));
+   mask8_t matches = filterMatch != Vec8u(uint64_t(0));
    candidates = candidates & Vec8u(maskPointer);
    return {candidates, matches};
 }

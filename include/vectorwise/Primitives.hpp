@@ -487,7 +487,7 @@ pos_t hash8(pos_t n, hash_t* RES result, T* RES input)
       _mm512_store_epi64(result + i, hashes);
    }
    if (rest) {
-      __mmask8 remaining = (1 << rest) - 1;
+      mask8_t remaining = (1 << rest) - 1;
       Vec8u in = _mm512_maskz_loadu_epi64(remaining, input + n - rest);
       auto hashes = Op().hashKey(in, seeds);
       _mm512_mask_store_epi64(result + n - rest, remaining, hashes);
@@ -511,7 +511,7 @@ pos_t hash4(pos_t n, hash_t* RES result, T* RES input)
       _mm512_mask_storeu_epi64(result + i, ~0, hashes);
    }
    if (rest) {
-      __mmask16 remaining = (1 << rest) - 1;
+      mask16_t remaining = (1 << rest) - 1;
       Vec8u in(_mm512_cvtepu32_epi64(
           _mm256_maskz_loadu_epi32(remaining, input + n - rest)));
       auto hashes = Op().hashKey(in, seeds);
@@ -535,7 +535,7 @@ pos_t hash4_16(pos_t n, hash_t* RES result, T* RES input)
       _mm512_mask_storeu_epi64(result + i, ~0, hashes);
    }
    if (rest) {
-      __mmask16 remaining = (1 << rest) - 1;
+      mask16_t remaining = (1 << rest) - 1;
       Vec16u in(input + n - rest);
       auto hashes = Op().hashKey(in, seeds);
       _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
@@ -559,7 +559,7 @@ pos_t rehash4(pos_t n, hash_t* RES result, T* RES input)
       _mm512_mask_storeu_epi64(result + i, ~0, hashes);
    }
    if (rest) {
-      __mmask16 remaining = (1 << rest) - 1;
+      mask16_t remaining = (1 << rest) - 1;
       Vec8u seeds = _mm512_maskz_loadu_epi64(remaining, result + n - rest);
       Vec8u in(_mm512_cvtepu32_epi64(
           _mm256_maskz_loadu_epi32(remaining, input + n - rest)));
@@ -584,7 +584,7 @@ pos_t rehash4_16(pos_t n, hash_t* RES result, T* RES input)
       _mm512_mask_storeu_epi64(result + i, ~0, hashes);
    }
    if (rest) {
-      __mmask16 remaining = (1 << rest) - 1;
+      mask16_t remaining = (1 << rest) - 1;
       Vec16u seeds = _mm512_maskz_loadu_epi64(remaining, result + n - rest);
       Vec16u in(input + n - rest);
       auto hashes = Op().hashKey(in, seeds);
@@ -600,7 +600,7 @@ pos_t hash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
    static_assert(sizeof(T) == 4, "Can only be used for inputs types of size 4");
    size_t rest = n % 8;
    Vec8u seeds(seed);
-   __mmask16 all = ~0;
+   mask16_t all = ~0;
    for (uint64_t i = 0; i < n - rest; i += 8) {
       auto inSels = _mm256_loadu_si256((const __m256i*)(inSel + i));
       Vec8u in = _mm512_cvtepu32_epi64(
@@ -610,7 +610,7 @@ pos_t hash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       _mm512_mask_storeu_epi64(result + i, all, hashes);
    }
    if (rest) {
-      __mmask16 remaining = (1 << rest) - 1;
+      mask16_t remaining = (1 << rest) - 1;
       auto inSels = _mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
       Vec8u in = _mm512_cvtepu32_epi64(
@@ -628,7 +628,7 @@ pos_t hash4_16_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
    static_assert(sizeof(T) == 4, "Can only be used for inputs types of size 4");
    size_t rest = n % 16;
    Vec16u seeds(seed);
-   __mmask16 all = ~0;
+   mask16_t all = ~0;
    for (uint64_t i = 0; i < n - rest; i += 16) {
       Vec16u inSels(inSel + i);
       Vec16u in = _mm512_i32gather_epi32(inSels, input, 4);
@@ -636,7 +636,7 @@ pos_t hash4_16_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       _mm512_mask_storeu_epi64(result + i, all, hashes);
    }
    if (rest) {
-      __mmask16 remaining = (1 << rest) - 1;
+      mask16_t remaining = (1 << rest) - 1;
       Vec16u inSels(inSel + n - rest);
       Vec16u in = _mm512_mask_i32gather_epi32(inSels, all, inSels, input, 4);
       auto hashes = Op().hashKey(in, seeds);
@@ -661,7 +661,7 @@ pos_t rehash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       _mm512_mask_storeu_epi64(result + i, ~0, hashes); // ??
    }
    if (rest) {
-      __mmask16 remaining = (1 << rest) - 1;
+      mask16_t remaining = (1 << rest) - 1;
       Vec8u seeds = _mm512_maskz_loadu_epi64(remaining, result + n - rest);
       auto inSels = _mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
@@ -689,7 +689,7 @@ pos_t rehash4_16_sel(pos_t n, pos_t* RES inSel, hash_t* RES result,
       _mm512_mask_storeu_epi64(result + i, ~0, hashes); // ??
    }
    if (rest) {
-      __mmask16 remaining = (1 << rest) - 1;
+      mask16_t remaining = (1 << rest) - 1;
       Vec16u seeds = _mm512_maskz_loadu_epi64(remaining, result + n - rest);
       Vec16u inSels(inSel + n - rest);
       Vec16u in =
