@@ -1,3 +1,7 @@
+#include <cstdint>  // For uint32_t, int64_t, etc.
+#include <string>   // For std::string
+#include <cstddef>  // For size_t
+
 #include "common/algebra/Types.hpp"
 #include "common/runtime/Types.hpp"
 

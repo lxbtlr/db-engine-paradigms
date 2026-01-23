@@ -6,6 +6,10 @@
 #include <iostream>
 #include <string>
 
+#include <cstdint>  // For uint32_t, int64_t, etc.
+#include <cstddef>  // For size_t
+
+
 class SmallStringView {
  public:
    SmallStringView(std::experimental::string_view& s);

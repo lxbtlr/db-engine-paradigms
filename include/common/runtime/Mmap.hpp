@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cstdint>
+
 // clang-format off
 DIAGNOSTIC_PUSH_NO_UNKNOWN
 DIAGNOSTIC_PUSH(-Wterminate)

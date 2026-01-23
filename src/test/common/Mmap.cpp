@@ -1,5 +1,6 @@
 #include "common/runtime/Mmap.hpp"
 #include <gtest/gtest.h>
+#include <cstdint>
 
 using namespace runtime;
 
