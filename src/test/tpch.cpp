@@ -104,7 +104,7 @@ TEST(TPCH, q1) {
 
    Database& tpch = TPCH::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       // run queries
       auto result = q1_hyper(tpch, threads);
@@ -143,7 +143,7 @@ TEST(TPCH, q3) {
    };
    Database& tpch = TPCH::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       // run queries
       auto result = q3_hyper(tpch, threads);
@@ -174,7 +174,7 @@ TEST(TPCH, q5) {
 
    Database& tpch = TPCH::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
 
    auto checkResult = [&](BlockRelation* result) {
       size_t found = 0;
@@ -208,7 +208,7 @@ TEST(TPCH, q6) {
    configFromEnv();
    Database& tpch = TPCH::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    auto expected = types::Numeric<12, 4>::castString("123141078.2283");
    {
       // run queries
@@ -258,7 +258,7 @@ TEST(TPCH, q9) {
    };
    Database& tpch = TPCH::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       // run queries
       auto result = q9_hyper(tpch, threads);
@@ -330,7 +330,7 @@ TEST(TPCH, q18) {
 
    Database& tpch = TPCH::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    // {
    //   auto result = q18group_vectorwise(tpch, threads, vectorSize);
    //   printResult(result->result.get());

@@ -54,7 +54,7 @@ TEST(SSB, q11) {
       };
       EXPECT_EQ(found, size_t(1));
    };
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q11_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -84,7 +84,7 @@ TEST(SSB, q12) {
       };
       EXPECT_EQ(found, size_t(1));
    };
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q12_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -114,7 +114,7 @@ TEST(SSB, q13) {
       };
       EXPECT_EQ(found, size_t(1));
    };
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q13_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -153,7 +153,7 @@ TEST(SSB, q21) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q21_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -192,7 +192,7 @@ TEST(SSB, q22) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q22_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -231,7 +231,7 @@ TEST(SSB, q23) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q23_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -276,7 +276,7 @@ TEST(SSB, q31) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q31_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -320,7 +320,7 @@ TEST(SSB, q32) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q32_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -364,7 +364,7 @@ TEST(SSB, q33) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q33_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -408,7 +408,7 @@ TEST(SSB, q34) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q34_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -448,7 +448,7 @@ TEST(SSB, q41) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q41_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -493,7 +493,7 @@ TEST(SSB, q42) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q42_hyper(tpch, threads);
       checkResult(result->result.get());
@@ -536,7 +536,7 @@ TEST(SSB, q43) {
 
    Database& tpch = SSB::getDB();
    auto threads = getThreads();
-   tbb::task_scheduler_init scheduler(threads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, threads);
    {
       auto result = ssb::q43_hyper(tpch, threads);
       checkResult(result->result.get());

@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
           insert_iterator<decltype(q)>(q, q.begin()));
    }
 
-   tbb::task_scheduler_init scheduler(nrThreads);
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
    if (q.count("1.1h")) e.timeAndProfile("q1.1 hyper     ", nrTuples(ssb, {"date", "lineorder"}), [&]() { if(clearCaches) clearOsCaches(); auto result = q11_hyper(ssb, nrThreads); escape(&result);}, repetitions);
    if (q.count("1.1v")) e.timeAndProfile("q1.1 vectorwise", nrTuples(ssb, {"date", "lineorder"}), [&]() { if(clearCaches) clearOsCaches(); auto result = q11_vectorwise(ssb, nrThreads, vectorSize); escape(&result);}, repetitions);
    if (q.count("1.2h")) e.timeAndProfile("q1.2 hyper     ", nrTuples(ssb, {"date", "lineorder"}), [&]() { if(clearCaches) clearOsCaches(); auto result = q12_hyper(ssb, nrThreads); escape(&result);}, repetitions);

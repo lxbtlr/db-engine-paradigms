@@ -71,8 +71,8 @@ int main(int argc, char* argv[]) {
       copy(istream_iterator<string>(iss), istream_iterator<string>(),
            insert_iterator<decltype(q)>(q, q.begin()));
    }
+   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
 
-   tbb::task_scheduler_init scheduler(nrThreads);
    if (q.count("1h"))
       e.timeAndProfile("q1 hyper     ", nrTuples(tpch, {"lineitem"}),
                        [&]() {
@@ -187,6 +187,5 @@ int main(int argc, char* argv[]) {
              escape(&result);
           },
           repetitions);
-   scheduler.terminate();
    return 0;
 }
