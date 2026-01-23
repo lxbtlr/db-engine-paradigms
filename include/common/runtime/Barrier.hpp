@@ -30,9 +30,21 @@ class Barrier {
       } else {
          while (round == prevRound) {
             // wait until barrier is ready for re-use
-            asm("pause");
-            asm("pause");
-            asm("pause");
+	    #if defined(__x86_64__) || defined(_M_X64)
+            	asm("pause");
+            	asm("pause");
+            	asm("pause");
+	    #elif defined(__arm__) || defined(__aarch64__)
+		// asm volatile("yield" ::: "memory"); // ARM equivalent
+		// asm volatile("yield" ::: "memory"); // ARM equivalent
+		// asm volatile("yield" ::: "memory"); // ARM equivalent
+						    
+		asm("yield"); // ARM equivalent
+		asm("yield"); // ARM equivalent
+		asm("yield"); // ARM equivalent
+	    #else
+		  // Fallback for other architectures
+	    #endif
          }
          return false;
       }
