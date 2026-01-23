@@ -1,11 +1,47 @@
 #pragma once
+
+#ifndef SIMDE_ENABLE_NATIVE_ALIASES
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#endif
+
+#include <simde/x86/avx512.h>
+#include <simde/simde-common.h>
+
+// --- Forward Declarations for G++ Template Lookup ---
+#if !defined(__x86_64__)
+extern "C" {
+    // We tell the compiler this function exists elsewhere (in SIMDe)
+    // This satisfies the "declaration must be available" error
+    simde__m512i simde_mm512_cvtepu32_epi64(simde__m256i a);
+}
+#define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
+#endif
+
 #include <algorithm>
-#include <immintrin.h>
 #include <iostream>
 #include <ostream>
 #include <vector>
 #include <cstdint>
 
+// --- Architecture Detection & SIMD Mapping ---
+#if defined(__x86_64__) && defined(__AVX512F__)
+    #include <immintrin.h>
+    using vec_reg_t = __m512i;
+    using mask8_t = __mmask8;
+    using mask16_t = __mmask16;
+#else
+    // Raspberry Pi / ARM Path
+    using vec_reg_t = simde__m512i;
+    using mask8_t = simde__mmask8;
+    using mask16_t = simde__mmask16;
+
+    // --- The Crucial Fix: Explicit Declaration ---
+    // This tells the compiler exactly what _mm512_cvtepu32_epi64 is 
+    // before Primitives.hpp tries to use it.
+    #if !defined(_mm512_cvtepu32_epi64)
+        #define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
+    #endif
+#endif
 struct Vec8u {
    union {
       __m512i reg;

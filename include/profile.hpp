@@ -16,9 +16,15 @@
 #ifdef __linux__
 #include <asm/unistd.h>
 #include <linux/perf_event.h>
-extern "C" {
-#include "jevents.h"
-}
+  #if defined(__x86_64__) || defined(__i386__)
+    extern "C" {
+    #include "jevents.h"
+    }
+  #else
+    // Dummy functions for ARM/Raspberry Pi
+    inline char* get_cpu_str() { return (char*)"generic-arm"; }
+    inline int resolve_event(char* str, struct perf_event_attr* pe) { return -1; }
+  #endif
 #endif
 
 #define GLOBAL 1

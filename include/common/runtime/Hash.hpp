@@ -4,7 +4,26 @@
 #include "common/defs.hpp"
 #include "common/runtime/SIMD.hpp"
 #include "common/runtime/Types.hpp"
-#include <x86intrin.h>
+
+// --- Architecture Detection & SIMD Mapping ---
+#if defined(__x86_64__) && defined(__AVX512F__)
+    #include <immintrin.h>
+    using vec_reg_t = __m512i;
+    using mask8_t = __mmask8;
+    using mask16_t = __mmask16;
+#else
+    // Raspberry Pi / ARM Path
+    using vec_reg_t = simde__m512i;
+    using mask8_t = simde__mmask8;
+    using mask16_t = simde__mmask16;
+
+    // --- The Crucial Fix: Explicit Declaration ---
+    // This tells the compiler exactly what _mm512_cvtepu32_epi64 is 
+    // before Primitives.hpp tries to use it.
+    #if !defined(_mm512_cvtepu32_epi64)
+        #define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
+    #endif
+#endif
 
 namespace runtime {
 
