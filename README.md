@@ -1,3 +1,22 @@
+# small-SWOLE testbench
+
+> now working on raspberry pi!
+
+Had to do some wonky stuff like:
+
+- Replaced Intel-specific AVX-512 headers with SIMDe to emulate 512-bit vectors using ARM NEON instructions.
+
+- Swapped the x86 pause assembly mnemonic for the ARM-compatible yield in synchronization primitives.
+
+- Disabled the jevents library (Intel PMU exclusive) and implemented a "dummy" fallback in profile.hpp to allow the performance suite to compile.
+
+- Updated tbb api calls to current oneTBB versions.
+
+- explicitly scoped types in querybuilder.hpp to prevent naming conflicts with member functions.
+
+# Original README below
+...
+
 # Database Engines: Vectorization vs. Compilation
 This repository contains a collection of experiments, conducted to carve out the differences between two types of query processing engines: Vectorizing (interpretation based) engines and compiling engines.
 
