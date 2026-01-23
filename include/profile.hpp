@@ -110,8 +110,8 @@ struct PerfEvents {
          add("l1-hits", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
              (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
-         add("stores", "cpu/mem-stores/");
-         add("loads", "cpu/mem-loads/");
+         //add("stores", "cpu/mem-stores/");
+         //add("loads", "cpu/mem-loads/");
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
       }
