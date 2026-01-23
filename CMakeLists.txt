@@ -122,8 +122,10 @@ include_directories(${TBB_INCLUDE_DIRS})
 
 
 IF(LINUX)
-  add_subdirectory(3rdparty/jevents)
-  set(JEVENTSLIB "jevents")
+  #add_subdirectory(3rdparty/jevents)
+  # set(JEVENTSLIB "jevents")
+
+  set(JEVENTSLIB "")
 ELSE(LINUX)
   set(JEVENTSLIB "")
 ENDIF(LINUX)
