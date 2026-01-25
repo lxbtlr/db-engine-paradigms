@@ -23,6 +23,16 @@
 
 - explicitly scoped types in querybuilder.hpp to prevent naming conflicts with member functions.
 
+### machine directory
+
+| machine   | architecture       | status | notes                                            |
+|-----------|--------------------|--------|--------------------------------------------------|
+| roquefort | AMD                | [ ]    | testing underway                                 |
+| raspi5    | AARCHv8            | [x]    | testing complete for sf=1                        |
+| burrata   | (arm64)  AARCHv8.2 | [x]    | already up and running, q6_hyper is questionable |
+| dubliner? | x86\_64            | [ ]    | look for newer machine                           |
+
+
 # Original README below
 ...
 
