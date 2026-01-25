@@ -2,11 +2,20 @@
 
 > now working on raspberry pi!
 
-Had to do some wonky stuff like:
+### notes 
 
-- Replaced Intel-specific AVX-512 headers with SIMDe to emulate 512-bit vectors using ARM NEON instructions.
+- Replaced Intel-specific AVX-512 headers with [SIMDe](https://github.com/simd-everywhere/simde#) to emulate 512-bit vectors using ARM NEON instructions. 
+  - NOTE: `simde` headers are typically not installed by default, using nix-env is an easy way to patch this. In the repo on the machine you want to set this up with use a 
+  ```bash
+  nix-env -iA nixpkgs.simde
+  ```
+  and make sure to add `.nix-profile/include` to your cmake `-DCMAKE_CXX_FLAGS`
 
-- Swapped the x86 pause assembly mnemonic for the ARM-compatible yield in synchronization primitives.
+- gtest wants a value assignment to prove the stack is growing the right direction (modern c++). Updating line 1006 in `googletest-src/googletest/src/gtest-death-test.cc` to `dummy=0` is an easy spot fix
+
+- make sure to copy the `tpch.makefile` to the tpch db-gen dir -- easy to make but lets be consistent / save some time.
+
+- Architecture aware spin loops / barriers (Swapped the x86 pause assembly mnemonic for the ARM-compatible yield in synchronization primitives).
 
 - Disabled the jevents library (Intel PMU exclusive) and implemented a "dummy" fallback in profile.hpp to allow the performance suite to compile.
 
