@@ -51,52 +51,6 @@ std::ostream& operator<<(std::ostream& out,const Integer& value)
    return out;
 }
 //---------------------------------------------------------------------------
-Integer Integer::castString(const char* str,uint32_t strLen)
-   // Cast a string to an integer value
-{
-   auto iter=str,limit=str+strLen;
-
-   // Trim WS
-   while ((iter!=limit)&&((*iter)==' ')) ++iter;
-   while ((iter!=limit)&&((*(limit-1))==' ')) --limit;
-
-   // Check for a sign
-   bool neg=false;
-   if (iter!=limit) {
-      if ((*iter)=='-') {
-         neg=true;
-         ++iter;
-      } else if ((*iter)=='+') {
-         ++iter;
-      }
-   }
-
-   // Parse
-   if (iter==limit)
-      throw "invalid number format: found non-integer characters";
-
-   int64_t result=0;
-   unsigned digitsSeen=0;
-   for (;iter!=limit;++iter) {
-      char c=*iter;
-      if ((c>='0')&&(c<='9')) {
-         result=(result*10)+(c-'0');
-         ++digitsSeen;
-      } else if (c=='.') {
-         break;
-      } else {
-         throw "invalid number format: invalid character in integer string";
-      }
-   }
-
-   if (digitsSeen>10)
-      throw "invalid number format: too many characters (32bit integers can at most consist of 10 numeric characters)";
-
-   Integer r;
-   r.value=neg?-result:result;
-   return r;
-}
-//---------------------------------------------------------------------------
 static const uint64_t msPerDay = 24*60*60*1000;
 //---------------------------------------------------------------------------
 static unsigned mergeTime(unsigned hour,unsigned minute,unsigned second,unsigned ms)
@@ -149,7 +103,8 @@ std::ostream& operator<<(std::ostream& out,const Date& value)
    return out << buffer;
 }
 //---------------------------------------------------------------------------
-Date Date::castString(std::string s){return castString(s.data(), s.size());}
+// Now in types header
+//Date Date::castString(std::string s){return castString(s.data(), s.size());}
 //---------------------------------------------------------------------------
 Date Date::castString(const char* str,uint32_t strLen)
    // Cast a string to a date
