@@ -13,18 +13,57 @@
 #include <unordered_map>
 #include <vector>
 
-#ifdef __linux__
+
 #include <asm/unistd.h>
 #include <linux/perf_event.h>
-  #if defined(__x86_64__) || defined(__i386__)
+#include <fstream>
+#include <string>
+#include <algorithm>
+
+// Comment out this next line if you ever successfully link the jevents library
+#define NO_JEVENTS 
+
+#if (defined(__x86_64__) || defined(__i386__)) && !defined(NO_JEVENTS)
     extern "C" {
     #include "jevents.h"
     }
-  #else
-    // Dummy functions for ARM/Raspberry Pi
-    inline char* get_cpu_str() { return (char*)"generic-arm"; }
-    inline int resolve_event(char* str, struct perf_event_attr* pe) { return -1; }
-  #endif
+#else
+    // This block now runs on ARM *OR* any machine where NO_JEVENTS is defined
+    extern "C" {
+        inline char* get_cpu_str() {
+            static char cpu_buffer[256] = "";
+            if (cpu_buffer[0] == '\0') {
+                std::ifstream file("/proc/cpuinfo");
+                bool found = false;
+                if (file.is_open()) {
+                    std::string line;
+                    while (std::getline(file, line)) {
+                        if (line.find("model name") != std::string::npos || 
+                            line.find("Model") != std::string::npos) {
+                            size_t pos = line.find(": ");
+                            if (pos != std::string::npos) {
+                                std::string model = line.substr(pos + 2);
+                                model.erase(std::find_if(model.rbegin(), model.rend(), [](unsigned char ch) {
+                                    return !std::isspace(ch);
+                                }).base(), model.end());
+                                snprintf(cpu_buffer, sizeof(cpu_buffer), "%s", model.c_str());
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    file.close();
+                }
+                if (!found) { snprintf(cpu_buffer, sizeof(cpu_buffer), "generic-processor-stub"); }
+            }
+            return cpu_buffer;
+        }
+
+        inline int resolve_event(const char* str, struct perf_event_attr* pe) { 
+            (void)str; (void)pe;
+            return -1; 
+        }
+    }
 #endif
 
 #define GLOBAL 1
