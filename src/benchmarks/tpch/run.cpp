@@ -13,6 +13,15 @@
 #include "common/runtime/Import.hpp"
 #include "profile.hpp"
 #include "tbb/tbb.h"
+#include <tbb/global_control.h>
+
+// NOTE: this was helpful for debuging, but breaks if we dont use the thread arg, disable for now
+// lets force this thing to use one thread
+//tbb::global_control control(
+//    tbb::global_control::max_allowed_parallelism, 1
+//);
+
+
 
 using namespace runtime;
 
@@ -54,6 +63,9 @@ int main(int argc, char* argv[]) {
    size_t vectorSize = 1024;
    bool clearCaches = false;
    if (argc > 3) nrThreads = atoi(argv[3]);
+
+   // lets inspect
+   printf("nrthreads:%ld\n",nrThreads);
 
    std::unordered_set<std::string> q = {"1h", "1v", "3h", "3v", "5h",  "5v",
                                         "6h", "6v", "9h", "9v", "18h", "18v"};
