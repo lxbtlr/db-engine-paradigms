@@ -30,10 +30,11 @@ EACH_TYPE(NIL, MK_REHASH)
 EACH_TYPE(NIL, MK_REHASH_SEL)
 
 // SIMD hashes
-#ifdef __AVX512F__
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 #if HASH_SIZE != 32
 
-#ifndef __AVX512DQ__
+
+#if defined(__AVX512Q__) || defined(SIMDE_X86_AVX512Q_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 static_assert(false, "On this platform only 32-bit hashes are supported.");
 #endif
 

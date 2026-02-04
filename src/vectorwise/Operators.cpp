@@ -222,7 +222,8 @@ pos_t Hashjoin::joinAllSIMD() {
 
    if (followup == followupWrite) {
 
-#ifdef __AVX512F__ // if AVX 512 available, use it!
+
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;
       auto ids =
@@ -514,7 +515,8 @@ pos_t Hashjoin::joinSelSIMD() {
 
    if (followup == followupWrite) {
 
-#ifdef __AVX512F__ // if AVX 512 available, use it!
+
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;
       auto ids =

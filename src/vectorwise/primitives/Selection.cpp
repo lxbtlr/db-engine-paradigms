@@ -71,8 +71,8 @@ template <typename T> struct Contains {
 F3 sel_contains_Varchar_55_col_Varchar_55_val =
     (F3)&sel_col_val<Varchar_55, Contains>;
 
-#ifdef __AVX512F__
 
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)    
 // #define PREFETCH(E) __builtin_prefetch(E);
 #define PREFETCH(E)
 
@@ -126,8 +126,7 @@ pos_t selsel_greater_equal_int32_t_col_int32_t_val_avx512_impl(
    return found;
 }
 
-#ifdef __AVX512VL__
-
+#if defined(__AVX512L__) || defined(SIMDE_X86_AVX512L_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
                                                       pos_t* RES result,
                                                       int64_t* RES param1,
