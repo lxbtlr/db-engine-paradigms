@@ -14,7 +14,16 @@
     #include <simde/x86/avx512/movm.h>     // for movm_epi32
 
     #ifndef _mm256_maskz_loadu_epi32
-    #define _mm256_maskz_loadu_epi32(k, mem_addr) simde_mm256_maskz_loadu_epi32(k, mem_addr)
+    #if defined(SIMDE_X86_AVX512VL_NATIVE) && defined(SIMDE_X86_AVX512F_NATIVE)
+        #define _mm256_maskz_loadu_epi32(k, mem_addr) _mm256_maskz_loadu_epi32(k, mem_addr)
+    #else
+        // Manual fallback using movm (vector mask)
+        static inline simde__m256i _mm256_maskz_loadu_epi32(simde__mmask8 k, void const* mem_addr) {
+            simde__m256i v = simde_mm256_loadu_si256((simde__m256i const*)mem_addr);
+            simde__m256i m = simde_mm256_movm_epi32(k);
+            return simde_mm256_and_si256(v, m);
+        }
+    #endif
     #endif
 
     // 2. Specific feature headers
