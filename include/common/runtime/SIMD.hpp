@@ -9,9 +9,13 @@
 #if !defined(__x86_64__)
     #include <simde/x86/avx512/types.h>
     #include <simde/x86/avx512/mov.h>      // Essential for maskz_loadu visibility
-    #include <simde/x86/avx512/vl.h>       // For 256-bit AVX512 intrinsics (maskz_loadu, etc)
     #include <simde/x86/avx512/setzero.h>
     #include <simde/x86/avx512/set.h>
+    #include <simde/x86/avx512/movm.h>     // for movm_epi32
+
+    #ifndef _mm256_maskz_loadu_epi32
+    #define _mm256_maskz_loadu_epi32(k, mem_addr) simde_mm256_maskz_loadu_epi32(k, mem_addr)
+    #endif
 
     // 2. Specific feature headers
     #include <simde/x86/avx512/loadu.h>    // Resolves _mm256_maskz_loadu_epi32
