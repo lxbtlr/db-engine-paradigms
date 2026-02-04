@@ -331,7 +331,7 @@ pos_t Hashjoin::joinAllSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            mask8_t hasNext = _mm512_mask_cmp_epi64_mask(
+            mask8_t hasNext = _mm512_mask_cmp_epu64_mask(
                 entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())), 4);
             if (hasNext) {
                // write pointers
@@ -625,7 +625,7 @@ pos_t Hashjoin::joinSelSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            mask8_t hasNext = _mm512_mask_cmp_epi64_mask(
+            mask8_t hasNext = _mm512_mask_cmp_epu64_mask(
                 entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())), 4);
             if (hasNext) {
                // write pointers
