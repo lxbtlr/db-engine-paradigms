@@ -34,7 +34,7 @@ EACH_TYPE(NIL, MK_REHASH_SEL)
 #if HASH_SIZE != 32
 
 
-#if defined(__AVX512Q__) || defined(SIMDE_X86_AVX512Q_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
+#if !defined(__AVX512F__) && !defined(SIMDE_ENABLE_NATIVE_ALIASES)
 static_assert(false, "On this platform only 32-bit hashes are supported.");
 #endif
 
@@ -47,6 +47,7 @@ F2 hash8_int64_t_col = (F2)&hash8<int64_t, DEFAULT_HASH>;
  * This variant is a workaround for bad code generation of gcc. It is semantically equivalent
  * to hash4_sel<int32_t, DEFAULT_HASH>
  */
+/*
 pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES input)
 /// compute hash for input column
 {
@@ -103,16 +104,17 @@ pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES i
   if(rest){
     __mmask16 remaining = (1 << rest) - 1;
     auto inSels = _mm256_loadu_si256((const __m256i *)(inSel + n - rest));//ignore mask here?
-    Vec8u in = _mm512_cvtepu32_epi64(_mm256_mmask_i32gather_epi32(inSels, remaining, inSels, input, 4));
+    Vec8u in = _mm512_cvtepu32_epi64(_mm256_mask_i32gather_epi32(inSels, remaining, inSels, input, 4));
     auto hashes = DEFAULT_HASH().hashKey(in, seeds);
     _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
+
   }
   return n;
-}
+} */
 
 F2 hash4_int32_t_col = (F2)&hash4<int32_t, DEFAULT_HASH>;
-// F3 hash4_sel_int32_t_col = (F3)&hash4_sel<int32_t, DEFAULT_HASH>;
-F3 hash4_sel_int32_t_col = (F3)&hash4_selASM;
+F3 hash4_sel_int32_t_col = (F3)&hash4_sel<int32_t, DEFAULT_HASH>;
+//F3 hash4_sel_int32_t_col = (F3)&hash4_selASM;
 F2 rehash4_int32_t_col = (F2)&rehash4<int32_t, DEFAULT_HASH>;
 F3 rehash4_sel_int32_t_col = (F3)&rehash4_sel<int32_t, DEFAULT_HASH>;
 

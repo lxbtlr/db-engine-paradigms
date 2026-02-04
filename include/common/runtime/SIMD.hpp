@@ -4,10 +4,25 @@
 #define SIMDE_ENABLE_NATIVE_ALIASES
 #endif
 
+// --- SIMDe Extension Headers ---
+// Provides maskz_loadu variants
+#if !defined(__x86_64__)
+    #include <simde/x86/avx512/types.h>
+    #include <simde/x86/avx512/mov.h>      // Essential for maskz_loadu visibility
+    #include <simde/x86/avx512/setzero.h>
+    #include <simde/x86/avx512/set.h>
+
+    // 2. Specific feature headers
+    #include <simde/x86/avx512/loadu.h>    // Resolves _mm256_maskz_loadu_epi32
+    #include <simde/x86/avx512/gather.h>   // Resolves i32gather
+    #include <simde/x86/avx512/cvt.h>      // Resolves _mm512_cvtepu32_epi64
+
+    // 3. Umbrella inclusion
+    #include <simde/x86/avx512.h>
+#endif
 #include <simde/x86/avx512.h>
 #include <simde/simde-common.h>
 
-// --- Forward Declarations for G++ Template Lookup ---
 #if !defined(__x86_64__)
 extern "C" {
     // We tell the compiler this function exists elsewhere (in SIMDe)
@@ -16,7 +31,6 @@ extern "C" {
 }
 #define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
 #endif
-
 #include <algorithm>
 #include <iostream>
 #include <ostream>
