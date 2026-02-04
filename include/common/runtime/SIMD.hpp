@@ -84,6 +84,23 @@
     #define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
     #endif
 
+    // 4. Comparison Aliases (Missing in some SIMDe builds)
+    #ifndef _mm512_cmplt_epi32_mask
+    #define _mm512_cmplt_epi32_mask(a, b) simde_mm512_cmp_epi32_mask(a, b, 1)
+    #endif
+    #ifndef _mm512_cmplt_epi64_mask
+    #define _mm512_cmplt_epi64_mask(a, b) simde_mm512_cmp_epi64_mask(a, b, 1)
+    #endif
+    #ifndef _mm512_cmpge_epi32_mask
+    #define _mm512_cmpge_epi32_mask(a, b) simde_mm512_cmp_epi32_mask(a, b, 5)
+    #endif
+
+    // 5. Gather Fallback (i32 indices -> 32-bit values)
+    #ifndef _mm512_i32gather_epi32
+    // If SIMDe has it, alias it. If not, map to standard AVX512 gather.
+    #define _mm512_i32gather_epi32(idx, base, scale) simde_mm512_i32gather_epi32(idx, base, scale)
+    #endif
+
     // 3. Gather Fallback (i32 indices -> 64-bit values)
     #ifndef _mm512_i32gather_epi64
     static inline simde__m512i _mm512_i32gather_epi64(simde__m256i idxs, void const* base_addr, int scale) {
