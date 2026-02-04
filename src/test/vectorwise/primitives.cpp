@@ -124,7 +124,7 @@ TEST(Partition, uint64_t) {
    for (auto& e : expectedGroupCounts) { ASSERT_EQ(e.second, size_t(0)); }
 }
 
-#ifdef __AVX512F__
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 using hash_t = defs::hash_t;
 TEST(Hash, SIMD32bits){
    // checks if scalar and simd variants generate the same hashes

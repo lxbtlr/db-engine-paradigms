@@ -74,8 +74,7 @@ EACH_ARITH(EACH_TYPE_FULL,
 EACH_ARITH_NON_COMM(EACH_TYPE_FULL, MK_PROJ_VALCOL)
 EACH_ARITH_NON_COMM(EACH_TYPE_FULL, MK_PROJ_SEL_VALCOL)
 
-
-#ifdef __AVX512F__
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 
 pos_t proj_sel8_minus_int64_t_val_int64_t_col_impl(pos_t n, pos_t* RES inSel, int64_t* RES result, int64_t* RES param1,
                                               int64_t* RES param2){
@@ -117,7 +116,7 @@ F4 proj_sel8_plus_int64_t_col_int64_t_val = (F4)&proj_sel8_plus_int64_t_col_int6
 #endif
 
 
-#ifdef __AVX512DQ__
+#if defined(__AVX512Q__) || defined(SIMDE_X86_AVX512Q_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 pos_t proj8_multiplies_int64_t_col_int64_t_col_impl(pos_t n, int64_t* RES result,
                                               int64_t* RES param1, int64_t* RES param2){
   size_t rest = n % 8;
