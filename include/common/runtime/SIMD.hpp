@@ -4,72 +4,6 @@
 #define SIMDE_ENABLE_NATIVE_ALIASES
 #endif
 
-// --- SIMDe Extension Headers ---
-// Provides maskz_loadu variants
-#if !defined(__x86_64__)
-    #include <simde/x86/avx512/types.h>
-    #include <simde/x86/avx512/mov.h>      // Essential for maskz_loadu visibility
-    #include <simde/x86/avx512/setzero.h>
-    #include <simde/x86/avx512/set.h>
-    #include <simde/x86/avx512/movm.h>     // for movm_epi32
-
-    #ifndef _mm256_maskz_loadu_epi32
-    #if defined(SIMDE_X86_AVX512VL_NATIVE) && defined(SIMDE_X86_AVX512F_NATIVE)
-        #define _mm256_maskz_loadu_epi32(k, mem_addr) _mm256_maskz_loadu_epi32(k, mem_addr)
-    #else
-        // Manual fallback using movm (vector mask)
-        static inline simde__m256i _mm256_maskz_loadu_epi32(simde__mmask8 k, void const* mem_addr) {
-            simde__m256i v = simde_mm256_loadu_si256((simde__m256i const*)mem_addr);
-            simde__m256i m = simde_mm256_movm_epi32(k);
-            return simde_mm256_and_si256(v, m);
-        }
-    #endif
-    #endif
-
-    // 2. Specific feature headers
-    #include <simde/x86/avx512/loadu.h>    // Resolves _mm256_maskz_loadu_epi32
-    #include <simde/x86/avx512/gather.h>   // Resolves i32gather
-    #include <simde/x86/avx512/cvt.h>      // Resolves _mm512_cvtepu32_epi64
-
-// Manual implementation of _mm512_cvtepi32_epi64 (Signed 32->64 ext)
-static inline simde__m512i simde_mm512_cvtepi32_epi64(simde__m256i a) {
-    simde__m128i lo = simde_mm256_castsi256_si128(a);
-    simde__m128i hi = simde_mm256_extracti128_si256(a, 1);
-    simde__m256i lo64 = simde_mm256_cvtepi32_epi64(lo);
-    simde__m256i hi64 = simde_mm256_cvtepi32_epi64(hi);
-    // Combine into 512
-    simde__m512i res = simde_mm512_setzero_si512();
-    res = simde_mm512_inserti64x4(res, lo64, 0);
-    res = simde_mm512_inserti64x4(res, hi64, 1);
-    return res;
-}
-
-// Manual implementation of _mm512_cvtepu32_epi64 (Unsigned 32->64 ext)
-static inline simde__m512i simde_mm512_cvtepu32_epi64(simde__m256i a) {
-    simde__m128i lo = simde_mm256_castsi256_si128(a);
-    simde__m128i hi = simde_mm256_extracti128_si256(a, 1);
-    simde__m256i lo64 = simde_mm256_cvtepu32_epi64(lo);
-    simde__m256i hi64 = simde_mm256_cvtepu32_epi64(hi);
-    simde__m512i res = simde_mm512_setzero_si512();
-    res = simde_mm512_inserti64x4(res, lo64, 0);
-    res = simde_mm512_inserti64x4(res, hi64, 1);
-    return res;
-}
-
-#define _mm512_cvtepi32_epi64(a) simde_mm512_cvtepi32_epi64(a)
-#define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
-
-    #ifndef _mm512_i32gather_epi64
-    // Manual fallback: Upcast indices to 64-bit and use i64gather
-    static inline simde__m512i _mm512_i32gather_epi64(simde__m256i idxs, void const* base_addr, int scale) {
-        simde__m512i idxs64 = simde_mm512_cvtepi32_epi64(idxs);
-        return simde_mm512_i64gather_epi64(idxs64, base_addr, scale);
-    }
-    #endif
-
-#define _mm512_cvtepi32_epi64(a) simde_mm512_cvtepi32_epi64(a)
-#define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
-#endif
 #include <algorithm>
 #include <iostream>
 #include <ostream>
@@ -78,6 +12,7 @@ static inline simde__m512i simde_mm512_cvtepu32_epi64(simde__m256i a) {
 
 // --- Architecture Detection & SIMD Mapping ---
 #if defined(__x86_64__) && defined(__AVX512F__)
+    // Native AVX512 Path
     #include <immintrin.h>
     using vec_reg_t = __m512i;
     using mask8_t = __mmask8;
@@ -85,19 +20,79 @@ static inline simde__m512i simde_mm512_cvtepu32_epi64(simde__m256i a) {
     using mask32_t = __mmask32;
     using mask64_t = __mmask64;
 #else
-    // Raspberry Pi / ARM Path
+    // SIMDe Path (ARM or x86_64 without AVX512)
+    #include <simde/x86/avx512.h>
+    #include <simde/simde-common.h>
+    // Specific feature headers for manual fixes/visibility
+    #include <simde/x86/avx512/types.h>
+    #include <simde/x86/avx512/mov.h>
+    #include <simde/x86/avx512/setzero.h>
+    #include <simde/x86/avx512/set.h>
+    #include <simde/x86/avx512/movm.h>
+    #include <simde/x86/avx512/loadu.h>
+    #include <simde/x86/avx512/gather.h>
+    #include <simde/x86/avx512/cvt.h>
+    #include <simde/x86/avx512/insert.h>
+
     using vec_reg_t = simde__m512i;
     using mask8_t = simde__mmask8;
     using mask16_t = simde__mmask16;
     using mask32_t = simde__mmask32;
     using mask64_t = simde__mmask64;
 
-    // --- The Crucial Fix: Explicit Declaration ---
-    // This tells the compiler exactly what _mm512_cvtepu32_epi64 is 
-    // before Primitives.hpp tries to use it.
-    #if !defined(_mm512_cvtepu32_epi64)
-        #define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
+    // --- Manual Polyfills for missing intrinsics in older SIMDe ---
+
+    // 1. _mm256_maskz_loadu_epi32
+    #ifndef _mm256_maskz_loadu_epi32
+    #if defined(SIMDE_X86_AVX512VL_NATIVE) && defined(SIMDE_X86_AVX512F_NATIVE)
+        #define _mm256_maskz_loadu_epi32(k, mem_addr) _mm256_maskz_loadu_epi32(k, mem_addr)
+    #else
+        static inline simde__m256i _mm256_maskz_loadu_epi32(simde__mmask8 k, void const* mem_addr) {
+            simde__m256i v = simde_mm256_loadu_si256((simde__m256i const*)mem_addr);
+            simde__m256i m = simde_mm256_movm_epi32(k);
+            return simde_mm256_and_si256(v, m);
+        }
     #endif
+    #endif
+
+    // 2. Conversion Intrinsics (Signed/Unsigned 32->64)
+    #if !defined(_mm512_cvtepi32_epi64)
+    static inline simde__m512i simde_mm512_cvtepi32_epi64(simde__m256i a) {
+        simde__m128i lo = simde_mm256_castsi256_si128(a);
+        simde__m128i hi = simde_mm256_extracti128_si256(a, 1);
+        simde__m256i lo64 = simde_mm256_cvtepi32_epi64(lo);
+        simde__m256i hi64 = simde_mm256_cvtepi32_epi64(hi);
+        simde__m512i res = simde_mm512_setzero_si512();
+        res = simde_mm512_inserti64x4(res, lo64, 0);
+        res = simde_mm512_inserti64x4(res, hi64, 1);
+        return res;
+    }
+    #define _mm512_cvtepi32_epi64(a) simde_mm512_cvtepi32_epi64(a)
+    #endif
+
+    #if !defined(_mm512_cvtepu32_epi64)
+    static inline simde__m512i simde_mm512_cvtepu32_epi64(simde__m256i a) {
+        simde__m128i lo = simde_mm256_castsi256_si128(a);
+        simde__m128i hi = simde_mm256_extracti128_si256(a, 1);
+        simde__m256i lo64 = simde_mm256_cvtepu32_epi64(lo);
+        simde__m256i hi64 = simde_mm256_cvtepu32_epi64(hi);
+        simde__m512i res = simde_mm512_setzero_si512();
+        res = simde_mm512_inserti64x4(res, lo64, 0);
+        res = simde_mm512_inserti64x4(res, hi64, 1);
+        return res;
+    }
+    #define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
+    #endif
+
+    // 3. Gather Fallback (i32 indices -> 64-bit values)
+    #ifndef _mm512_i32gather_epi64
+    static inline simde__m512i _mm512_i32gather_epi64(simde__m256i idxs, void const* base_addr, int scale) {
+        simde__m512i idxs64 = simde_mm512_cvtepi32_epi64(idxs);
+        // Note: i64gather usage requires checking if headers define it properly
+        return simde_mm512_i64gather_epi64(idxs64, base_addr, scale);
+    }
+    #endif
+
 #endif
 
 // --- Vec8u (64-bit elements x 8) ---
