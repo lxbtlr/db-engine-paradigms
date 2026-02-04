@@ -245,7 +245,7 @@ pos_t Hashjoin::joinAllSIMD() {
              nullptr, 1);
          {
             // Check if hashes match
-            __mmask8 hashesEq = _mm512_mask_cmpeq_epi32_mask(
+            mask8_t hashesEq = _mm512_mask_cmpeq_epi32_mask(
                 entries.mask, _mm512_castsi256_si512(entryHashes),
                 _mm512_castsi256_si512(hashDense));
             // write pointers
@@ -269,7 +269,7 @@ pos_t Hashjoin::joinAllSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(
+            mask8_t hasNext = _mm512_mask_cmpneq_epi64_mask(
                 entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())));
             if (hasNext) {
                // write pointers
@@ -308,7 +308,7 @@ pos_t Hashjoin::joinAllSIMD() {
              nullptr, 1);
          {
             // Check if hashes match
-            __mmask8 hashesEq =
+            mask8_t hashesEq =
                 _mm512_mask_cmpeq_epi64_mask(entries.mask, entryHashes, hashes);
             // write pointers
             _mm512_mask_compressstoreu_epi64(buildMatches + found, hashesEq,
@@ -331,7 +331,7 @@ pos_t Hashjoin::joinAllSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(
+            mask8_t hasNext = _mm512_mask_cmpneq_epi64_mask(
                 entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())));
             if (hasNext) {
                // write pointers
@@ -538,7 +538,7 @@ pos_t Hashjoin::joinSelSIMD() {
                                                         hashPtrs, nullptr, 1);
          {
             // Check if hashes match
-            __mmask8 hashesEq = _mm512_mask_cmpeq_epi32_mask(
+            mask8_t hashesEq = _mm512_mask_cmpeq_epi32_mask(
                 entries.mask, _mm512_castsi256_si512(entryHashes),
                 _mm512_castsi256_si512(hashDense));
             // write pointers
@@ -563,7 +563,7 @@ pos_t Hashjoin::joinSelSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(
+            mask8_t hasNext = _mm512_mask_cmpneq_epi64_mask(
                 entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())));
             if (hasNext) {
                // write pointers
@@ -601,7 +601,7 @@ pos_t Hashjoin::joinSelSIMD() {
                                                          hashPtrs, nullptr, 1);
          {
             // Check if hashes match
-            __mmask8 hashesEq =
+            mask8_t hashesEq =
                 _mm512_mask_cmpeq_epi64_mask(entries.mask, entryHashes, hashes);
             // write pointers
             _mm512_mask_compressstoreu_epi64(buildMatches + found, hashesEq,
@@ -625,7 +625,7 @@ pos_t Hashjoin::joinSelSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(
+            mask8_t hasNext = _mm512_mask_cmpneq_epi64_mask(
                 entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())));
             if (hasNext) {
                // write pointers

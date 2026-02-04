@@ -109,7 +109,7 @@ pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES i
       "zmm14", "zmm15","zmm16","zmm17");
 
   if(rest){
-    __mmask16 remaining = (1 << rest) - 1;
+    mask16_t remaining = (1 << rest) - 1;
     auto inSels = _mm256_loadu_si256((const __m256i *)(inSel + n - rest));//ignore mask here?
     Vec8u in = _mm512_cvtepu32_epi64(_mm256_mask_i32gather_epi32(inSels, remaining, inSels, input, 4));
     auto hashes = DEFAULT_HASH().hashKey(in, seeds);

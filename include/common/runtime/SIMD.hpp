@@ -43,11 +43,15 @@ extern "C" {
     using vec_reg_t = __m512i;
     using mask8_t = __mmask8;
     using mask16_t = __mmask16;
+    using mask32_t = __mmask32;
+    using mask64_t = __mmask64;
 #else
     // Raspberry Pi / ARM Path
     using vec_reg_t = simde__m512i;
     using mask8_t = simde__mmask8;
     using mask16_t = simde__mmask16;
+    using mask32_t = simde__mmask32;
+    using mask64_t = simde__mmask64;
 
     // --- The Crucial Fix: Explicit Declaration ---
     // This tells the compiler exactly what _mm512_cvtepu32_epi64 is 

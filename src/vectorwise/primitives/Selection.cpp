@@ -89,7 +89,7 @@ pos_t sel_less_int32_t_col_int32_t_val_avx512_impl(pos_t n, pos_t* RES result,
    auto consts = _mm512_set1_epi32(con);
    for (uint64_t i = 0; i < n - rest; i += 16) {
       Vec8u in(param1 + i);
-      __mmask16 less = _mm512_cmplt_epi32_mask(in, consts);
+      mask16_t less = _mm512_cmplt_epi32_mask(in, consts);
       _mm512_mask_compressstoreu_epi32(result + found, less, ids);
       found += __builtin_popcount(less);
       ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
@@ -115,7 +115,7 @@ pos_t selsel_greater_equal_int32_t_col_int32_t_val_avx512_impl(
       Vec8u idxs(inSel + i);
       auto in = _mm512_i32gather_epi32(idxs, param1, 4);
       PREFETCH(&param1[inSel[i + lead]]);
-      __mmask16 ge = _mm512_cmpge_epi32_mask(in, consts);
+      mask16_t ge = _mm512_cmpge_epi32_mask(in, consts);
       _mm512_mask_compressstoreu_epi32(result + found, ge, idxs);
       found += __builtin_popcount(ge);
    }
@@ -142,7 +142,7 @@ pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
       auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i));
       auto in = _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
       PREFETCH(&param1[inSel[i + lead]]);
-      __mmask8 less = _mm512_cmplt_epi64_mask(in, consts);
+      mask8_t less = _mm512_cmplt_epi64_mask(in, consts);
       _mm256_mask_compressstoreu_epi32(result + found, less, idxs);
       found += __builtin_popcount(less);
    }
@@ -167,7 +167,7 @@ pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
       auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i));
       auto in = _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
       PREFETCH(&param1[inSel[i + lead]]);
-      __mmask8 less = _mm512_cmpge_epi64_mask(in, consts);
+      mask8_t less = _mm512_cmpge_epi64_mask(in, consts);
       _mm256_mask_compressstoreu_epi32(result + found, less, idxs);
       found += __builtin_popcount(less);
    }
@@ -192,7 +192,7 @@ pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
       auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i));
       auto in = _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
       PREFETCH(&param1[inSel[i + lead]]);
-      __mmask8 less = _mm512_cmple_epi64_mask(in, consts);
+      mask8_t less = _mm512_cmple_epi64_mask(in, consts);
       _mm256_mask_compressstoreu_epi32(result + found, less, idxs);
       found += __builtin_popcount(less);
    }
@@ -217,19 +217,19 @@ pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
    auto con = *param2;
    auto consts = _mm512_set1_epi64(con);
    for (uint64_t i = 0; i < n - rest; i += 16) {
-      __mmask16 l = 0;
+      mask16_t l = 0;
       {
          auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i));
          auto in =
              _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
-         __mmask8 less = _mm512_cmplt_epi64_mask(in, consts);
+         mask8_t less = _mm512_cmplt_epi64_mask(in, consts);
          l = less;
       }
       {
          auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i + 8));
          auto in =
              _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
-         __mmask8 less = _mm512_cmplt_epi64_mask(in, consts);
+         mask8_t less = _mm512_cmplt_epi64_mask(in, consts);
          l |= less << 8;
       }
 
@@ -255,19 +255,19 @@ pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
    auto con = *param2;
    auto consts = _mm512_set1_epi64(con);
    for (uint64_t i = 0; i < n - rest; i += 16) {
-      __mmask16 l;
+      mask16_t l;
       {
          auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i));
          auto in =
              _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
-         __mmask8 less = _mm512_cmpge_epi64_mask(in, consts);
+         mask8_t less = _mm512_cmpge_epi64_mask(in, consts);
          l = less;
       }
       {
          auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i + 8));
          auto in =
              _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
-         __mmask16 less = _mm512_cmpge_epi64_mask(in, consts);
+         mask16_t less = _mm512_cmpge_epi64_mask(in, consts);
          l |= less << 8;
       }
       _mm512_mask_compressstoreu_epi32(result + found, l,
@@ -292,13 +292,13 @@ pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
    auto con = *param2;
    auto consts = _mm512_set1_epi64(con);
    for (uint64_t i = 0; i < n - rest; i += 16) {
-      __mmask16 l = 0;
+      mask16_t l = 0;
 
       {
          auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i));
          auto in =
              _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
-         __mmask8 less = _mm512_cmple_epi64_mask(in, consts);
+         mask8_t less = _mm512_cmple_epi64_mask(in, consts);
          l = less;
       }
 
@@ -306,7 +306,7 @@ pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
          auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i + 8));
          auto in =
              _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
-         __mmask16 less = _mm512_cmple_epi64_mask(in, consts);
+         mask16_t less = _mm512_cmple_epi64_mask(in, consts);
          l |= less << 8;
       }
 
