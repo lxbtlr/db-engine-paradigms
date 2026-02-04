@@ -9,7 +9,7 @@
   #include <x86intrin.h>
 #else
   #define SIMDE_ENABLE_NATIVE_ALIASES
-  #include <simde/x86/avx512.h> // Or whichever level the project requires
+  #include <simde/x86/avx512.h>
 #endif
 
 

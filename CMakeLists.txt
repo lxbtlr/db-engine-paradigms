@@ -119,6 +119,7 @@ ENDIF(DATADIR)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/3rdparty/")
 find_package(TBB)
 include_directories(${TBB_INCLUDE_DIRS})
+include_directories("3rdparty/simde")
 
 
 IF(LINUX)
