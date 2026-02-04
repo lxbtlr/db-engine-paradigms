@@ -9,6 +9,7 @@
 #if !defined(__x86_64__)
     #include <simde/x86/avx512/types.h>
     #include <simde/x86/avx512/mov.h>      // Essential for maskz_loadu visibility
+    #include <simde/x86/avx512/vl.h>       // For 256-bit AVX512 intrinsics (maskz_loadu, etc)
     #include <simde/x86/avx512/setzero.h>
     #include <simde/x86/avx512/set.h>
 
