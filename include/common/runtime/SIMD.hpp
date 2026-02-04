@@ -31,6 +31,14 @@
     #include <simde/x86/avx512/gather.h>   // Resolves i32gather
     #include <simde/x86/avx512/cvt.h>      // Resolves _mm512_cvtepu32_epi64
 
+    #ifndef _mm512_i32gather_epi64
+    // Manual fallback: Upcast indices to 64-bit and use i64gather
+    static inline simde__m512i _mm512_i32gather_epi64(simde__m256i idxs, void const* base_addr, int scale) {
+        simde__m512i idxs64 = simde_mm512_cvtepi32_epi64(idxs);
+        return simde_mm512_i64gather_epi64(idxs64, base_addr, scale);
+    }
+    #endif
+
     // 3. Umbrella inclusion
     #include <simde/x86/avx512.h>
 #endif
