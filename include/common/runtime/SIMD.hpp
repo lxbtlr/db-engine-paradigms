@@ -32,7 +32,8 @@
     #include <simde/x86/avx512/loadu.h>
     #include <simde/x86/avx512/gather.h>
     #include <simde/x86/avx512/cvt.h>
-    #include <simde/x86/avx512/insert.h>
+    #include <simde/x86/avx512/insert.h>   // Resolves simde_mm512_inserti64x4
+    #include <simde/x86/avx512/extract.h>  // Resolves simde_mm512_extracti64x4_epi64.h>
 
     using vec_reg_t = simde__m512i;
     using mask8_t = simde__mmask8;
@@ -97,8 +98,21 @@
 
     // 5. Gather Fallback (i32 indices -> 32-bit values)
     #ifndef _mm512_i32gather_epi32
-    // If SIMDe has it, alias it. If not, map to standard AVX512 gather.
-    #define _mm512_i32gather_epi32(idx, base, scale) simde_mm512_i32gather_epi32(idx, base, scale)
+    // Manual Split Implementation: 512 -> 2x256
+    static inline simde__m512i _mm512_i32gather_epi32(simde__m512i idxs, void const* base_addr, int scale) {
+        simde__m256i idx_lo = simde_mm512_castsi512_si256(idxs);
+        // Extract high 256 bits. 0x1 selects the high half.
+        simde__m256i idx_hi = simde_mm512_extracti64x4_epi64(idxs, 1);
+        
+        // Note: _mm256_i32gather_epi32 signature is (base, index, scale)
+        simde__m256i res_lo = simde_mm256_i32gather_epi32((int const*)base_addr, idx_lo, scale);
+        simde__m256i res_hi = simde_mm256_i32gather_epi32((int const*)base_addr, idx_hi, scale);
+        
+        simde__m512i res = simde_mm512_setzero_si512();
+        res = simde_mm512_inserti64x4(res, res_lo, 0);
+        res = simde_mm512_inserti64x4(res, res_hi, 1);
+        return res;
+    }
     #endif
 
     // 3. Gather Fallback (i32 indices -> 64-bit values)
