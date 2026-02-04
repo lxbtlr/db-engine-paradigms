@@ -31,21 +31,6 @@
     #include <simde/x86/avx512/gather.h>   // Resolves i32gather
     #include <simde/x86/avx512/cvt.h>      // Resolves _mm512_cvtepu32_epi64
 
-    #ifndef _mm512_i32gather_epi64
-    // Manual fallback: Upcast indices to 64-bit and use i64gather
-    static inline simde__m512i _mm512_i32gather_epi64(simde__m256i idxs, void const* base_addr, int scale) {
-        simde__m512i idxs64 = simde_mm512_cvtepi32_epi64(idxs);
-        return simde_mm512_i64gather_epi64(idxs64, base_addr, scale);
-    }
-    #endif
-
-    // 3. Umbrella inclusion
-    #include <simde/x86/avx512.h>
-#endif
-#include <simde/x86/avx512.h>
-#include <simde/simde-common.h>
-
-#if !defined(__x86_64__)
 // Manual implementation of _mm512_cvtepi32_epi64 (Signed 32->64 ext)
 static inline simde__m512i simde_mm512_cvtepi32_epi64(simde__m256i a) {
     simde__m128i lo = simde_mm256_castsi256_si128(a);
@@ -70,6 +55,17 @@ static inline simde__m512i simde_mm512_cvtepu32_epi64(simde__m256i a) {
     res = simde_mm512_inserti64x4(res, hi64, 1);
     return res;
 }
+
+#define _mm512_cvtepi32_epi64(a) simde_mm512_cvtepi32_epi64(a)
+#define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
+
+    #ifndef _mm512_i32gather_epi64
+    // Manual fallback: Upcast indices to 64-bit and use i64gather
+    static inline simde__m512i _mm512_i32gather_epi64(simde__m256i idxs, void const* base_addr, int scale) {
+        simde__m512i idxs64 = simde_mm512_cvtepi32_epi64(idxs);
+        return simde_mm512_i64gather_epi64(idxs64, base_addr, scale);
+    }
+    #endif
 
 #define _mm512_cvtepi32_epi64(a) simde_mm512_cvtepi32_epi64(a)
 #define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
