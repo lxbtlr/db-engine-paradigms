@@ -46,11 +46,32 @@
 #include <simde/simde-common.h>
 
 #if !defined(__x86_64__)
-extern "C" {
-    // We tell the compiler this function exists elsewhere (in SIMDe)
-    // This satisfies the "declaration must be available" error
-    simde__m512i simde_mm512_cvtepu32_epi64(simde__m256i a);
+// Manual implementation of _mm512_cvtepi32_epi64 (Signed 32->64 ext)
+static inline simde__m512i simde_mm512_cvtepi32_epi64(simde__m256i a) {
+    simde__m128i lo = simde_mm256_castsi256_si128(a);
+    simde__m128i hi = simde_mm256_extracti128_si256(a, 1);
+    simde__m256i lo64 = simde_mm256_cvtepi32_epi64(lo);
+    simde__m256i hi64 = simde_mm256_cvtepi32_epi64(hi);
+    // Combine into 512
+    simde__m512i res = simde_mm512_setzero_si512();
+    res = simde_mm512_inserti64x4(res, lo64, 0);
+    res = simde_mm512_inserti64x4(res, hi64, 1);
+    return res;
 }
+
+// Manual implementation of _mm512_cvtepu32_epi64 (Unsigned 32->64 ext)
+static inline simde__m512i simde_mm512_cvtepu32_epi64(simde__m256i a) {
+    simde__m128i lo = simde_mm256_castsi256_si128(a);
+    simde__m128i hi = simde_mm256_extracti128_si256(a, 1);
+    simde__m256i lo64 = simde_mm256_cvtepu32_epi64(lo);
+    simde__m256i hi64 = simde_mm256_cvtepu32_epi64(hi);
+    simde__m512i res = simde_mm512_setzero_si512();
+    res = simde_mm512_inserti64x4(res, lo64, 0);
+    res = simde_mm512_inserti64x4(res, hi64, 1);
+    return res;
+}
+
+#define _mm512_cvtepi32_epi64(a) simde_mm512_cvtepi32_epi64(a)
 #define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
 #endif
 #include <algorithm>
