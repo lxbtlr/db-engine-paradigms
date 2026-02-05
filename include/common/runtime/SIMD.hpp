@@ -104,9 +104,31 @@
         // Extract high 256 bits. 0x1 selects the high half.
         simde__m256i idx_hi = simde_mm512_extracti64x4_epi64(idxs, 1);
         
-        // Note: _mm256_i32gather_epi32 signature is (base, index, scale)
-        simde__m256i res_lo = simde_mm256_i32gather_epi32((int const*)base_addr, idx_lo, scale);
-        simde__m256i res_hi = simde_mm256_i32gather_epi32((int const*)base_addr, idx_hi, scale);
+        simde__m256i res_lo, res_hi;
+
+        switch (scale) {
+            case 1:
+                res_lo = simde_mm256_i32gather_epi32((int const*)base_addr, idx_lo, 1);
+                res_hi = simde_mm256_i32gather_epi32((int const*)base_addr, idx_hi, 1);
+                break;
+            case 2:
+                res_lo = simde_mm256_i32gather_epi32((int const*)base_addr, idx_lo, 2);
+                res_hi = simde_mm256_i32gather_epi32((int const*)base_addr, idx_hi, 2);
+                break;
+            case 4:
+                res_lo = simde_mm256_i32gather_epi32((int const*)base_addr, idx_lo, 4);
+                res_hi = simde_mm256_i32gather_epi32((int const*)base_addr, idx_hi, 4);
+                break;
+            case 8:
+                res_lo = simde_mm256_i32gather_epi32((int const*)base_addr, idx_lo, 8);
+                res_hi = simde_mm256_i32gather_epi32((int const*)base_addr, idx_hi, 8);
+                break;
+            default:
+                // Should not happen for valid gathers, but fallback or crash
+                res_lo = simde_mm256_setzero_si256();
+                res_hi = simde_mm256_setzero_si256();
+                break;
+        }
         
         simde__m512i res = simde_mm512_setzero_si512();
         res = simde_mm512_inserti64x4(res, res_lo, 0);
@@ -120,7 +142,13 @@
     static inline simde__m512i _mm512_i32gather_epi64(simde__m256i idxs, void const* base_addr, int scale) {
         simde__m512i idxs64 = simde_mm512_cvtepi32_epi64(idxs);
         // Note: i64gather usage requires checking if headers define it properly
-        return simde_mm512_i64gather_epi64(idxs64, base_addr, scale);
+        switch (scale) {
+            case 1: return simde_mm512_i64gather_epi64(idxs64, base_addr, 1);
+            case 2: return simde_mm512_i64gather_epi64(idxs64, base_addr, 2);
+            case 4: return simde_mm512_i64gather_epi64(idxs64, base_addr, 4);
+            case 8: return simde_mm512_i64gather_epi64(idxs64, base_addr, 8);
+            default: return simde_mm512_setzero_si512();
+        }
     }
     #endif
 
