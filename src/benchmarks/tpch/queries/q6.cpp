@@ -10,56 +10,73 @@
 
 using namespace runtime;
 using namespace std;
+
+static constexpr bool DEBUG_Q6 = true;
+
 NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
    Relation result;
    result.insert("revenue", make_unique<algebra::Numeric>(12, 4));
 
-   // --- constants
-   auto c1 = types::Date::castString("1994-01-01");
-   auto c2 = types::Date::castString("1995-01-01");
-   auto c3 = types::Numeric<12, 2>::castString("0.05");
-   auto c4 = types::Numeric<12, 2>::castString("0.07");
-   auto c5 = types::Integer(24);
-
-   // --- aggregates
-   types::Numeric<12, 4> revenue = 0;
-
-   // --- scan
    auto& rel = db["lineitem"];
-   auto l_shipdate_col = rel["l_shipdate"].data<types::Date>();
-   auto l_quantity_col = rel["l_quantity"].data<types::Numeric<12, 2>>();
-   auto l_extendedprice_col =
-       rel["l_extendedprice"].data<types::Numeric<12, 2>>();
-   auto l_discount_col = rel["l_discount"].data<types::Numeric<12, 2>>();
+   
+   auto* __restrict__ l_shipdate_raw = reinterpret_cast<const int32_t*>(rel["l_shipdate"].data<types::Date>());
+   auto* __restrict__ l_quantity_raw = reinterpret_cast<const int64_t*>(rel["l_quantity"].data<types::Numeric<12, 2>>());
+   auto* __restrict__ l_price_raw    = reinterpret_cast<const int64_t*>(rel["l_extendedprice"].data<types::Numeric<12, 2>>());
+   auto* __restrict__ l_discount_raw = reinterpret_cast<const int64_t*>(rel["l_discount"].data<types::Numeric<12, 2>>());
+   
+   int32_t c1_v = types::Date::castString("1994-01-01").value;
+   int32_t c2_v = types::Date::castString("1995-01-01").value;
+   int64_t c3_v = types::Numeric<12, 2>::castString("0.05").value;
+   int64_t c4_v = types::Numeric<12, 2>::castString("0.07").value;
+   int64_t c5_v = 24*100; // quantity < 24.00
 
-   revenue = tbb::parallel_reduce(
-       tbb::blocked_range<size_t>(0, rel.nrTuples), types::Numeric<12, 4>(0),
-       [&](const tbb::blocked_range<size_t>& r,
-           const types::Numeric<12, 4>& s) {
-          auto revenue = s;
-          for (size_t i = r.begin(), end = r.end(); i != end; ++i) {
-             auto& l_shipdate = l_shipdate_col[i];
-             auto& l_quantity = l_quantity_col[i];
-             auto& l_extendedprice = l_extendedprice_col[i];
-             auto& l_discount = l_discount_col[i];
+   types::Numeric<12, 4> total_revenue = tbb::parallel_reduce(
+       tbb::blocked_range<size_t>(0, rel.nrTuples),
+       types::Numeric<12, 4>(0),
+       [=](const tbb::blocked_range<size_t>& r, types::Numeric<12, 4> revenue) {
+           int64_t local_acc = revenue.value;
+		
+	   size_t start = r.begin();
+	   size_t end = r.end();
+	   
+	   const int32_t* __restrict__ s_date = l_shipdate_raw;
+           const int64_t* __restrict__ s_quant = l_quantity_raw;
+           const int64_t* __restrict__ s_price = l_price_raw;
+           const int64_t* __restrict__ s_disc  = l_discount_raw;
 
-             if ((l_shipdate >= c1) & (l_shipdate < c2) & (l_quantity < c5) &
-                 (l_discount >= c3) & (l_discount <= c4)) {
-                // --- aggregation
-                revenue += l_extendedprice * l_discount;
-             }
-          }
-          return revenue;
+	   for (size_t i = start; i < end; ++i) {
+               if (s_date[i] >= c1_v && s_date[i] < c2_v) {
+                  if (s_disc[i] >= c3_v && s_disc[i] <= c4_v) {
+                     if (s_quant[i] < c5_v) {
+                        local_acc += (s_price[i] * s_disc[i]);
+                     }
+                  }
+               }
+           }
+        return types::Numeric<12, 4>::buildRaw(local_acc);
        },
-       [](const types::Numeric<12, 4>& x, const types::Numeric<12, 4>& y) {
-          return x + y;
-       });
+       [](types::Numeric<12, 4> x, types::Numeric<12, 4> y) {
+           return types::Numeric<12, 4>::buildRaw(x.value + y.value);
+       }
+   );
 
-   // --- output
-   auto& rev = result["revenue"].typedAccessForChange<types::Numeric<12, 4>>();
-   rev.reset(1);
-   rev.push_back(revenue);
+   // monitor correctness (debug)
+   if (DEBUG_Q6) {
+       // We divide by 10000.0 because Numeric<12,4> represents 4 decimal places
+       double final_val = static_cast<double>(total_revenue.value) / 10000.0;
+       fprintf(stderr, "\n--- TPC-H Q6 Monitor ---\n");
+       fprintf(stderr, "Total Tuples Scanned: %zu\n", rel.nrTuples);
+       fprintf(stderr, "Raw Acc (Scale 1):    %ld\n", total_revenue.value);
+       fprintf(stderr, "Final Revenue:        %.4f\n", final_val);
+       fprintf(stderr, "Target Result:   123141147.1752\n");
+       fprintf(stderr, "------------------------\n\n");
+   }
+
+   auto& rev_col = result["revenue"].typedAccessForChange<types::Numeric<12, 4>>();
+   rev_col.reset(1);
+   rev_col.push_back(total_revenue);
    result.nrTuples = 1;
+
    return result;
 }
 
@@ -86,14 +103,14 @@ unique_ptr<Q6Builder::Q6> Q6Builder::getQuery() {
                      Buffer(sel_b, sizeof(pos_t)),                        //
                      Column(lineitem, "l_shipdate"),                      //
                      Value(&consts.c1))
-             .addOp(conf.selsel_less_int64_t_col_int64_t_val(), //
-             // .addOp(primitives::selsel_less_int64_t_col_int64_t_val_bf, //
+             //.addOp(conf.selsel_less_int64_t_col_int64_t_val(), //
+             .addOp(primitives::selsel_less_int64_t_col_int64_t_val_bf, //
                      Buffer(sel_b, sizeof(pos_t)),               //
                      Buffer(sel_a, sizeof(pos_t)),               //
                      Column(lineitem, "l_quantity"),             //
                      Value(&consts.c5))
-              .addOp(conf.selsel_greater_equal_int64_t_col_int64_t_val(), //
-              //.addOp(primitives::selsel_greater_equal_int64_t_col_int64_t_val_bf, //
+              //.addOp(conf.selsel_greater_equal_int64_t_col_int64_t_val(), //
+              .addOp(primitives::selsel_greater_equal_int64_t_col_int64_t_val_bf, //
                      Buffer(sel_a, sizeof(pos_t)),                        //
                      Buffer(sel_b, sizeof(pos_t)),                        //
                      Column(lineitem, "l_discount"),                      //
