@@ -222,7 +222,8 @@ pos_t Hashjoin::joinAllSIMD() {
 
    if (followup == followupWrite) {
 
-#ifdef __AVX512F__ // if AVX 512 available, use it!
+
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;
       auto ids =
@@ -244,7 +245,7 @@ pos_t Hashjoin::joinAllSIMD() {
              nullptr, 1);
          {
             // Check if hashes match
-            __mmask8 hashesEq = _mm512_mask_cmpeq_epi32_mask(
+            mask8_t hashesEq = _mm512_mask_cmpeq_epi32_mask(
                 entries.mask, _mm512_castsi256_si512(entryHashes),
                 _mm512_castsi256_si512(hashDense));
             // write pointers
@@ -268,7 +269,7 @@ pos_t Hashjoin::joinAllSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(
+            mask8_t hasNext = _mm512_mask_cmpneq_epi64_mask(
                 entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())));
             if (hasNext) {
                // write pointers
@@ -307,7 +308,7 @@ pos_t Hashjoin::joinAllSIMD() {
              nullptr, 1);
          {
             // Check if hashes match
-            __mmask8 hashesEq =
+            mask8_t hashesEq =
                 _mm512_mask_cmpeq_epi64_mask(entries.mask, entryHashes, hashes);
             // write pointers
             _mm512_mask_compressstoreu_epi64(buildMatches + found, hashesEq,
@@ -330,8 +331,8 @@ pos_t Hashjoin::joinAllSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(
-                entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())));
+            mask8_t hasNext = _mm512_mask_cmp_epu64_mask(
+                entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())), 4);
             if (hasNext) {
                // write pointers
                _mm512_mask_compressstoreu_epi64(followupEntries + followupWrite,
@@ -514,7 +515,8 @@ pos_t Hashjoin::joinSelSIMD() {
 
    if (followup == followupWrite) {
 
-#ifdef __AVX512F__ // if AVX 512 available, use it!
+
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;
       auto ids =
@@ -536,7 +538,7 @@ pos_t Hashjoin::joinSelSIMD() {
                                                         hashPtrs, nullptr, 1);
          {
             // Check if hashes match
-            __mmask8 hashesEq = _mm512_mask_cmpeq_epi32_mask(
+            mask8_t hashesEq = _mm512_mask_cmpeq_epi32_mask(
                 entries.mask, _mm512_castsi256_si512(entryHashes),
                 _mm512_castsi256_si512(hashDense));
             // write pointers
@@ -561,7 +563,7 @@ pos_t Hashjoin::joinSelSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(
+            mask8_t hasNext = _mm512_mask_cmpneq_epi64_mask(
                 entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())));
             if (hasNext) {
                // write pointers
@@ -599,7 +601,7 @@ pos_t Hashjoin::joinSelSIMD() {
                                                          hashPtrs, nullptr, 1);
          {
             // Check if hashes match
-            __mmask8 hashesEq =
+            mask8_t hashesEq =
                 _mm512_mask_cmpeq_epi64_mask(entries.mask, entryHashes, hashes);
             // write pointers
             _mm512_mask_compressstoreu_epi64(buildMatches + found, hashesEq,
@@ -623,8 +625,8 @@ pos_t Hashjoin::joinSelSIMD() {
                           "Hash is expected to be in first position");
             Vec8u nextPtrs = _mm512_mask_i64gather_epi64(
                 entries.vec, entries.mask, entries.vec, nullptr, 1);
-            __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(
-                entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())));
+            mask8_t hasNext = _mm512_mask_cmp_epu64_mask(
+                entries.mask, nextPtrs, Vec8u(uint64_t(shared.ht.end())), 4);
             if (hasNext) {
                // write pointers
                _mm512_mask_compressstoreu_epi64(followupEntries + followupWrite,

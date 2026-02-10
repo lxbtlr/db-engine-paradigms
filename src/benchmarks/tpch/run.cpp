@@ -62,10 +62,17 @@ int main(int argc, char* argv[]) {
    size_t nrThreads = std::thread::hardware_concurrency();
    size_t vectorSize = 1024;
    bool clearCaches = false;
+
+   // Handle threads (positional arg 3)
    if (argc > 3) nrThreads = atoi(argv[3]);
 
+   // Handle vector size (positional arg 4)
+   if (argc > 4) {
+      vectorSize = static_cast<size_t>(atoi(argv[4]));
+   }
+
    // lets inspect
-   printf("nrthreads:%ld\n",nrThreads);
+   fprintf(stderr,"nrthreads:%ld\nVectorsize:%ld\n",nrThreads,vectorSize);
 
    std::unordered_set<std::string> q = {"1h", "1v", "3h", "3v", "5h",  "5v",
                                         "6h", "6v", "9h", "9v", "18h", "18v"};

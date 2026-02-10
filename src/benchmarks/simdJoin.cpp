@@ -5,7 +5,12 @@
 #include <vector>
 #include <cstring>
 #include <sys/mman.h>
-#include <immintrin.h>
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+  #include <immintrin.h>
+#else
+  #define SIMDE_ENABLE_NATIVE_ALIASES
+  #include <simde/x86/avx512.h>
+#endif
 #include <cassert>
 
 // #include "/opt/iaca-lin64/include/iacaMarks.h"

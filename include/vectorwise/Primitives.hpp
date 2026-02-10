@@ -490,7 +490,7 @@ pos_t hash8(pos_t n, hash_t* RES result, T* RES input)
       mask8_t remaining = (1 << rest) - 1;
       Vec8u in = _mm512_maskz_loadu_epi64(remaining, input + n - rest);
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_store_epi64(result + n - rest, remaining, hashes);
+      _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
    return n;
 }
@@ -604,7 +604,7 @@ pos_t hash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
    for (uint64_t i = 0; i < n - rest; i += 8) {
       auto inSels = _mm256_loadu_si256((const __m256i*)(inSel + i));
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, all, inSels, input, 4));
+          _mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)all), 4));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       _mm512_mask_storeu_epi64(result + i, all, hashes);
@@ -614,7 +614,7 @@ pos_t hash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       auto inSels = _mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, remaining, inSels, input, 4));
+          _mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)remaining), 4));
       auto hashes = Op().hashKey(in, seeds);
       _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
@@ -655,7 +655,7 @@ pos_t rehash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       Vec8u seeds(result + i);
       auto inSels = _mm256_loadu_si256((const __m256i*)(inSel + i));
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, ~0, inSels, input, 4));
+          _mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)~0), 4));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       _mm512_mask_storeu_epi64(result + i, ~0, hashes); // ??
@@ -666,7 +666,7 @@ pos_t rehash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       auto inSels = _mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, remaining, inSels, input, 4));
+          _mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)remaining), 4));
       auto hashes = Op().hashKey(in, seeds);
       _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes); // ??
    }
@@ -1271,7 +1271,8 @@ EACH_TYPE(NIL, MK_PARTITION_SEL_DECL);
 EACH_TYPE(NIL, MK_PARTITION_ROW_DECL);
 
 // Specializations
-#ifdef __AVX512F__
+
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
 extern F2 hash8_int64_t_col;
 // extern F3 hash8_sel_int64_t_col;
 // extern F2 rehash8_int64_t_col;

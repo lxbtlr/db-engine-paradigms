@@ -1,5 +1,11 @@
 #include "benchmarks/Primitives.hpp"
-#include "immintrin.h"
+#include "common/runtime/SIMD.hpp"
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+  #include <immintrin.h>
+#else
+  #define SIMDE_ENABLE_NATIVE_ALIASES
+  #include <simde/x86/avx512.h>
+#endif
 
 
 using namespace std;
@@ -18,7 +24,7 @@ pos_t sel_less_int64_t_col_int64_t_val_avx512(pos_t n, pos_t* RES result,
    auto ids = _mm256_set_epi32(7,6,5,4,3,2,1,0);
    for (uint64_t i = 0; i < n - rest; i += 8) {
       auto in = Vec8u(param1);
-      __mmask8 less = _mm512_cmplt_epi64_mask(in, consts);
+      mask8_t less = _mm512_cmplt_epi64_mask(in, consts);
       _mm256_mask_compressstoreu_epi32(result + found, less, ids);
       found += __builtin_popcount(less);
       ids = _mm256_add_epi32(ids, _mm256_set1_epi32(8));
@@ -42,13 +48,13 @@ pos_t sel_less_int16_t_col_int16_t_val_avx512(pos_t n, pos_t* RES result,
   auto ids = _mm512_set_epi32(15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);
   for (uint64_t i = 0; i < n - rest; i += 32) {
     auto in = Vec8u(param1);
-    __mmask32 less = _mm512_cmplt_epi16_mask(in, consts);
+    mask32_t less = _mm512_cmplt_epi16_mask(in, consts);
     _mm512_mask_compressstoreu_epi32(result + found, less, ids);
-    found += __builtin_popcount(static_cast<__mmask16>(less));
+    found += __builtin_popcount(static_cast<mask16_t>(less));
     ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
     less >>= 16;
     _mm512_mask_compressstoreu_epi32(result + found, less, ids);
-    found += __builtin_popcount(static_cast<__mmask16>(less));
+    found += __builtin_popcount(static_cast<mask16_t>(less));
     ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
   }
   for (uint64_t i = n - rest; i < n; ++i) {
@@ -69,21 +75,21 @@ pos_t sel_less_int8_t_col_int8_t_val_avx512(pos_t n, pos_t* RES result,
   auto ids = _mm512_set_epi32(15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);
   for (uint64_t i = 0; i < n - rest; i += 64) {
     auto in = Vec8u(param1);
-    __mmask64 less = _mm512_cmplt_epi8_mask(in, consts);
+    mask64_t less = _mm512_cmplt_epi8_mask(in, consts);
     _mm512_mask_compressstoreu_epi32(result + found, less, ids);
-    found += __builtin_popcount(static_cast<__mmask16>(less));
+    found += __builtin_popcount(static_cast<mask16_t>(less));
     ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
     less >>= 16;
     _mm512_mask_compressstoreu_epi32(result + found, less, ids);
-    found += __builtin_popcount(static_cast<__mmask16>(less));
+    found += __builtin_popcount(static_cast<mask16_t>(less));
     ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
     less >>= 16;
     _mm512_mask_compressstoreu_epi32(result + found, less, ids);
-    found += __builtin_popcount(static_cast<__mmask16>(less));
+    found += __builtin_popcount(static_cast<mask16_t>(less));
     ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
     less >>= 16;
     _mm512_mask_compressstoreu_epi32(result + found, less, ids);
-    found += __builtin_popcount(static_cast<__mmask16>(less));
+    found += __builtin_popcount(static_cast<mask16_t>(less));
     ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
     less >>= 16;
   }
@@ -104,7 +110,7 @@ pos_t selsel_less_int32_t_col_int32_t_val_avx512(pos_t n, pos_t* RES inSel, pos_
   for (uint64_t i = 0; i < n - rest; i += 16){
     Vec8u idxs(inSel + i);
     auto in = _mm512_i32gather_epi32(idxs, param1, 4);
-    __mmask16 ge = _mm512_cmplt_epi32_mask(in, consts);
+    mask16_t ge = _mm512_cmplt_epi32_mask(in, consts);
     _mm512_mask_compressstoreu_epi32(result+found, ge, idxs);
     found += __builtin_popcount(ge);
   }
@@ -128,7 +134,7 @@ pos_t selsel_less_int16_t_col_int16_t_val_avx512(pos_t n, pos_t* RES inSel, pos_
     Vec8u idxs(inSel + i);
     auto in = _mm512_i32gather_epi32(idxs, param1, 2);
     in = _mm512_and_epi32(lower16, in);
-    __mmask16 ge = _mm512_cmplt_epi32_mask(in, consts);
+    mask16_t ge = _mm512_cmplt_epi32_mask(in, consts);
     _mm512_mask_compressstoreu_epi32(result+found, ge, idxs);
     found += __builtin_popcount(ge);
   }
@@ -152,7 +158,7 @@ pos_t selsel_less_int8_t_col_int8_t_val_avx512(pos_t n, pos_t* RES inSel, pos_t*
     Vec8u idxs(inSel + i);
     auto in = _mm512_i32gather_epi32(idxs, param1, 1);
     in = _mm512_and_epi32(lower8, in);
-    __mmask16 ge = _mm512_cmplt_epi32_mask(in, consts);
+    mask16_t ge = _mm512_cmplt_epi32_mask(in, consts);
     _mm512_mask_compressstoreu_epi32(result+found, ge, idxs);
     found += __builtin_popcount(ge);
   }
