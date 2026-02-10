@@ -14,7 +14,7 @@ else()
 set(CMAKE_C_COMPILER clang)
 set(CMAKE_CXX_COMPILER clang++)
 endif()
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 OPTION(VECTORWISE_BRANCHING "Use branching vectorwise primitives" OFF)
@@ -26,12 +26,23 @@ OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 
 
+# Only set defaults if they aren't provided by the command line (sweep script)
+if(NOT CMAKE_CXX_FLAGS OR CMAKE_CXX_FLAGS STREQUAL "")
+    set(CMAKE_CXX_FLAGS "-O3 -march=native -mtune=native -fPIC -fno-omit-frame-pointer")
+endif()
+
+if(NOT CMAKE_C_FLAGS OR CMAKE_C_FLAGS STREQUAL "")
+    set(CMAKE_C_FLAGS "-O3 -fPIC -fno-omit-frame-pointer -fdiagnostics-color")
+endif()
+
+# Common flags that should always be there regardless of architecture
+add_compile_options(-Wall -Wextra -Wno-unknown-pragmas)
 
 # Compiler flags for the different targets
-
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -mcpu=neoverse-n1 -mtune=native -std=c++14 -fPIC -Wall -Wextra -fno-omit-frame-pointer -Wno-unknown-pragmas")
-#// -O3 -mtune=native -s -march=armv8.2-a+simd -std=c++14 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC -Wall -Wextra -fno-omit-frame-pointer -fdiagnostics-color ")
+#  -mcpu=neoverse-n1
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -mtune=native -std=c++17 -fPIC -Wall -Wextra -fno-omit-frame-pointer -Wno-unknown-pragmas")
+##// -O3 -mtune=native -s -march=armv8.2-a+simd -std=c++14 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
+#set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -03 -fPIC -Wall -Wextra -fno-omit-frame-pointer -fdiagnostics-color ")
 
 
 if(LINUX)
