@@ -12,6 +12,14 @@
 namespace vectorwise {
 namespace primitives {
 
+#if !defined(simde_mm256_movm_epi32) && defined(_mm256_movm_epi32)
+    #define simde_mm256_movm_epi32 _mm256_movm_epi32
+#elif !defined(simde_mm256_movm_epi32)
+    // Fallback if neither is defined (aggressive but keeps you building)
+    #define simde_mm256_movm_epi32(mask) _mm256_set1_epi32(-(int32_t)(mask))
+#endif
+
+
 //------------------------------------------------------------------------------
 //--- selection templates
 template <typename T, template <typename> class Op>
