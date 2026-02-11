@@ -93,8 +93,6 @@ for CXX_BIN in "${COMPILERS[@]}"; do
 	
     cp -r "$RESULT_DIR" "../../results/${HOSTNAME}_${C_BIN}_latest"
 
-    cp "$RESULT_DIR/${VS}_error.log" "$RESULT_DIR/${HOSTNAME}_latest.log"
-
     echo ">> Results stored in: $RESULT_DIR"
 done
 
