@@ -5,7 +5,6 @@ REAL_USER=${SUDO_USER:-$USER}
 
 # --- Configuration ---
 REPS=${1:-1}
-VECTOR_SIZE=${2:-1024}
 #COMPILERS=( "g++")
 COMPILERS=("clang++" "g++")
 # Note: We are already IN build/release
@@ -85,11 +84,14 @@ for CXX_BIN in "${COMPILERS[@]}"; do
     
     echo "[3/3] Running sweep..."
 
-    for (( VS=64; VS<=66000; VS*=2 )); do
+    for (( VS=1; VS<=6000000; VS*=2 )); do
         echo "  >> Running VectorSize: $VS"
-    	sudo ./run_tpch "$REPS" "$DB_PATH" 1 "$VS"> "$RESULT_DIR/${VS}_output.log" 2> "$RESULT_DIR/${VS}_error.log" 
+        # numa ctl for dubliner
+    	  perf stat -o "$RESULT_DIR/${VS}.perf" ./run_tpch "$REPS" "$DB_PATH" 1 "$VS"> "$RESULT_DIR/${VS}_output.log" 2> "$RESULT_DIR/${VS}_error.log" 
     
     done
+
+    cp "$RESULT_DIR/${VS}_error.log" "$RESULT_DIR/${HOSTNAME}_latest.log"
 
     echo ">> Results stored in: $RESULT_DIR"
 done
