@@ -84,7 +84,7 @@ for CXX_BIN in "${COMPILERS[@]}"; do
     
     echo "[3/3] Running sweep..."
 
-    for (( VS=1; VS<=6; VS*=2 )); do
+    for (( VS=1; VS<=6000000; VS*=2 )); do
         echo "  >> Running VectorSize: $VS"
         # numa ctl for dubliner
     	  perf stat -o "$RESULT_DIR/${VS}.perf" ./run_tpch "$REPS" "$DB_PATH" 1 "$VS"> "$RESULT_DIR/${VS}_output.log" 2> "$RESULT_DIR/${VS}_error.log" 
