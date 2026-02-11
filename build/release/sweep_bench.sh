@@ -90,6 +90,8 @@ for CXX_BIN in "${COMPILERS[@]}"; do
     	  perf stat -o "$RESULT_DIR/${VS}.perf" ./run_tpch "$REPS" "$DB_PATH" 1 "$VS"> "$RESULT_DIR/${VS}_output.log" 2> "$RESULT_DIR/${VS}_error.log" 
     
     done
+	
+    cp -r "$RESULT_DIR" "../../results/${HOSTNAME}_${C_BIN}_latest"
 
     cp "$RESULT_DIR/${VS}_error.log" "$RESULT_DIR/${HOSTNAME}_latest.log"
 
