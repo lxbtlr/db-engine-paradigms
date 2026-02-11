@@ -39,7 +39,7 @@ for CXX_BIN in "${COMPILERS[@]}"; do
         else
             ARCH_FLAGS="-march=armv8-a+simd -mtune=native"
         fi
-    elif [[ "$HOSTNAME" == *"rpi"* ]]; then
+    elif [[ "$HOSTNAME" == *"pi"* ]]; then
         ARCH_FLAGS="-march=armv8-a+crc+simd -moutline-atomics"
     elif [[ "$ARCH" == "aarch64" ]]; then
         ARCH_FLAGS="-march=armv8.2-a"
@@ -84,11 +84,14 @@ for CXX_BIN in "${COMPILERS[@]}"; do
     
     echo "[3/3] Running sweep..."
 
-    for (( VS=1; VS<=4000000; VS*=2 )); do
+    for (( VS=1; VS<=6000000; VS*=2 )); do
         echo "  >> Running VectorSize: $VS"
-    	sudo ./run_tpch "$REPS" "$DB_PATH" 1 "$VS"> "$RESULT_DIR/${VS}_output.log" 2> "$RESULT_DIR/${VS}_error.log" 
+        # numa ctl for dubliner
+    	  perf stat -o "$RESULT_DIR/${VS}.perf" ./run_tpch "$REPS" "$DB_PATH" 1 "$VS"> "$RESULT_DIR/${VS}_output.log" 2> "$RESULT_DIR/${VS}_error.log" 
     
     done
+
+    cp "$RESULT_DIR/${VS}_error.log" "$RESULT_DIR/${HOSTNAME}_latest.log"
 
     echo ">> Results stored in: $RESULT_DIR"
 done
