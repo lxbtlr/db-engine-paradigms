@@ -43,54 +43,65 @@ void clearOsCaches() {
 }
 
 int main(int argc, char* argv[]) {
-   if (argc <= 2) {
-      std::cerr
-          << "Usage: ./" << argv[0]
-          << "<number of repetitions> <path to tpch dir> [nrThreads = all] \n "
-             " EnvVars: [vectorSize = 1024] [SIMDhash = 0] [SIMDjoin = 0] "
-             "[SIMDsel = 0]";
-      exit(1);
-   }
+    PerfEvents e;
+    Database tpch;
+    // load tpch data
+//importTPCH(argv[2], tpch);
+ 
+    bool clearCaches = false;
+   
+    // Defaults
+    int repetitions = 1;
+    std::string tpchPath = "";
+    size_t nrThreads = std::thread::hardware_concurrency();
+    size_t vectorSize = 1024;
+    std::string selectedQuery = "";  // e.g., "1"
+    std::string selectedEngine = ""; // e.g., "h" or "v"
 
-   PerfEvents e;
-   Database tpch;
-   // load tpch data
-   importTPCH(argv[2], tpch);
+    int opt;
+    // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize
+    while ((opt = getopt(argc, argv, "q:e:r:p:t:v:")) != -1) {
+        switch (opt) {
+            case 'q': selectedQuery = optarg; break;
+            case 'e': selectedEngine = optarg; break;
+            case 'r': repetitions = atoi(optarg); break;
+            case 'p': tpchPath = optarg; break;
+            case 't': nrThreads = atoi(optarg); break;
+            case 'v': vectorSize = atoi(optarg); break;
+            default:
+                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize]\n";
+                exit(1);
+        }
+    }
 
-   // run queries
-   auto repetitions = atoi(argv[1]);
-   size_t nrThreads = std::thread::hardware_concurrency();
-   size_t vectorSize = 1024;
-   bool clearCaches = false;
+    if (tpchPath.empty()) {
+        std::cerr << "Error: Path to TPC-H directory (-p) is required.\n";
+        exit(1);
+    }
+    importTPCH(tpchPath, tpch);
 
-   // Handle threads (positional arg 3)
-   if (argc > 3) nrThreads = atoi(argv[3]);
+    // Now, filter the master query set
+    std::unordered_set<std::string> allQueries = {"1h", "1v", "3h", "3v", "5h", "5v", "6h", "6v" ,"18h", "18v", "9h", "9v"};
+    std::unordered_set<std::string> q;
 
-   // Handle vector size (positional arg 4)
-   if (argc > 4) {
-      vectorSize = static_cast<size_t>(atoi(argv[4]));
-   }
+    if (!selectedQuery.empty() && !selectedEngine.empty()) {
+        // Run specific pair, e.g., "1" + "h" -> "1h"
+        std::string target = selectedQuery + selectedEngine;
+        if (allQueries.count(target)) q.insert(target);
+    } else if (!selectedQuery.empty()) {
+        // Run all engines for one query, e.g., "1h" and "1v"
+        if (allQueries.count(selectedQuery + "h")) q.insert(selectedQuery + "h");
+        if (allQueries.count(selectedQuery + "v")) q.insert(selectedQuery + "v");
+    } else {
+        // Default: Run everything
+        q = allQueries;
+    }
 
-   // lets inspect
-   fprintf(stderr,"nrthreads:%ld\nVectorsize:%ld\n",nrThreads,vectorSize);
+    // Diagnostics
+    fprintf(stderr, "Engine: %s | Query: %s | Threads: %ld | VectorSize: %ld\n", 
+            selectedEngine.c_str(), selectedQuery.c_str(), nrThreads, vectorSize);
 
-   std::unordered_set<std::string> q = {"1h", "1v", "3h", "3v", "5h",  "5v",
-                                        "6h", "6v", "9h", "9v", "18h", "18v"};
-
-   if (auto v = std::getenv("vectorSize")) vectorSize = atoi(v);
-   if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
-   if (auto v = std::getenv("SIMDjoin")) conf.useSimdJoin = atoi(v);
-   if (auto v = std::getenv("SIMDsel")) conf.useSimdSel = atoi(v);
-   if (auto v = std::getenv("SIMDproj")) conf.useSimdProj = atoi(v);
-   if (auto v = std::getenv("clearCaches")) clearCaches = atoi(v);
-   if (auto v = std::getenv("q")) {
-      using namespace std;
-      istringstream iss((string(v)));
-      q.clear();
-      copy(istream_iterator<string>(iss), istream_iterator<string>(),
-           insert_iterator<decltype(q)>(q, q.begin()));
-   }
-   tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
+    tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
 
    if (q.count("1h"))
       e.timeAndProfile("q1 hyper     ", nrTuples(tpch, {"lineitem"}),
