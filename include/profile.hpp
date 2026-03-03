@@ -13,57 +13,62 @@
 #include <unordered_map>
 #include <vector>
 
-
-#include <asm/unistd.h>
-#include <linux/perf_event.h>
-#include <fstream>
-#include <string>
 #include <algorithm>
+#include <asm/unistd.h>
+#include <fstream>
+#include <linux/perf_event.h>
+#include <string>
 
 // Comment out this next line if you ever successfully link the jevents library
-#define NO_JEVENTS 
+#define NO_JEVENTS
 
 #if (defined(__x86_64__) || defined(__i386__)) && !defined(NO_JEVENTS)
-    extern "C" {
-    #include "jevents.h"
-    }
+extern "C" {
+#include "jevents.h"
+}
 #else
-    // This block now runs on ARM *OR* any machine where NO_JEVENTS is defined
-    extern "C" {
-        inline char* get_cpu_str() {
-            static char cpu_buffer[256] = "";
-            if (cpu_buffer[0] == '\0') {
-                std::ifstream file("/proc/cpuinfo");
-                bool found = false;
-                if (file.is_open()) {
-                    std::string line;
-                    while (std::getline(file, line)) {
-                        if (line.find("model name") != std::string::npos || 
-                            line.find("Model") != std::string::npos) {
-                            size_t pos = line.find(": ");
-                            if (pos != std::string::npos) {
-                                std::string model = line.substr(pos + 2);
-                                model.erase(std::find_if(model.rbegin(), model.rend(), [](unsigned char ch) {
-                                    return !std::isspace(ch);
-                                }).base(), model.end());
-                                snprintf(cpu_buffer, sizeof(cpu_buffer), "%s", model.c_str());
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    file.close();
-                }
-                if (!found) { snprintf(cpu_buffer, sizeof(cpu_buffer), "generic-processor-stub"); }
+// This block now runs on ARM *OR* any machine where NO_JEVENTS is defined
+extern "C" {
+inline char* get_cpu_str() {
+   static char cpu_buffer[256] = "";
+   if (cpu_buffer[0] == '\0') {
+      std::ifstream file("/proc/cpuinfo");
+      bool found = false;
+      if (file.is_open()) {
+         std::string line;
+         while (std::getline(file, line)) {
+            if (line.find("model name") != std::string::npos ||
+                line.find("Model") != std::string::npos) {
+               size_t pos = line.find(": ");
+               if (pos != std::string::npos) {
+                  std::string model = line.substr(pos + 2);
+                  model.erase(std::find_if(model.rbegin(), model.rend(),
+                                           [](unsigned char ch) {
+                                              return !std::isspace(ch);
+                                           })
+                                  .base(),
+                              model.end());
+                  snprintf(cpu_buffer, sizeof(cpu_buffer), "%s", model.c_str());
+                  found = true;
+                  break;
+               }
             }
-            return cpu_buffer;
-        }
+         }
+         file.close();
+      }
+      if (!found) {
+         snprintf(cpu_buffer, sizeof(cpu_buffer), "generic-processor-stub");
+      }
+   }
+   return cpu_buffer;
+}
 
-        inline int resolve_event(const char* str, struct perf_event_attr* pe) { 
-            (void)str; (void)pe;
-            return -1; 
-        }
-    }
+inline int resolve_event(const char* str, struct perf_event_attr* pe) {
+   (void)str;
+   (void)pe;
+   return -1;
+}
+}
 #endif
 
 #define GLOBAL 1
@@ -106,9 +111,7 @@ struct PerfEvents {
    PerfEvents() {
       if (GLOBAL)
          counters = 1;
-      else {
-         counters = std::thread::hardware_concurrency();
-      }
+      else { counters = std::thread::hardware_concurrency(); }
 #ifdef __linux__
       char* cpustr = get_cpu_str();
       std::string cpu(cpustr);
@@ -137,20 +140,26 @@ struct PerfEvents {
          add("stores", "mem_inst_retired.all_stores");
          add("loads", "mem_inst_retired.all_loads");
          add("mem_stall", "cycle_activity.stalls_mem_any");
-         //add("page-faults", "page-faults");
+         // add("page-faults", "page-faults");
       } else {
+         add("front-end", "topdown-fetch-bubbles");
+         add("bad-spec", "topdown-recovery-bubbles");
+         add("uop-slots", "topdown-slots-issued");
+         add("retired-slots", "topdown-slots-retired");
+         add("total-slots", "topdown-total-slots");
+
          add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
          add("LLC-misses", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-             (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
          add("l1-misses", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
                  (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
          add("l1-hits", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-             (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
-         //add("stores", "cpu/mem-stores/");
-         //add("loads", "cpu/mem-loads/");
+                 (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+         // add("stores", "cpu/mem-stores/");
+         // add("loads", "cpu/mem-loads/");
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
       }
@@ -235,10 +244,10 @@ struct PerfEvents {
       for (auto& ev : events) {
          for (auto& event : ev.second) {
 #ifdef __linux__
-           ioctl(event.fd, PERF_EVENT_IOC_ENABLE, 0);
-           if (read(event.fd, &event.prev, sizeof(uint64_t) * 3) !=
-               sizeof(uint64_t) * 3)
-             std::cerr << "Error reading counter " << ev.first << std::endl;
+            ioctl(event.fd, PERF_EVENT_IOC_ENABLE, 0);
+            if (read(event.fd, &event.prev, sizeof(uint64_t) * 3) !=
+                sizeof(uint64_t) * 3)
+               std::cerr << "Error reading counter " << ev.first << std::endl;
 #else
             compat::unused(event);
 #endif
@@ -340,10 +349,21 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                 << "," << setw(printFieldWidth) << " IPC"
                 << "," << setw(printFieldWidth) << " GHz"
                 << "," << setw(printFieldWidth) << " Bandwidth"
+                << "," << setw(printFieldWidth) << " F-Bound"
+                << "," << setw(printFieldWidth) << " B-Bound"
+                << "," << setw(printFieldWidth) << " BadSpec"
+                << "," << setw(printFieldWidth) << " Retiring"
+                << "," << setw(printFieldWidth) << " I-slots"
+                << "," << setw(printFieldWidth) << " T-slots"
                 << ",";
       printHeader(std::cout);
       std::cout << std::endl;
    }
+   //         add("front-end", "cpu/topdown-fetch-bubbles/");
+   //         add("bad-spec", "cpu/topdown-recovery-bubbles/");
+   //         add("uop-slots", "cpu/topdown-slots-issued/");
+   //         add("retired-slots", "cpu/topdown-slots-retired/");
+   //         add("total-slots", "cpu/topdown-total-slots/");
 
    auto runtime = end - start;
    std::cout << setw(20) << s << "," << setw(printFieldWidth)
@@ -363,6 +383,29 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                 << ((((*this)["all_rd"] * 64.0) / (1024 * 1024)) /
                     (end - start))
                 << ",";
+      /*" F-Bound"
+      " B-Bound"
+      " BadSpec"
+      " Retiring"
+      " I-slots"
+      " T-slots"
+      */
+      // std::cout << setw(printFieldWidth) << (*this)["cycles"] << ",";
+
+      std::cout << setw(printFieldWidth)
+                << ((*this)["front-end"] / (*this)["total-slots"]) << ",";
+      std::cout << setw(printFieldWidth) // TODO:
+                << (1 - (((*this)["retired-slots"] / (*this)["total-slots"]) +
+                         ((*this)["front-end"] / (*this)["total-slots"]) +
+                         ((*this)["bad-spec"] / (*this)["total-slots"])))
+                << ","; // TODO:
+      std::cout << setw(printFieldWidth)
+                << ((*this)["bad-spec"] / (*this)["total-slots"]) << ",";
+      std::cout << setw(printFieldWidth)
+                << ((*this)["retired-slots"] / (*this)["total-slots"])
+                << ","; // TODO:
+      std::cout << setw(printFieldWidth) << ((*this)["uop-slots"]) << ",";
+      std::cout << setw(printFieldWidth) << ((*this)["total-slots"]) << ",";
    }
 #endif
    // std::cout <<
