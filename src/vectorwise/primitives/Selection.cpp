@@ -51,6 +51,21 @@ namespace primitives {
    F4 selsel_##op##_##type##_col_##type##_val_bf =                             \
        (F4)&selsel_col_val_bf<type, op>;
 
+// NOTE: to support KNL we shadow masked compress store ---
+#if defined(__AVX512F__) && !defined(__AVX512VL__)
+    // Intercept the 256-bit call on KNL
+    #ifndef _mm256_mask_compressstoreu_epi32
+    #define _mm256_mask_compressstoreu_epi32(mem_addr, mask, a) \
+        _mm512_mask_compressstoreu_epi32((mem_addr), (__mmask16)(mask), _mm512_castsi256_si512(a))
+    #endif
+
+    // If you also use the 64-bit version in Selection.cpp:
+    #ifndef _mm256_mask_compressstoreu_epi64
+    #define _mm256_mask_compressstoreu_epi64(mem_addr, mask, a) \
+        _mm512_mask_compressstoreu_epi64((mem_addr), (__mmask8)(mask), _mm512_castsi256_si512(a))
+    #endif
+#endif
+
 // instantiate selection primitives for each type and for each comparator
 EACH_COMP(EACH_TYPE, MK_SEL_COLCOL)
 EACH_COMP(EACH_TYPE, MK_SEL_COLVAL)      // with second arg const
