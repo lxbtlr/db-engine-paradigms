@@ -8,10 +8,10 @@
 #include <tuple>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
-  #include <x86intrin.h>
+#include <x86intrin.h>
 #else
-  #define SIMDE_ENABLE_NATIVE_ALIASES
-  #include <simde/x86/avx512.h> // Or whichever level the project requires
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#include <simde/x86/avx512.h> // Or whichever level the project requires
 #endif
 
 namespace vectorwise {
@@ -51,6 +51,7 @@ Scan::Scan(Shared& s, size_t n, size_t v)
     : shared(s), needsInit(true), currentChunk(0), lastOffset(0), nrTuples(n),
       vecSize(v) {
    scanChunkSize = 1;
+   // TODO: make this read a env var?
    size_t scanMorselSize = 1024 * 10;
    if (vecSize < scanMorselSize) scanChunkSize = scanMorselSize / vecSize + 1;
    vecInChunk = scanChunkSize;
@@ -222,8 +223,8 @@ pos_t Hashjoin::joinAllSIMD() {
 
    if (followup == followupWrite) {
 
-
-#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) ||               \
+    defined(SIMDE_ENABLE_NATIVE_ALIASES)
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;
       auto ids =
@@ -515,8 +516,8 @@ pos_t Hashjoin::joinSelSIMD() {
 
    if (followup == followupWrite) {
 
-
-#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) ||               \
+    defined(SIMDE_ENABLE_NATIVE_ALIASES)
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;
       auto ids =
@@ -747,11 +748,11 @@ pos_t Hashjoin::joinBoncz() {
          cont.nextProbe = cont.numProbes;
          contCon.followupWrite = followupWrite;
          return found;
-      } else if(found + followupWrite >= batchSize){
+      } else if (found + followupWrite >= batchSize) {
          contCon.followupWrite = followupWrite;
          assert(found);
          return found;
-     }
+      }
    }
    cont.nextProbe = cont.numProbes;
    contCon.followupWrite = followupWrite;
