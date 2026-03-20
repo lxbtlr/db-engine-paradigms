@@ -30,21 +30,15 @@ class Barrier {
       } else {
          while (round == prevRound) {
             // wait until barrier is ready for re-use
-	    #if defined(__x86_64__) || defined(_M_X64)
-            	asm("pause");
-            	asm("pause");
-            	asm("pause");
-	    #elif defined(__arm__) || defined(__aarch64__)
-		// asm volatile("yield" ::: "memory"); // ARM equivalent
-		// asm volatile("yield" ::: "memory"); // ARM equivalent
-		// asm volatile("yield" ::: "memory"); // ARM equivalent
-						    
-		asm("yield"); // ARM equivalent
-		asm("yield"); // ARM equivalent
-		asm("yield"); // ARM equivalent
-	    #else
-		  // Fallback for other architectures
-	    #endif
+#if defined(__x86_64__) || defined(_M_X64)
+            asm("pause");
+            asm("pause");
+            asm("pause");
+#elif defined(__arm__) || defined(__aarch64__)
+            asm("yield"); // ARM equivalent
+            asm("yield"); // ARM equivalent
+            asm("yield"); // ARM equivalent
+#endif
          }
          return false;
       }
@@ -62,6 +56,8 @@ class HierarchicBarrier {
    Barrier barrier;
 
  public:
+   // VARIABLE OF INTEREST
+   // TODO: make this read a env var?
    static constexpr size_t threadsPerBarrier = 8;
    HierarchicBarrier(size_t nrThreads, HierarchicBarrier* p)
        : parent(p), barrier(nrThreads) {}
@@ -93,7 +89,7 @@ class HierarchicBarrier {
              new (b) HierarchicBarrier(threadsPerBarrier, parentLevel[parent]));
       }
       // create partially filled barrier
-      if (threadsInRestBarrier){
+      if (threadsInRestBarrier) {
          auto b = compat::aligned_alloc(alignof(HierarchicBarrier),
                                         sizeof(HierarchicBarrier));
          result.push_back(new (b) HierarchicBarrier(threadsInRestBarrier,
