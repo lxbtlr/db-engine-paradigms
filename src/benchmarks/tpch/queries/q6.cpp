@@ -8,6 +8,24 @@
 #include "vectorwise/VectorAllocator.hpp"
 #include <iostream>
 
+// for use with magic-trace
+extern "C" {
+    __attribute__((noinline)) void magic_trace_stop_indicator() {
+        asm(""); 
+    }
+}
+extern "C" {
+    __attribute__((noinline)) void start_flag() {
+        asm(""); 
+    }
+}
+extern "C" {
+    __attribute__((noinline)) void stop_flag() {
+        asm(""); 
+    }
+}
+
+
 using namespace runtime;
 using namespace std;
 NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
@@ -36,6 +54,7 @@ NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
        tbb::blocked_range<size_t>(0, rel.nrTuples), types::Numeric<12, 4>(0),
        [&](const tbb::blocked_range<size_t>& r,
            const types::Numeric<12, 4>& s) {
+          start_flag();
           auto revenue = s;
           for (size_t i = r.begin(), end = r.end(); i != end; ++i) {
              auto& l_shipdate = l_shipdate_col[i];
@@ -48,12 +67,15 @@ NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
                 // --- aggregation
                 revenue += l_extendedprice * l_discount;
              }
+          stop_flag();
           }
           return revenue;
        },
        [](const types::Numeric<12, 4>& x, const types::Numeric<12, 4>& y) {
           return x + y;
        });
+   //magic_trace_stop_indicator(); // lets try right here
+
 
    // --- output
    auto& rev = result["revenue"].typedAccessForChange<types::Numeric<12, 4>>();
