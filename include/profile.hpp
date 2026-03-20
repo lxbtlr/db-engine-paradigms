@@ -24,7 +24,7 @@
  * Uncomment #define USE_TMA to use the new Grouped TMA counter logic.
  * Keep it commented to use the original Legacy/Independent counter logic.
  */
-#define USE_TMA
+// #define USE_TMA
 
 #ifndef USE_TMA
 // =============================================================================
@@ -504,8 +504,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                   this->events["cycles"][0].prev.time_enabled))
              << ",";
    std::cout << std::setw(printFieldWidth)
-             << ((((*this)["all_rd"] * 64.0) / (1024 * 1024)) / (end - start))
-             << ",";
+             << ((((*this)["all_rd"] * 64.0) / (1024 * 1024)) / runtime) << ",";
 
    printAll(std::cout, count * repetitions);
    //}
