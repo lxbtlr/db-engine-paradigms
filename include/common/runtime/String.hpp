@@ -2,7 +2,17 @@
 
 #include <algorithm>
 #include <cstring>
-#include <experimental/string_view>
+//#include <experimental/string_view>
+#if __has_include(<string_view>)
+#  include <string_view>
+   // Tricking the legacy code: Alias the modern version into the experimental namespace
+   namespace std { namespace experimental { using string_view = std::string_view; } }
+#elif __has_include(<experimental/string_view>)
+#  include <experimental/string_view>
+#else
+#  error "No string_view implementation found. This project requires C++17 or the TS experimental header."
+#endif
+
 #include <iostream>
 #include <string>
 
