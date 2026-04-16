@@ -15,16 +15,44 @@
 
 #include <algorithm>
 #include <asm/unistd.h>
+#include <common/ftr.h>
 #include <fstream>
 #include <linux/perf_event.h>
 #include <string>
-
 /**
  * TOGGLE MACRO:
  * Uncomment #define USE_TMA to use the new Grouped TMA counter logic.
  * Keep it commented to use the original Legacy/Independent counter logic.
  */
 // #define USE_TMA
+#define DISABLE_PERF
+extern "C" {
+__attribute__((noinline)) void last_start() { asm(""); }
+}
+extern "C" {
+__attribute__((noinline)) void last_stop() { asm(""); }
+}
+
+extern "C" {
+__attribute__((noinline)) void q1_stop() { asm(""); }
+}
+
+std::string clean_fname(std::string str) {
+   // 1. Remove trailing whitespace
+   str.erase(str.find_last_not_of(" \t\n\r") + 1);
+
+   // 2. Replace inner spaces with underscores
+   std::replace(str.begin(), str.end(), ' ', '_');
+
+   return str;
+}
+
+void init_ftr_for_query(const std::string& s) {
+   std::string fname = clean_fname(s) + ".fxt.gz";
+   ftr_init_file(fname.c_str());
+}
+
+#define init_file(fn) init_ftr_for_query(fn)
 
 #ifndef USE_TMA
 // =============================================================================
@@ -87,7 +115,8 @@ struct PerfEvents {
    const size_t printFieldWidth = 12;
    size_t counters;
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(DISABLE_PERF)
+//#ifdef __linux__
    struct read_format {
       uint64_t value = 0;
       uint64_t time_enabled = 0;
@@ -96,14 +125,16 @@ struct PerfEvents {
    };
 #endif
    struct event {
-#ifdef __linux__
+#if defined(__linux__) && !defined(DISABLE_PERF)
+//#ifdef __linux__
       struct perf_event_attr pe;
       int fd;
       read_format prev;
       read_format data;
 #endif
       double readCounter() {
-#ifdef __linux__
+#if defined(__linux__) && !defined(DISABLE_PERF)
+//#ifdef __linux__
          return (data.value - prev.value) *
                 (double)(data.time_enabled - prev.time_enabled) /
                 (data.time_running - prev.time_running);
@@ -119,7 +150,8 @@ struct PerfEvents {
       if (GLOBAL)
          counters = 1;
       else { counters = std::thread::hardware_concurrency(); }
-#ifdef __linux__
+#if defined(__linux__) && !defined(DISABLE_PERF)
+//#ifdef __linux__
       char* cpustr = get_cpu_str();
       std::string cpu(cpustr);
       if (cpu == "GenuineIntel-6-57-core") {
@@ -163,7 +195,8 @@ struct PerfEvents {
 
    void add(std::string name, uint64_t type, uint64_t eventID) {
       if (getenv("EXTERNALPROFILE")) return;
-#ifdef __linux__
+#if defined(__linux__) && !defined(DISABLE_PERF)
+//#ifdef __linux__
       ordered_names.push_back(name);
       auto& eventsPerThread = events[name];
       eventsPerThread.assign(counters, event());
@@ -185,7 +218,7 @@ struct PerfEvents {
 
    void add(std::string name, std::string str) {
       if (getenv("EXTERNALPROFILE")) return;
-#ifdef __linux__
+#if defined(__linux__) && !defined(DISABLE_PERF)
       ordered_names.push_back(name);
       auto& eventsPerThread = events[name];
       eventsPerThread.assign(counters, event());
@@ -205,10 +238,11 @@ struct PerfEvents {
    }
 
    void registerAll() {
+
+#if defined(__linux__) && !defined(DISABLE_PERF)
       for (auto& ev : events) {
          size_t i = 0;
          for (auto& event : ev.second) {
-#ifdef __linux__
             if (GLOBAL)
                event.fd =
                    syscall(__NR_perf_event_open, &event.pe, 0, -1, -1, 0);
@@ -217,32 +251,33 @@ struct PerfEvents {
             if (event.fd < 0)
                std::cerr << "Error opening perf event " << ev.first
                          << std::endl;
-#endif
             ++i;
          }
       }
+#endif
    }
 
    void startAll() {
+#if defined(__linux__) && !defined(DISABLE_PERF)
       for (auto& ev : events) {
          for (auto& event : ev.second) {
-#ifdef __linux__
             ioctl(event.fd, PERF_EVENT_IOC_ENABLE, 0);
             read(event.fd, &event.prev, sizeof(uint64_t) * 3);
-#endif
          }
       }
+#endif
    }
 
    void readAll() {
+
+#if defined(__linux__) && !defined(DISABLE_PERF)
       for (auto& ev : events) {
          for (auto& event : ev.second) {
-#ifdef __linux__
             read(event.fd, &event.data, sizeof(uint64_t) * 3);
             ioctl(event.fd, PERF_EVENT_IOC_DISABLE, 0);
-#endif
          }
       }
+#endif
    }
 
    void printHeader(std::ostream& out) {
@@ -251,11 +286,14 @@ struct PerfEvents {
    }
 
    void printAll(std::ostream& out, double n) {
+#ifndef DISABLE_PERF 
       for (auto& name : ordered_names) {
          double aggr = 0;
          for (auto& event : events[name]) aggr += event.readCounter();
          out << std::setw(printFieldWidth) << aggr / n << ",";
       }
+
+#endif
    }
 
    double operator[](std::string index) {
@@ -405,27 +443,32 @@ size_t getCurrentRSS() {
 }
 
 #define USE_MIN_MODE
-
+#define MEASURE_LAST
 // Logic for report printing (switches based on macro)
 void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                                 std::function<void()> fn, uint64_t repetitions,
                                 bool mem) {
-   for (int i = 0; i < 3; i++) fn(); // Warmup
+   for (int i = 0; i < 3; i++) {
+      // FTR_SCOPE("warmup round");
+      fn();
+   } // Warmup
    uint64_t memStart = mem ? getCurrentRSS() : 0;
 
    double runtime = 0;
    double min_runtime = std::numeric_limits<double>::max();
 
 #ifdef USE_MIN_MODE
+   // init_file(s);
    bool min_mode = true;
    // Execute and measure each repetition individually to find the minimum
    for (size_t i = 0; i < repetitions; i++) {
-      startAll();
+      
+      //startAll();
       double start = gettime();
       fn();
       double end = gettime();
-      readAll(); // This also stops/disables counters internally
 
+      //readAll(); // This also stops/disables counters internally
       double current_run = end - start;
       if (current_run < min_runtime) {
          min_runtime = current_run;
@@ -435,11 +478,32 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
          // clone the 'event_map' or 'events' here.
       }
    }
+   double start = gettime();
+   last_start();
+   fn();
+   last_stop();
+   double end = gettime();
+   // printf("%ul = %ul - %ul\n", end - start, end, start);
+   //  q1_stop();
    runtime = min_runtime;
    // For scaling logic, we treat this as 1 repetition since we took the best 1
    double effective_reps = 1.0;
 #else
-   // Original Average Mode: Measure all repetitions in one batch
+
+#ifdef MEASURE_LAST
+
+   for (size_t i = 0; i < repetitions; i++) { fn(); }
+   // init_file(s);
+   startAll();
+   double start = gettime();
+   fn();
+   double end = gettime();
+   readAll(); // This also stops/disables counters internally
+   runtime = end - start;
+
+#else
+   // init_file(s);
+   //  Original Average Mode: Measure all repetitions in one batch
    startAll();
    double start = gettime();
    for (size_t i = 0; i < repetitions; i++) fn();
@@ -448,8 +512,10 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    runtime = end - start;
    double effective_reps = static_cast<double>(repetitions);
 #endif
-
+#endif
+   // ftr_close();
    if (writeHeader) {
+#ifndef DISABLE_PERF
 #ifdef USE_TMA
       std::cout << std::setw(20) << "name" << "," << std::setw(printFieldWidth)
                 << (min_mode ? "min_time" : "time") << ","
@@ -467,13 +533,22 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                 << "," << std::setw(printFieldWidth) << "GHz"
                 << "," << std::setw(printFieldWidth) << "Bandwidth" << ",";
       for (auto& n : ordered_names)
-         std::cout << std::setw(printFieldWidth) << n << ",";
+         std::cout << std::setw(printFieldWidth) << runtime << ",";
       std::cout << std::endl;
 #endif
       writeHeader = false;
+#else
+
+      std::cout << std::setw(20) << "name"
+                << "," << std::setw(printFieldWidth) << "time" 
+                << ",\n";
+#endif
+
    }
 
    std::cout << std::setw(20) << s << ",";
+
+#ifndef DISABLE_PERF
 #ifdef USE_TMA
    double slots = (*this)["total-slots"];
    double fe = ((*this)["front-end"] / slots) * 100.0;
@@ -511,6 +586,11 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
 
    // ... [Original scale/printing logic omitted for brevity, identical to your
    // top block]
+#endif
+#else
+
+   std::cout << std::setw(printFieldWidth) << (runtime * 1e3 / repetitions)
+             << ",";
 #endif
    std::cout << std::endl;
 }

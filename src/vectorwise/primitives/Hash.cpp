@@ -3,6 +3,7 @@
 #include "vectorwise/Operations.hpp"
 #include "vectorwise/Primitives.hpp"
 #include <functional>
+#include <common/ftr.h>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
   #include <x86intrin.h>
@@ -16,7 +17,6 @@ using namespace std;
 
 namespace vectorwise {
 namespace primitives {
-
 
 #if HASH_SIZE == 32
 #define DEFAULT_HASH runtime::MurMurHash3

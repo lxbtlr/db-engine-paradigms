@@ -133,7 +133,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/3rdparty/")
 find_package(TBB)
 include_directories(${TBB_INCLUDE_DIRS})
 include_directories("3rdparty/simde")
-
+#include_directories("3rdparty/ftr/include")
 
 IF(LINUX)
   #add_subdirectory(3rdparty/jevents)
@@ -145,6 +145,7 @@ ELSE(LINUX)
 ENDIF(LINUX)
 
 add_library(common
+  src/common/ftr.c
   src/common/algebra/Operators.cpp
   src/common/algebra/Types.cpp
   src/common/runtime/Database.cpp
@@ -171,12 +172,14 @@ set(HYPER_TRANSLATORS
 add_library(hyper
   src/hyper/codegen/Translator.cpp
   src/hyper/codegen/TranslatorRegistry.cpp
+  src/common/ftr.c
   )
 target_include_directories(hyper PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
 target_link_libraries(hyper common)
+
 
 
 file(GLOB PRIMITIVES src/vectorwise/primitives/*.cpp)

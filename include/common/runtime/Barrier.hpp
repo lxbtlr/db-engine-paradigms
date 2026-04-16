@@ -5,6 +5,8 @@
 #include <functional>
 #include <new>
 #include <vector>
+#include <common/ftr.h>
+
 
 namespace runtime {
 
@@ -19,6 +21,7 @@ class Barrier {
        : threadCount(threadCount), cntr(threadCount), round(0) {}
 
    template <typename F> bool wait(F finalizer) {
+      FTR_SCOPE("Barrier");
       auto prevRound = round.load(); // Must happen before fetch_sub
       auto prev = cntr.fetch_sub(1);
       if (prev == 1) {

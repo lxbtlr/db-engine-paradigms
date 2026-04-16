@@ -5,6 +5,8 @@
 #include "common/runtime/SIMD.hpp"
 #include "common/runtime/Types.hpp"
 
+#include "common/ftr.h"
+
 // --- Architecture Detection & SIMD Mapping ---
 #if defined(__x86_64__) && defined(__AVX512F__)
     #include <immintrin.h>
@@ -24,6 +26,7 @@
         #define _mm512_cvtepu32_epi64(a) simde_mm512_cvtepu32_epi64(a)
     #endif
 #endif
+
 
 namespace runtime {
 
@@ -175,14 +178,16 @@ class StdHash {
 
 class MurMurHash : public Hash<MurMurHash> {
  public:
-
 // #ifdef __AVX512F__
 //   inline Vec8u operator()(Vec8u& k, Vec8u& seed) const {
 //     return ->hashKey(k, seed);
 //   }
 // #endif
-   inline hash_t hashKey(uint64_t k) const { return hashKey(k, 0); }
+   inline hash_t hashKey(uint64_t k) const { 
+      //FTR_SCOPE("murmurhash640");
+     return hashKey(k, 0); }
    inline hash_t hashKey(uint64_t k, hash_t seed) const {
+    //FTR_SCOPE("murmurhash64A");
       // MurmurHash64A
       const uint64_t m = 0xc6a4a7935bd1e995;
       const int r = 47;
@@ -199,6 +204,7 @@ class MurMurHash : public Hash<MurMurHash> {
    }
 
    hash_t hashKey(const void* key, int len, hash_t seed) const {
+      //FTR_SCOPE("murmurhash2");
       // MurmurHash64A
       // MurmurHash2, 64-bit versions, by Austin Appleby
       // https://github.com/aappleby/smhasher/blob/master/src/MurmurHash2.cpp

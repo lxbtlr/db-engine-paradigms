@@ -123,7 +123,7 @@ class BlockRelation {
 
    /// Creates a new block for data storage in this relation
    /// Thread save against other calls to this function.
-   const size_t minBlockSize = 128;
+   const size_t minBlockSize = 256; //128;
    Block createBlock(size_t minNrElements);
    Attribute addAttribute(std::string name, size_t elementSize);
    inline Attribute getAttribute(std::string name);

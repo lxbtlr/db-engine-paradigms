@@ -1,6 +1,8 @@
 #include "common/runtime/Query.hpp"
 #include <deque>
 #include <tbb/tbb.h>
+#include <common/ftr.h>
+
 
 static const size_t morselSize = 10000;
 
@@ -29,6 +31,7 @@ inline ProcessingResources initQuery(size_t nrThreads) {
 }
 
 inline void leaveQuery(size_t nrThreads) {
+   FTR_SCOPE("barrier");
    runtime::Barrier b(nrThreads);
    tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](auto) {
       // reset thread local worker pointer

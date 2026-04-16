@@ -6,6 +6,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <tuple>
+#include <common/ftr.h>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
 #include <x86intrin.h>
@@ -16,9 +17,11 @@
 
 namespace vectorwise {
 
+
 using runtime::barrier;
 
 size_t Select::next() {
+   //FTR_SCOPE("select:next");
    while (true) {
       auto n = child->next();
       if (n == EndOfStream) return EndOfStream;
@@ -28,6 +31,7 @@ size_t Select::next() {
 }
 
 size_t Project::next() {
+   //FTR_SCOPE("project:next");
    auto n = child->next();
    if (n == EndOfStream) return EndOfStream;
    for (auto& expression : expressions) expression->evaluate(n);
@@ -35,6 +39,7 @@ size_t Project::next() {
 }
 
 size_t FixedAggr::next() {
+   //FTR_SCOPE("fixed-ag:next");
    if (!consumed) {
       size_t found = 0;
       for (auto n = child->next(); n != EndOfStream; n = child->next()) {
@@ -62,6 +67,7 @@ void Scan::addConsumer(void** colPtr, size_t typeSize) {
 }
 
 size_t Scan::next() {
+   //FTR_SCOPE("scan:next");
    auto step = 1;
 
    if (vecInChunk == scanChunkSize) {
@@ -96,6 +102,7 @@ ResultWriter::ResultWriter(Shared& s)
     : shared(s), currentBlock(nullptr, nullptr) {}
 
 size_t ResultWriter::next() {
+   //FTR_SCOPE("Result-Writer:next");
    size_t found = 0;
    for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
       found += n;
@@ -116,6 +123,7 @@ size_t ResultWriter::next() {
 }
 
 pos_t Hashjoin::joinAll() {
+   //FTR_SCOPE("Hashjoin:joinAll");
    size_t found = 0;
    // perform continuation
    for (auto entry = cont.buildMatch; entry != shared.ht.end();
@@ -132,9 +140,11 @@ pos_t Hashjoin::joinAll() {
    }
    if (cont.buildMatch != shared.ht.end()) cont.nextProbe++;
    for (size_t i = cont.nextProbe, end = cont.numProbes; i < end; ++i) {
+    //FTR_SCOPE("probe");
       auto hash = probeHashes[i];
       for (auto entry = shared.ht.find_chain_tagged(hash);
            entry != shared.ht.end(); entry = entry->next) {
+         //FTR_SCOPE("find_chain_tagged");
          if (entry->hash == hash) {
             buildMatches[found] = entry;
             probeMatches[found++] = i;
@@ -154,12 +164,14 @@ pos_t Hashjoin::joinAll() {
 }
 
 pos_t Hashjoin::joinAllParallel() {
+   //FTR_SCOPE("Hashjoin:joinAllParallel");
    size_t found = 0;
    auto followup = contCon.followup;
    auto followupWrite = contCon.followupWrite;
 
    if (followup == followupWrite) {
       for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
+    //FTR_SCOPE("probe");
          auto hash = probeHashes[i];
          auto entry = shared.ht.find_chain_tagged(hash);
          if (entry != shared.ht.end()) {
@@ -217,6 +229,7 @@ pos_t Hashjoin::joinAllParallel() {
 }
 
 pos_t Hashjoin::joinAllSIMD() {
+   //FTR_SCOPE("Hashjoin:joinAllSIMD");
    size_t found = 0;
    auto followup = contCon.followup;
    auto followupWrite = contCon.followupWrite;
@@ -357,6 +370,7 @@ pos_t Hashjoin::joinAllSIMD() {
 #endif
       for (size_t i = cont.numProbes - rest, end = cont.numProbes; i < end;
            ++i) {
+        //FTR_SCOPE("probe");
          auto hash = probeHashes[i];
          auto entry = shared.ht.find_chain_tagged(hash);
          if (entry != shared.ht.end()) {
@@ -412,6 +426,7 @@ pos_t Hashjoin::joinAllSIMD() {
 }
 
 pos_t Hashjoin::joinSel() {
+   //FTR_SCOPE("Hashjoin:joinSel");
    size_t found = 0;
    // perform continuation
    for (auto entry = cont.buildMatch; entry != shared.ht.end();
@@ -450,6 +465,7 @@ pos_t Hashjoin::joinSel() {
 }
 
 pos_t Hashjoin::joinSelParallel() {
+   //FTR_SCOPE("Hashjoin:joinSelParallel");
    size_t found = 0;
    auto followup = contCon.followup;
    auto followupWrite = contCon.followupWrite;
@@ -510,6 +526,7 @@ pos_t Hashjoin::joinSelParallel() {
 }
 
 pos_t Hashjoin::joinSelSIMD() {
+   //FTR_SCOPE("Hashjoin:joinSelSIMD");
    size_t found = 0;
    auto followup = contCon.followup;
    auto followupWrite = contCon.followupWrite;
@@ -715,6 +732,7 @@ void INTERPRET_SEPARATE insertAllEntries(T& allocations, HT& ht,
 }
 
 pos_t Hashjoin::joinBoncz() {
+   //FTR_SCOPE("Hashjoin:joinBoncz");
    size_t followupWrite = contCon.followupWrite;
    size_t found = 0;
    if (followupWrite == 0)
@@ -760,6 +778,7 @@ pos_t Hashjoin::joinBoncz() {
 }
 
 size_t Hashjoin::next() {
+   //FTR_SCOPE("Hashjoin:next");
    using runtime::Hashmap;
    // --- build
    if (!consumed) {
@@ -834,6 +853,7 @@ pos_t HashGroup::findGroupsFromPartition(void* data, size_t n) {
 }
 
 size_t HashGroup::next() {
+   //FTR_SCOPE("Hashjoin:next");
    using header_t = decltype(ht)::EntryHeader;
    if (!cont.consumed) {
       /// ------ phase 1: local preaggregation

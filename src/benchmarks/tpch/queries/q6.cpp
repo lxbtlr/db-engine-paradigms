@@ -10,21 +10,14 @@
 
 // for use with magic-trace
 extern "C" {
-    __attribute__((noinline)) void magic_trace_stop_indicator() {
-        asm(""); 
-    }
+__attribute__((noinline)) void magic_trace_stop_indicator() { asm(""); }
 }
 extern "C" {
-    __attribute__((noinline)) void start_flag() {
-        asm(""); 
-    }
+__attribute__((noinline)) void start_flag() { asm(""); }
 }
 extern "C" {
-    __attribute__((noinline)) void stop_flag() {
-        asm(""); 
-    }
+__attribute__((noinline)) void stop_flag() { asm(""); }
 }
-
 
 using namespace runtime;
 using namespace std;
@@ -61,21 +54,23 @@ NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
              auto& l_quantity = l_quantity_col[i];
              auto& l_extendedprice = l_extendedprice_col[i];
              auto& l_discount = l_discount_col[i];
+             //  if ((l_shipdate < c2) && (l_quantity < c5) && (l_discount >=
+             //  c3) &&
+             //      (l_discount <= c4) && (l_shipdate >= c1)) {
 
-             if ((l_shipdate >= c1) & (l_shipdate < c2) & (l_quantity < c5) &
-                 (l_discount >= c3) & (l_discount <= c4)) {
-                // --- aggregation
+             if ((l_shipdate >= c1) && (l_shipdate < c2) && (l_quantity < c5) &&
+                 (l_discount >= c3) && (l_discount <= c4)) {
+                //  --- aggregation
                 revenue += l_extendedprice * l_discount;
              }
-          stop_flag();
           }
+          stop_flag();
           return revenue;
        },
        [](const types::Numeric<12, 4>& x, const types::Numeric<12, 4>& y) {
           return x + y;
        });
-   //magic_trace_stop_indicator(); // lets try right here
-
+   // magic_trace_stop_indicator(); // lets try right here
 
    // --- output
    auto& rev = result["revenue"].typedAccessForChange<types::Numeric<12, 4>>();
@@ -98,33 +93,38 @@ unique_ptr<Q6Builder::Q6> Q6Builder::getQuery() {
    assert(db["lineitem"]["l_extendedprice"].type->rt_size() == sizeof(int64_t));
 
    auto lineitem = Scan("lineitem");
-   Select((Expression()                                       //
-              .addOp(conf.sel_less_int32_t_col_int32_t_val(), //
-                     Buffer(sel_a, sizeof(pos_t)),            //
-                     Column(lineitem, "l_shipdate"),          //
-                     Value(&consts.c2)))
-              .addOp(conf.selsel_greater_equal_int32_t_col_int32_t_val(), //
-                     Buffer(sel_a, sizeof(pos_t)),                        //
-                     Buffer(sel_b, sizeof(pos_t)),                        //
-                     Column(lineitem, "l_shipdate"),                      //
-                     Value(&consts.c1))
-             .addOp(conf.selsel_less_int64_t_col_int64_t_val(), //
-             // .addOp(primitives::selsel_less_int64_t_col_int64_t_val_bf, //
-                     Buffer(sel_b, sizeof(pos_t)),               //
-                     Buffer(sel_a, sizeof(pos_t)),               //
-                     Column(lineitem, "l_quantity"),             //
-                     Value(&consts.c5))
-              .addOp(conf.selsel_greater_equal_int64_t_col_int64_t_val(), //
-              //.addOp(primitives::selsel_greater_equal_int64_t_col_int64_t_val_bf, //
-                     Buffer(sel_a, sizeof(pos_t)),                        //
-                     Buffer(sel_b, sizeof(pos_t)),                        //
-                     Column(lineitem, "l_discount"),                      //
-                     Value(&consts.c3))
-              .addOp(conf.selsel_less_equal_int64_t_col_int64_t_val(), //
-                     Buffer(sel_b, sizeof(pos_t)),                     //
-                     Buffer(sel_a, sizeof(pos_t)),                     //
-                     Column(lineitem, "l_discount"),                   //
-                     Value(&consts.c4)));
+   Select(
+       (Expression()                                        //
+            .addOp(conf.sel_less_int32_t_col_int32_t_val(), //
+                   Buffer(sel_a, sizeof(pos_t)),            //
+                   Column(lineitem, "l_shipdate"),          //
+                   Value(&consts.c2)))
+           .addOp(conf.selsel_greater_equal_int32_t_col_int32_t_val(), //
+                  Buffer(sel_a, sizeof(pos_t)),                        //
+                  Buffer(sel_b, sizeof(pos_t)),                        //
+                  Column(lineitem, "l_shipdate"),                      //
+                  Value(&consts.c1))
+           .addOp(
+               conf.selsel_less_int64_t_col_int64_t_val(), //
+                                                           // .addOp(primitives::selsel_less_int64_t_col_int64_t_val_bf,
+                                                           // //
+               Buffer(sel_b, sizeof(pos_t)),   //
+               Buffer(sel_a, sizeof(pos_t)),   //
+               Column(lineitem, "l_quantity"), //
+               Value(&consts.c5))
+           .addOp(
+               conf.selsel_greater_equal_int64_t_col_int64_t_val(), //
+                                                                    //.addOp(primitives::selsel_greater_equal_int64_t_col_int64_t_val_bf,
+                                                                    ////
+               Buffer(sel_a, sizeof(pos_t)),   //
+               Buffer(sel_b, sizeof(pos_t)),   //
+               Column(lineitem, "l_discount"), //
+               Value(&consts.c3))
+           .addOp(conf.selsel_less_equal_int64_t_col_int64_t_val(), //
+                  Buffer(sel_b, sizeof(pos_t)),                     //
+                  Buffer(sel_a, sizeof(pos_t)),                     //
+                  Column(lineitem, "l_discount"),                   //
+                  Value(&consts.c4)));
    Project().addExpression(
        Expression() //
            .addOp(primitives::proj_sel_both_multiplies_int64_t_col_int64_t_col,
