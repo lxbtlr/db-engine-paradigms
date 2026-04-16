@@ -19,6 +19,46 @@
     using mask16_t = __mmask16;
     using mask32_t = __mmask32;
     using mask64_t = __mmask64;
+
+
+#if defined(__AVX512F__) && !defined(__AVX512VL__)
+    // --- Foundation-Safe Polyfills (Unique Names) ---
+
+    static inline __m512i knl_mullo_epi64(__m512i a, __m512i b) {
+        __m512i a_hi = _mm512_srli_epi64(a, 32);
+        __m512i b_hi = _mm512_srli_epi64(b, 32);
+        __m512i m_lo = _mm512_mul_epu32(a, b); 
+        __m512i m_ahi = _mm512_mul_epu32(a_hi, b);
+        __m512i m_bhi = _mm512_mul_epu32(a, b_hi);
+        __m512i m_hi = _mm512_add_epi64(m_ahi, m_bhi);
+        return _mm512_add_epi64(m_lo, _mm512_slli_epi64(m_hi, 32));
+    }
+
+    static inline __m256i knl_maskz_loadu_epi32(__mmask8 k, void const* p) {
+        return _mm512_castsi512_si256(_mm512_maskz_loadu_epi32((__mmask16)k, p));
+    }
+
+    // --- Macro Mapping (The Shadowing) ---
+
+    // 1. DQ: Missing 64-bit Multiply
+    #undef _mm512_mullo_epi64
+    #define _mm512_mullo_epi64(a, b) knl_mullo_epi64(a, b)
+
+    // 2. VL: Missing 256-bit Masked Ops
+    #undef _mm256_maskz_loadu_epi32
+    #define _mm256_maskz_loadu_epi32(k, p) knl_maskz_loadu_epi32(k, p)
+
+    #undef _mm256_mask_loadu_epi32
+    #define _mm256_mask_loadu_epi32(src, k, p) \
+        _mm512_castsi512_si256(_mm512_mask_loadu_epi32(_mm512_castsi256_si512(src), (__mmask16)k, p))
+
+    #undef _mm256_mask_compressstoreu_epi32
+    #define _mm256_mask_compressstoreu_epi32(p, k, a) \
+        _mm512_mask_compressstoreu_epi32(p, (__mmask16)k, _mm512_castsi256_si512(a))
+
+    // Note: _mm512_cvtepu32_epi64 is FOUNDATION. No macro needed.
+#endif
+
 #else
     // SIMDe Path (ARM or x86_64 without AVX512)
     #include <simde/x86/avx512.h>
@@ -184,7 +224,33 @@ struct Vec8uM {
 // --- Vec8u Operators ---
 inline Vec8u operator+ (const Vec8u& a, const Vec8u& b) { return _mm512_add_epi64(a.reg, b.reg); }
 inline Vec8u operator- (const Vec8u& a, const Vec8u& b) { return _mm512_sub_epi64(a.reg, b.reg); }
-inline Vec8u operator* (const Vec8u& a, const Vec8u& b) { return _mm512_mullo_epi64(a.reg, b.reg); }
+
+inline Vec8u operator* (const Vec8u& a, const Vec8u& b) {
+#if defined(__AVX512DQ__)
+    return _mm512_mullo_epi64(a.reg, b.reg);
+#else
+    // Polyfill for Knights Landing (AVX-512F only)
+    // Formula: (aL + aH) * (bL + bH) => aL*bL + (aL*bH + aH*bL) << 32
+    
+    // Extract high 32 bits of each 64-bit lane
+    __m512i a_hi = _mm512_srli_epi64(a.reg, 32);
+    __m512i b_hi = _mm512_srli_epi64(b.reg, 32);
+    
+    // _mm512_mul_epu32 multiplies the low 32 bits of each 64-bit lane
+    __m512i m_lo = _mm512_mul_epu32(a.reg, b.reg);  // a_lo * b_lo
+    __m512i m_ahi = _mm512_mul_epu32(a_hi, b.reg);  // a_hi * b_lo
+    __m512i m_bhi = _mm512_mul_epu32(a.reg, b_hi);  // a_lo * b_hi
+    
+    // Sum the high-order partial products
+    __m512i m_hi = _mm512_add_epi64(m_ahi, m_bhi);
+    
+    // Shift the high-order sum back into the top 32 bits of the 64-bit result
+    m_hi = _mm512_slli_epi64(m_hi, 32);
+    
+    // Combine to get the final 64-bit low-product
+    return _mm512_add_epi64(m_lo, m_hi);
+#endif
+}
 inline Vec8u operator^ (const Vec8u& a, const Vec8u& b) { return _mm512_xor_epi64(a.reg, b.reg); }
 inline Vec8u operator& (const Vec8u& a, const Vec8u& b) { return _mm512_and_epi64(a.reg, b.reg); }
 inline Vec8u operator| (const Vec8u& a, const Vec8u& b) { return _mm512_or_epi64(a.reg, b.reg); }
