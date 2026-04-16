@@ -7,6 +7,7 @@
 #include "vectorwise/QueryBuilder.hpp"
 #include "vectorwise/VectorAllocator.hpp"
 #include <iostream>
+#include "benchmarks/tpch/selection_condidition.hpp"
 
 using namespace runtime;
 using namespace std;
@@ -42,12 +43,19 @@ NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
              auto& l_quantity = l_quantity_col[i];
              auto& l_extendedprice = l_extendedprice_col[i];
              auto& l_discount = l_discount_col[i];
-
+        
+#ifndef SELETION_ABLATION
              if ((l_shipdate >= c1) & (l_shipdate < c2) & (l_quantity < c5) &
                  (l_discount >= c3) & (l_discount <= c4)) {
                 // --- aggregation
                 revenue += l_extendedprice * l_discount;
              }
+#else
+             if (SELECTION_CONDITION(i)) {
+                revenue += l_extendedprice * l_discount;
+             }
+#endif
+
           }
           return revenue;
        },
