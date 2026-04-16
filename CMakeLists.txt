@@ -344,3 +344,41 @@ if(AVX512EXPERIMENTS)
     PRIVATE src)
   target_link_libraries(run_join vectorwise common ${TBB_LIBRARIES}  ${JEVENTSLIB})
 endif(AVX512EXPERIMENTS)
+
+include(ablation_study.cmake)
+foreach(OP RANGE 0 1)
+  foreach(PERM RANGE 0 119)
+
+    set(_tpch  "tpch_op${OP}_perm${PERM}")
+    set(_run   "run_tpch_op${OP}_perm${PERM}")
+
+    # Clone the tpch library — this is where q6.cpp actually lives
+    add_library(${_tpch} STATIC ${TPCHQUERIES})
+    target_include_directories(${_tpch} PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+        PRIVATE src)
+    target_compile_definitions(${_tpch} PRIVATE
+        OPERATOR_VARIANT=${OP}
+        PERMUTATION_INDEX=${PERM})
+    target_link_libraries(${_tpch} benchmark_config pthread hyper
+        ${TBB_LIBRARIES} vectorwise common)
+
+    # Clone the runner executable, linking against the variant tpch lib
+    add_executable(${_run}
+        ${HYPER_TRANSLATORS}
+        src/benchmarks/tpch/run.cpp)
+    target_include_directories(${_run} PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+        PRIVATE src)
+    target_link_libraries(${_run} ${_tpch} hyper vectorwise common ${JEVENTSLIB})
+    set_target_properties(${_run} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ablation")
+
+  endforeach()
+endforeach()
+
+
+
+
