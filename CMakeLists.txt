@@ -35,6 +35,7 @@ if(NOT CMAKE_C_FLAGS OR CMAKE_C_FLAGS STREQUAL "")
     set(CMAKE_C_FLAGS "-O3 -fPIC -fno-omit-frame-pointer -fdiagnostics-color")
 endif()
 
+
 # Common flags that should always be there regardless of architecture
 add_compile_options(-Wall -Wextra -Wno-unknown-pragmas)
 
@@ -82,9 +83,17 @@ ENDIF()
 
 
 IF(AUTOVECTORIZE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
+  if(CMAKE_C_COMPILER STREQUAL "clang") 
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fvectorize")
+  else()
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
+  endif()
 ELSE(AUTOVECTORIZE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
+  if(CMAKE_C_COMPILER STREQUAL "clang") 
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-slp-vectorize -fno-vectorize")
+  else()
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
+  endif()
 ENDIF(AUTOVECTORIZE)
 
 
