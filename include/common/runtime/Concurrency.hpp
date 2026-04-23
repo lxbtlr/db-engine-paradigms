@@ -28,6 +28,8 @@ extern thread_local bool currentBarrier;
 //#define NEW_POLICY 1
 //#define NUMA_BANDWIDTH 1
 //#define NUMA_LATENCY 1
+//#define ARM_BISECT 1
+
 class Worker
 /// information about the worker thread.
 /// accessible via thread local 'this_worker'
@@ -84,6 +86,52 @@ class WorkerGroup
 // #############################################################################
 // static scheduling policies
 // #############################################################################
+
+struct ArmMeshConfig {
+    size_t totalCores;
+    size_t coresPerL2Group;
+    size_t smtPerCore;
+
+    size_t totalL2Groups() const { return totalCores / coresPerL2Group; }
+    size_t totalPUs()      const { return totalCores * smtPerCore; }
+};
+
+inline ArmMeshConfig graviton4()   { return { 96,  1, 1 }; }
+inline ArmMeshConfig ampereAltra() { return { 128, 4, 1 }; }
+
+inline std::vector<size_t> bisectSchedule(size_t lo, size_t hi) {
+    std::vector<size_t> schedule;
+    std::function<void(size_t, size_t)> bisect = [&](size_t lo, size_t hi) {
+        if (lo > hi) return;
+        size_t mid = lo + (hi - lo) / 2;
+        schedule.push_back(mid);
+        if (mid > lo) bisect(lo, mid - 1);
+        bisect(mid + 1, hi);
+    };
+    bisect(lo, hi);
+    return schedule;
+}
+
+inline std::vector<size_t> armMeshBisect(size_t numThreads, const ArmMeshConfig& cfg) {
+    if (numThreads > cfg.totalPUs())
+        throw std::runtime_error("numThreads " + std::to_string(numThreads) +
+                                 " exceeds available PUs " + std::to_string(cfg.totalPUs()));
+
+    auto groupOrder = bisectSchedule(0, cfg.totalL2Groups() - 1);
+
+    std::vector<size_t> schedule;
+    schedule.reserve(numThreads);
+
+    for (size_t coreInGroup = 0; coreInGroup < cfg.coresPerL2Group
+                                 && schedule.size() < numThreads; ++coreInGroup)
+        for (size_t group : groupOrder) {
+            if (schedule.size() >= numThreads) break;
+            schedule.push_back(group * cfg.coresPerL2Group + coreInGroup);
+        }
+
+    return schedule;
+}
+
 inline std::vector<size_t> buildNumaPhysicalCoreMap(size_t socketsCount, 
                                                      size_t coresPerSocket,
                                                      size_t smtPerCore) {
@@ -173,6 +221,8 @@ inline void WorkerGroup::run(std::function<void()> f) {
 #elif NUMA_LATENCY
    // consolidated: good for Q3, Q9 (join/hash table heavy)
    auto schedule = numaConsolidatedSchedule(size - 1, 4, 22,smt);
+#elif ARM_BISECT
+   auto schedule = armMeshBisect(size - 1, graviton4());
 #else
    std::vector<size_t> schedule;
 #endif
