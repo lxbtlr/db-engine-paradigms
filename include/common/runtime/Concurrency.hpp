@@ -23,6 +23,11 @@ extern thread_local Worker* this_worker;
 extern GlobalPool defaultPool;
 extern thread_local bool currentBarrier;
 
+
+// Used to control thread scheduling, by default we use the provided method
+//#define NEW_POLICY 1
+//#define NUMA_BANDWIDTH 1
+//#define NUMA_LATENCY 1
 class Worker
 /// information about the worker thread.
 /// accessible via thread local 'this_worker'
@@ -79,27 +84,76 @@ class WorkerGroup
 // #############################################################################
 // static scheduling policies
 // #############################################################################
-inline std::vector<size_t> bisectSchedule(size_t lo, size_t hi) {
-    
+inline std::vector<size_t> buildNumaPhysicalCoreMap(size_t socketsCount, 
+                                                     size_t coresPerSocket,
+                                                     size_t smtPerCore) {
+    // Physical PU IDs are laid out as:
+    // First all physical cores: core * socketsCount + socket
+    // Then HT siblings offset by (socketsCount * coresPerSocket * smtIndex)
+    size_t totalPhysical = socketsCount * coresPerSocket;
+    std::vector<size_t> physicalCores;
+    physicalCores.reserve(totalPhysical * smtPerCore);
+
+    for (size_t smt = 0; smt < smtPerCore; ++smt)
+        for (size_t socket = 0; socket < socketsCount; ++socket)
+            for (size_t core = 0; core < coresPerSocket; ++core)
+                physicalCores.push_back(smt * totalPhysical + core * socketsCount + socket);
+
+    return physicalCores;
+}
+
+// Bandwidth-optimized: fan out across NUMA nodes as early as possible
+// Physical cores exhausted first, then hyperthreads in the same order
+inline std::vector<size_t> numaFanOutSchedule(size_t numThreads,
+                                               size_t socketsCount,
+                                               size_t coresPerSocket,
+                                               size_t smtPerCore = 1) {
+    auto physicalMap = buildNumaPhysicalCoreMap(socketsCount, coresPerSocket, smtPerCore);
+    size_t totalPUs = socketsCount * coresPerSocket * smtPerCore;
+
+    if (numThreads > totalPUs)
+        throw std::runtime_error("numThreads " + std::to_string(numThreads) +
+                                 " exceeds available PUs " + std::to_string(totalPUs));
+
     std::vector<size_t> schedule;
-    std::function<void(size_t, size_t)> bisect = [&](size_t lo, size_t hi) {
-        if (lo > hi) return;
-        size_t mid = lo + (hi - lo) / 2;
-        schedule.push_back(mid);
-        if (mid > lo) bisect(lo, mid - 1);
-        bisect(mid + 1, hi);
-    };
-    
-    bisect(lo, hi);
+    schedule.reserve(numThreads);
+
+    // Walk: smt -> core -> socket, so physical cores across all sockets
+    // are exhausted before any hyperthread is used
+    for (size_t smt = 0; smt < smtPerCore && schedule.size() < numThreads; ++smt)
+        for (size_t core = 0; core < coresPerSocket && schedule.size() < numThreads; ++core)
+            for (size_t socket = 0; socket < socketsCount && schedule.size() < numThreads; ++socket)
+                schedule.push_back(physicalMap[smt * socketsCount * coresPerSocket +
+                                               socket * coresPerSocket + core]);
+
     return schedule;
 }
 
-inline std::vector<size_t> bisectPhysicalFirst(size_t numCores) {
-    // physical cores are even-numbered on most Intel layouts
-    auto schedule = bisectSchedule(0, numCores - 1);
-    std::vector<size_t> remapped;
-    for (size_t c : schedule) remapped.push_back(c * 2);
-    return remapped;
+// Latency-optimized: consolidate within NUMA node before spilling over
+// Physical cores exhausted per socket first, then hyperthreads per socket
+inline std::vector<size_t> numaConsolidatedSchedule(size_t numThreads,
+                                                     size_t socketsCount,
+                                                     size_t coresPerSocket,
+                                                     size_t smtPerCore = 1) {
+    auto physicalMap = buildNumaPhysicalCoreMap(socketsCount, coresPerSocket, smtPerCore);
+    size_t totalPUs = socketsCount * coresPerSocket * smtPerCore;
+
+    if (numThreads > totalPUs)
+        throw std::runtime_error("numThreads " + std::to_string(numThreads) +
+                                 " exceeds available PUs " + std::to_string(totalPUs));
+
+    std::vector<size_t> schedule;
+    schedule.reserve(numThreads);
+
+    // Walk: socket -> smt -> core, so all SMT siblings on a socket
+    // are used before moving to the next socket
+    for (size_t socket = 0; socket < socketsCount && schedule.size() < numThreads; ++socket)
+        for (size_t smt = 0; smt < smtPerCore && schedule.size() < numThreads; ++smt)
+            for (size_t core = 0; core < coresPerSocket && schedule.size() < numThreads; ++core)
+                schedule.push_back(physicalMap[smt * socketsCount * coresPerSocket +
+                                               socket * coresPerSocket + core]);
+
+    return schedule;
 }
 
 
@@ -107,14 +161,31 @@ inline void WorkerGroup::run(std::function<void()> f) {
    tbb::task_group g;
    auto barriers = HierarchicBarrier::create(size);
    int64_t group = -1;
-   // TODO: this is how we are going to play with the static scheduling 
-   // std::vector<size_t> schedule = [1 128 64 32 96 16 48 80 112 8 24 40 56 72 88 104 120 4 12 20 28 36 44 52 60 68 76 84 92 100 108 116 124 2 6 10 14 18 22 26 30 34 38 42 46 50 54 58 62 66 70 74 78 82 86 90 94 98 102 106 110 114 118 122 126 3 5 7 9 11 13 15 17 19 21 23 25 27 29 31 33 35 37 39 41 43 45 47 49 51 53 55 57 59 61 63 65 67 69 71 73 75 77 79 81 83 85 87 89 91 93 95 97 99 101 103 105 107 109 111 113 115 117 119 121 123 125 127]
 
 
-   //for (size_t i = 0; i < size - 1; ++i) {
    
    size_t nprocs = 88;
-   std::vector<size_t> schedule = bisectPhysicalFirst(nprocs);
+   size_t smt = 2;
+#ifdef NUMA_BANDWIDTH
+   // fan-out: good for Q1, Q6 (bandwidth bound)
+   auto schedule = numaFanOutSchedule(size - 1, 4, 22, smt);
+
+#elif NUMA_LATENCY
+   // consolidated: good for Q3, Q9 (join/hash table heavy)
+   auto schedule = numaConsolidatedSchedule(size - 1, 4, 22,smt);
+#else
+   std::vector<size_t> schedule;
+#endif
+
+   for (size_t i = 0; i < schedule.size(); ++i) {
+       if (schedule[i] >= nprocs*smt) {
+           throw std::runtime_error("Schedule entry " + std::to_string(i) + 
+                   " maps to invalid CPU " + std::to_string(schedule[i]));
+       }
+   }
+
+
+
 
    for (size_t i = 0; i < size - 1; ++i) {
       // lets carefully use the mapping to barriers that the system was already 
@@ -122,7 +193,7 @@ inline void WorkerGroup::run(std::function<void()> f) {
       if (i % HierarchicBarrier::threadsPerBarrier == 0) ++group;
       threads.emplace_back(this, f, barriers[group]);
       auto worker = &threads.back();
-#ifdef STATIC_POLICY
+#ifdef NEW_POLICY
       size_t selection = schedule[i];
 #else
       size_t selection = i;
