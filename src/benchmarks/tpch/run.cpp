@@ -101,7 +101,6 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Engine: %s | Query: %s | Threads: %ld | VectorSize: %ld\n", 
             selectedEngine.c_str(), selectedQuery.c_str(), nrThreads, vectorSize);
 
-    if (auto v = std::getenv("vectorSize")) vectorSize = atoi(v);
     if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
     if (auto v = std::getenv("SIMDjoin")) conf.useSimdJoin = atoi(v);
     if (auto v = std::getenv("SIMDsel")) conf.useSimdSel = atoi(v);
