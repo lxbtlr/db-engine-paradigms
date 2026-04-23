@@ -12,7 +12,6 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-
 #include <algorithm>
 #include <asm/unistd.h>
 #include <fstream>
@@ -76,7 +75,7 @@ inline int resolve_event(const char* str, struct perf_event_attr* pe) {
    (void)str;
    (void)pe;
    return -1;
-}
+
 }
 #endif
 
