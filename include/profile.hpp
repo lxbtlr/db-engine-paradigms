@@ -69,7 +69,7 @@ inline char* get_cpu_str() {
       }
    }
    return cpu_buffer;
-}
+}}
 
 inline int resolve_event(const char* str, struct perf_event_attr* pe) {
    (void)str;
