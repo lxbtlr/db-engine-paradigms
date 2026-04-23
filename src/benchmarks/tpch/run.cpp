@@ -101,121 +101,137 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Engine: %s | Query: %s | Threads: %ld | VectorSize: %ld\n", 
             selectedEngine.c_str(), selectedQuery.c_str(), nrThreads, vectorSize);
 
+    if (auto v = std::getenv("vectorSize")) vectorSize = atoi(v);
+    if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
+    if (auto v = std::getenv("SIMDjoin")) conf.useSimdJoin = atoi(v);
+    if (auto v = std::getenv("SIMDsel")) conf.useSimdSel = atoi(v);
+    if (auto v = std::getenv("SIMDproj")) conf.useSimdProj = atoi(v);
+    if (auto v = std::getenv("clearCaches")) clearCaches = atoi(v);
+    if (auto v = std::getenv("q")) {
+	    using namespace std;
+	    istringstream iss((string(v)));
+	    q.clear();
+	    copy(istream_iterator<string>(iss), istream_iterator<string>(),
+			    insert_iterator<decltype(q)>(q, q.begin()));
+    }
+
+
+
     tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
 
-   if (q.count("1h"))
-      e.timeAndProfile("q1 hyper     ", nrTuples(tpch, {"lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result = q1_hyper(tpch, nrThreads);
-                          escape(&result);
-                       },
-                       repetitions);
-   if (q.count("1v"))
-      e.timeAndProfile("q1 vectorwise", nrTuples(tpch, {"lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result =
-                              q1_vectorwise(tpch, nrThreads, vectorSize);
-                          escape(&result);
-                       },
-                       repetitions);
-   if (q.count("3h"))
-      e.timeAndProfile("q3 hyper     ",
-                       nrTuples(tpch, {"customer", "orders", "lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result = q3_hyper(tpch, nrThreads);
-                          escape(&result);
-                       },
-                       repetitions);
-   if (q.count("3v"))
-      e.timeAndProfile(
-          "q3 vectorwise", nrTuples(tpch, {"customer", "orders", "lineitem"}),
-          [&]() {
-             if (clearCaches) clearOsCaches();
-             auto result = q3_vectorwise(tpch, nrThreads, vectorSize);
-             escape(&result);
-          },
-          repetitions);
-   if (q.count("5h"))
-      e.timeAndProfile("q5 hyper     ",
-                       nrTuples(tpch, {"supplier", "region", "nation",
-                                       "customer", "orders", "lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result = q5_hyper(tpch, nrThreads);
-                          escape(&result);
-                       },
-                       repetitions);
-   if (q.count("5v"))
-      e.timeAndProfile("q5 vectorwise",
-                       nrTuples(tpch, {"supplier", "region", "nation",
-                                       "customer", "orders", "lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result =
-                              q5_vectorwise(tpch, nrThreads, vectorSize);
-                          escape(&result);
-                       },
-                       repetitions);
-   if (q.count("6h"))
-      e.timeAndProfile("q6 hyper     ", tpch["lineitem"].nrTuples,
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result = q6_hyper(tpch, nrThreads);
-                          escape(&result);
-                       },
-                       repetitions);
-   if (q.count("6v"))
-      e.timeAndProfile("q6 vectorwise", tpch["lineitem"].nrTuples,
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result =
-                              q6_vectorwise(tpch, nrThreads, vectorSize);
-                          escape(&result);
-                       },
-                       repetitions);
-   if (q.count("9h"))
-      e.timeAndProfile("q9 hyper     ",
-                       nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
-                                       "lineitem", "orders"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result = q9_hyper(tpch, nrThreads);
-                          escape(&result);
-                       },
-                       repetitions);
-   if (q.count("9v"))
-      e.timeAndProfile("q9 vectorwise",
-                       nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
-                                       "lineitem", "orders"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result =
-                              q9_vectorwise(tpch, nrThreads, vectorSize);
-                          escape(&result);
-                       },
-                       repetitions);
-   if (q.count("18h"))
-      e.timeAndProfile(
-          "q18 hyper     ",
-          nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
-          [&]() {
-             if (clearCaches) clearOsCaches();
-             auto result = q18_hyper(tpch, nrThreads);
-             escape(&result);
-          },
-          repetitions);
-   if (q.count("18v"))
-      e.timeAndProfile(
-          "q18 vectorwise",
-          nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
-          [&]() {
-             if (clearCaches) clearOsCaches();
-             auto result = q18_vectorwise(tpch, nrThreads, vectorSize);
-             escape(&result);
-          },
-          repetitions);
-   return 0;
+    if (q.count("1h"))
+	    e.timeAndProfile("q1 hyper     ", nrTuples(tpch, {"lineitem"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result = q1_hyper(tpch, nrThreads);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("1v"))
+	    e.timeAndProfile("q1 vectorwise", nrTuples(tpch, {"lineitem"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result =
+			    q1_vectorwise(tpch, nrThreads, vectorSize);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("3h"))
+	    e.timeAndProfile("q3 hyper     ",
+			    nrTuples(tpch, {"customer", "orders", "lineitem"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result = q3_hyper(tpch, nrThreads);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("3v"))
+	    e.timeAndProfile(
+			    "q3 vectorwise", nrTuples(tpch, {"customer", "orders", "lineitem"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result = q3_vectorwise(tpch, nrThreads, vectorSize);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("5h"))
+	    e.timeAndProfile("q5 hyper     ",
+			    nrTuples(tpch, {"supplier", "region", "nation",
+				    "customer", "orders", "lineitem"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result = q5_hyper(tpch, nrThreads);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("5v"))
+	    e.timeAndProfile("q5 vectorwise",
+			    nrTuples(tpch, {"supplier", "region", "nation",
+				    "customer", "orders", "lineitem"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result =
+			    q5_vectorwise(tpch, nrThreads, vectorSize);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("6h"))
+	    e.timeAndProfile("q6 hyper     ", tpch["lineitem"].nrTuples,
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result = q6_hyper(tpch, nrThreads);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("6v"))
+	    e.timeAndProfile("q6 vectorwise", tpch["lineitem"].nrTuples,
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result =
+			    q6_vectorwise(tpch, nrThreads, vectorSize);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("9h"))
+	    e.timeAndProfile("q9 hyper     ",
+			    nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
+				    "lineitem", "orders"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result = q9_hyper(tpch, nrThreads);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("9v"))
+	    e.timeAndProfile("q9 vectorwise",
+			    nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
+				    "lineitem", "orders"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result =
+			    q9_vectorwise(tpch, nrThreads, vectorSize);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("18h"))
+	    e.timeAndProfile(
+			    "q18 hyper     ",
+			    nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result = q18_hyper(tpch, nrThreads);
+			    escape(&result);
+			    },
+			    repetitions);
+    if (q.count("18v"))
+	    e.timeAndProfile(
+			    "q18 vectorwise",
+			    nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
+			    [&]() {
+			    if (clearCaches) clearOsCaches();
+			    auto result = q18_vectorwise(tpch, nrThreads, vectorSize);
+			    escape(&result);
+			    },
+			    repetitions);
+    return 0;
 }
