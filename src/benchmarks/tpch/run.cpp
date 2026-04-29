@@ -101,6 +101,12 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Engine: %s | Query: %s | Threads: %ld | VectorSize: %ld\n", 
             selectedEngine.c_str(), selectedQuery.c_str(), nrThreads, vectorSize);
 
+    if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
+    if (auto v = std::getenv("SIMDjoin")) conf.useSimdJoin = atoi(v);
+    if (auto v = std::getenv("SIMDsel")) conf.useSimdSel = atoi(v);
+    if (auto v = std::getenv("SIMDproj")) conf.useSimdProj = atoi(v);
+    if (auto v = std::getenv("clearCaches")) clearCaches = atoi(v);
+
     tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
 
    if (q.count("1h"))
