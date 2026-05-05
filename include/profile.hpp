@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include "timer.hpp"
 #include <asm/unistd.h>
 #include <fstream>
 #include <linux/perf_event.h>
@@ -264,7 +265,7 @@ struct PerfEvents {
    };
 
    void timeAndProfile(std::string s, uint64_t count, std::function<void()> fn,
-                       uint64_t repetitions = 1, bool mem = false);
+                       uint64_t repetitions, bool mem = false);
 };
 
 #else
@@ -380,15 +381,17 @@ struct PerfEvents {
    double operator[](std::string name) { return event_map[name].readCounter(); }
 
    void timeAndProfile(std::string s, uint64_t count, std::function<void()> fn,
-                       uint64_t repetitions = 1, bool mem = false);
+                       uint64_t repetitions, bool mem = false);
 };
 #endif
 
 // Shared utility functions
-inline double gettime() {
+inline long double gettime() {
    struct timeval now_tv;
    gettimeofday(&now_tv, NULL);
    return ((double)now_tv.tv_sec) + ((double)now_tv.tv_usec) / 1000000.0;
+   
+   //return timers::read_strict();
 }
 
 size_t getCurrentRSS() {
@@ -403,7 +406,7 @@ size_t getCurrentRSS() {
    return (size_t)rss * (size_t)sysconf(_SC_PAGESIZE);
 }
 
-#define USE_MIN_MODE
+//#define USE_MIN_MODE
 
 // Logic for report printing (switches based on macro)
 void PerfEvents::timeAndProfile(std::string s, uint64_t count,
@@ -412,7 +415,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    for (int i = 0; i < 3; i++) fn(); // Warmup
    uint64_t memStart = mem ? getCurrentRSS() : 0;
 
-   double runtime = 0;
+   //long double runtime = 0;
    double min_runtime = std::numeric_limits<double>::max();
 
 #ifdef USE_MIN_MODE
@@ -420,12 +423,12 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    // Execute and measure each repetition individually to find the minimum
    for (size_t i = 0; i < repetitions; i++) {
       startAll();
-      double start = gettime();
+      long double start = gettime();
       fn();
-      double end = gettime();
+      long double end = gettime();
       readAll(); // This also stops/disables counters internally
 
-      double current_run = end - start;
+      long double current_run = (end - start) / 1000000;
       if (current_run < min_runtime) {
          min_runtime = current_run;
          // In this mode, readAll() captured the delta for exactly one 'fn'
@@ -440,11 +443,18 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
 #else
    // Original Average Mode: Measure all repetitions in one batch
    startAll();
-   double start = gettime();
-   for (size_t i = 0; i < repetitions; i++) fn();
-   double end = gettime();
+   long double start = gettime();
+   for (size_t i = 0; i < repetitions; i++){ 
+      asm volatile("" : : "r"(i) : "memory");
+      fn();
+      asm volatile("" ::: "memory");  // clobber after as well 
+   };
+   long double end = gettime();//timers::read_strict();//
    readAll();
-   runtime = end - start;
+
+   long double runtime = (double) (end - start) ;
+
+   //runtime = end - start;
    double effective_reps = static_cast<double>(repetitions);
 #endif
 
@@ -481,7 +491,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    double be = 100.0 - (fe + spec + ret);
    double ipc = (*this)["instr."] / (*this)["cycles"];
    std::cout << std::setw(printFieldWidth)
-             << (runtime * 1e3 / (min_mode ? 1 : repetitions)) << ",";
+             << (runtime  * 1e3  / (min_mode ? 1 : repetitions)) << ",";
    std::cout << std::fixed << std::setprecision(2) << std::setw(printFieldWidth)
              << fe << "%," << std::setw(printFieldWidth) << be << "%,"
              << std::setw(printFieldWidth) << spec << "%,"
@@ -508,8 +518,6 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    printAll(std::cout, count * repetitions);
    //}
 
-   // ... [Original scale/printing logic omitted for brevity, identical to your
-   // top block]
 #endif
    std::cout << std::endl;
 }
