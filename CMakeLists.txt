@@ -144,6 +144,8 @@ find_package(TBB)
 include_directories(${TBB_INCLUDE_DIRS})
 include_directories("3rdparty/simde")
 
+add_subdirectory("3rdparty/timer")
+include_directories("3rdparty/timer/src")
 
 IF(LINUX)
   #add_subdirectory(3rdparty/jevents)
@@ -170,6 +172,8 @@ target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
+                                                    
+target_link_libraries(common PUBLIC timers)
 
 
 set(HYPER_TRANSLATORS
