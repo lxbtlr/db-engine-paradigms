@@ -5,6 +5,7 @@
 #include "common/runtime/MemoryPool.hpp"
 #include "tbb/task_group.h"
 #include <deque>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -20,7 +21,13 @@ class Worker;
 class WorkerGroup;
 
 extern thread_local Worker* this_worker;
+#ifdef NUMA_POOLS
+constexpr size_t MAX_NUMA_NODES = 4;
+extern GlobalPool numaPools[MAX_NUMA_NODES];
+extern size_t activeNumaNodes;
+#else
 extern GlobalPool defaultPool;
+#endif
 extern thread_local bool currentBarrier;
 
 
@@ -37,6 +44,9 @@ class Worker
    WorkerGroup* group;
    Allocator allocator;
    HierarchicBarrier* barrier;
+#ifdef NUMA_POOLS
+   size_t numaNode = 0;
+#endif
 
    void start() {
       // set reference to worker in this thread
@@ -47,11 +57,19 @@ class Worker
    };
    Worker(WorkerGroup* g, std::function<void()> f, HierarchicBarrier* b)
        : group(g), barrier(b), function(f){};
+#ifdef NUMA_POOLS
+   Worker(WorkerGroup* g, HierarchicBarrier* b, size_t node)
+       : group(g), barrier(b), numaNode(node) {
+      this_worker = this;
+      allocator.setSource(getNumaPool(node));
+   };
+#else
    Worker(WorkerGroup* g, HierarchicBarrier* b, GlobalPool& p)
        : group(g), barrier(b) {
       this_worker = this;
       allocator.setSource(&p);
    };
+#endif
    explicit Worker() {}
    // void join() { t->join(); }
 
@@ -156,6 +174,40 @@ inline std::vector<size_t> numaConsolidatedSchedule(size_t numThreads,
     return schedule;
 }
 
+// #############################################################################
+// NUMA node detection and management
+// #############################################################################
+#ifdef NUMA_POOLS
+inline size_t detectNumaNodes() {
+#ifdef __linux__
+    // Read from /sys/devices/system/node to detect NUMA nodes
+    size_t nodeCount = 0;
+    for (size_t i = 0; i < MAX_NUMA_NODES; ++i) {
+        std::string path = "/sys/devices/system/node/node" + std::to_string(i);
+        std::ifstream nodeCheck(path);
+        if (nodeCheck.good()) {
+            nodeCount = i + 1;
+        }
+    }
+    return nodeCount > 0 ? nodeCount : 1;
+#else
+    return 1; // Non-Linux systems default to single node
+#endif
+}
+
+inline size_t cpuToNumaNode(size_t cpu, size_t socketsCount, size_t coresPerSocket) {
+    // For typical Intel/AMD systems: NUMA node corresponds to socket
+    // Physical layout: cpu = socket * coresPerSocket * smtPerCore + ...
+    return cpu / (coresPerSocket * 2); // Assuming 2-way SMT
+}
+
+inline GlobalPool* getNumaPool(size_t numaNode) {
+    if (numaNode >= activeNumaNodes) {
+        numaNode = 0; // Fallback to node 0 if invalid
+    }
+    return &numaPools[numaNode];
+}
+#endif
 
 inline void WorkerGroup::run(std::function<void()> f) {
    tbb::task_group g;
@@ -188,27 +240,43 @@ inline void WorkerGroup::run(std::function<void()> f) {
 
 
    for (size_t i = 0; i < size - 1; ++i) {
-      // lets carefully use the mapping to barriers that the system was already 
+      // lets carefully use the mapping to barriers that the system was already
       // using then ask for the cpu that we want based on our schedule
       if (i % HierarchicBarrier::threadsPerBarrier == 0) ++group;
+#ifdef NUMA_POOLS
+      // Determine CPU assignment first, then compute NUMA node
+      size_t selection;
+#ifdef NEW_POLICY
+      selection = schedule[i];
+#else
+      selection = i;
+#endif
+      size_t node = cpuToNumaNode(selection, 4, 22); // 4 sockets, 22 cores per socket
       threads.emplace_back(this, f, barriers[group]);
+      threads.back().numaNode = node;
+      threads.back().allocator.setSource(getNumaPool(node));
+#else
+      threads.emplace_back(this, f, barriers[group]);
+#endif
       auto worker = &threads.back();
+#ifndef NUMA_POOLS
 #ifdef NEW_POLICY
       size_t selection = schedule[i];
 #else
       size_t selection = i;
 #endif
+#endif
 
       g.run([worker, i,selection]() {
 
-         
+
 #ifndef __APPLE__
          pthread_t currentThread = pthread_self();
          pthread_setname_np(currentThread,
                             ("workerPool " + std::to_string(selection)).c_str());
          cpu_set_t cpuset;
          CPU_ZERO(&cpuset);
-         
+
          CPU_SET(selection, &cpuset);
          if (pthread_setaffinity_np(currentThread, sizeof(cpu_set_t),
                                     &cpuset) != 0) {

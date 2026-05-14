@@ -24,6 +24,7 @@ OPTION(AVX512EXPERIMENTS OFF)
 OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
+OPTION(NUMA_POOLS "Enable NUMA-aware memory pools (one pool per NUMA node)" OFF)
 
 
 # Only set defaults if they aren't provided by the command line (sweep script)
@@ -79,6 +80,10 @@ IF(HASH_SIZE_32)
 ELSE()
   ADD_DEFINITIONS(-DHASH_SIZE=64)
 ENDIF()
+IF(NUMA_POOLS)
+  ADD_DEFINITIONS(-DNUMA_POOLS)
+  message(STATUS "NUMA-aware memory pools enabled")
+ENDIF(NUMA_POOLS)
 
 
 
