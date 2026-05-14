@@ -27,11 +27,20 @@ class GlobalPool {
    Chunk* current = nullptr;
    size_t allocSize = 128 * 1024 * 1024;
 
+#if defined(NUMA_POOLS) && defined(NUMA_MBIND)
+   int numaNode = -1; // NUMA node this pool is bound to (-1 = no binding)
+#endif
+
  public:
    GlobalPool();
    ~GlobalPool();
    GlobalPool(GlobalPool&&) = delete;
    GlobalPool(const GlobalPool&) = delete;
+
+#if defined(NUMA_POOLS) && defined(NUMA_MBIND)
+   void setNumaNode(int node) { numaNode = node; }
+   int getNumaNode() const { return numaNode; }
+#endif
 
    Chunk* newChunk(size_t size);
    void* allocate(size_t size);

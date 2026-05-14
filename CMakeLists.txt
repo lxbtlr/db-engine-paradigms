@@ -25,6 +25,7 @@ OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 OPTION(NUMA_POOLS "Enable NUMA-aware memory pools (one pool per NUMA node)" OFF)
+OPTION(NUMA_MBIND "Enable mbind() to bind memory to NUMA nodes (requires NUMA_POOLS and libnuma)" OFF)
 
 
 # Only set defaults if they aren't provided by the command line (sweep script)
@@ -83,6 +84,13 @@ ENDIF()
 IF(NUMA_POOLS)
   ADD_DEFINITIONS(-DNUMA_POOLS)
   message(STATUS "NUMA-aware memory pools enabled")
+
+  IF(NUMA_MBIND)
+    ADD_DEFINITIONS(-DNUMA_MBIND)
+    message(STATUS "NUMA mbind() memory binding enabled")
+    # Note: Requires libnuma-dev package on Linux
+    # The numaif.h header should be available with libnuma-dev
+  ENDIF(NUMA_MBIND)
 ENDIF(NUMA_POOLS)
 
 
