@@ -25,6 +25,37 @@ extern thread_local Worker* this_worker;
 constexpr size_t MAX_NUMA_NODES = 4;
 extern GlobalPool numaPools[MAX_NUMA_NODES];
 extern size_t activeNumaNodes;
+
+// NUMA utility functions - declared before Worker class
+inline size_t detectNumaNodes() {
+#ifdef __linux__
+    // Read from /sys/devices/system/node to detect NUMA nodes
+    size_t nodeCount = 0;
+    for (size_t i = 0; i < MAX_NUMA_NODES; ++i) {
+        std::string path = "/sys/devices/system/node/node" + std::to_string(i);
+        std::ifstream nodeCheck(path);
+        if (nodeCheck.good()) {
+            nodeCount = i + 1;
+        }
+    }
+    return nodeCount > 0 ? nodeCount : 1;
+#else
+    return 1; // Non-Linux systems default to single node
+#endif
+}
+
+inline size_t cpuToNumaNode(size_t cpu, size_t socketsCount, size_t coresPerSocket) {
+    // For typical Intel/AMD systems: NUMA node corresponds to socket
+    // Physical layout: cpu = socket * coresPerSocket * smtPerCore + ...
+    return cpu / (coresPerSocket * 2); // Assuming 2-way SMT
+}
+
+inline GlobalPool* getNumaPool(size_t numaNode) {
+    if (numaNode >= activeNumaNodes) {
+        numaNode = 0; // Fallback to node 0 if invalid
+    }
+    return &numaPools[numaNode];
+}
 #else
 extern GlobalPool defaultPool;
 #endif
@@ -173,41 +204,6 @@ inline std::vector<size_t> numaConsolidatedSchedule(size_t numThreads,
 
     return schedule;
 }
-
-// #############################################################################
-// NUMA node detection and management
-// #############################################################################
-#ifdef NUMA_POOLS
-inline size_t detectNumaNodes() {
-#ifdef __linux__
-    // Read from /sys/devices/system/node to detect NUMA nodes
-    size_t nodeCount = 0;
-    for (size_t i = 0; i < MAX_NUMA_NODES; ++i) {
-        std::string path = "/sys/devices/system/node/node" + std::to_string(i);
-        std::ifstream nodeCheck(path);
-        if (nodeCheck.good()) {
-            nodeCount = i + 1;
-        }
-    }
-    return nodeCount > 0 ? nodeCount : 1;
-#else
-    return 1; // Non-Linux systems default to single node
-#endif
-}
-
-inline size_t cpuToNumaNode(size_t cpu, size_t socketsCount, size_t coresPerSocket) {
-    // For typical Intel/AMD systems: NUMA node corresponds to socket
-    // Physical layout: cpu = socket * coresPerSocket * smtPerCore + ...
-    return cpu / (coresPerSocket * 2); // Assuming 2-way SMT
-}
-
-inline GlobalPool* getNumaPool(size_t numaNode) {
-    if (numaNode >= activeNumaNodes) {
-        numaNode = 0; // Fallback to node 0 if invalid
-    }
-    return &numaPools[numaNode];
-}
-#endif
 
 inline void WorkerGroup::run(std::function<void()> f) {
    tbb::task_group g;
