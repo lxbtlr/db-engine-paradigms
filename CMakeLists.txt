@@ -87,10 +87,23 @@ IF(NUMA_POOLS)
 
   IF(NUMA_MBIND)
     ADD_DEFINITIONS(-DNUMA_MBIND)
-    message(STATUS "NUMA mbind() memory binding enabled")
-    # Note: Requires libnuma-dev package on Linux
-    # The numaif.h header should be available with libnuma-dev
+    # Link against libnuma for mbind() support
+    # Try to find the library in standard locations
+    find_library(NUMA_LIBRARY NAMES numa PATHS /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu)
+
+    if(NUMA_LIBRARY)
+      message(STATUS "NUMA mbind() memory binding enabled (libnuma found: ${NUMA_LIBRARY})")
+      set(NUMA_LINK_LIBRARIES ${NUMA_LIBRARY})
+    else()
+      # Fallback: just use -lnuma and let the linker find it
+      message(STATUS "NUMA mbind() memory binding enabled (using -lnuma)")
+      set(NUMA_LINK_LIBRARIES "numa")
+    endif()
+  ELSE()
+    set(NUMA_LINK_LIBRARIES "")
   ENDIF(NUMA_MBIND)
+ELSE()
+  set(NUMA_LINK_LIBRARIES "")
 ENDIF(NUMA_POOLS)
 
 
@@ -182,6 +195,10 @@ target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
+# Link libnuma if NUMA_MBIND is enabled
+if(NUMA_LINK_LIBRARIES)
+  target_link_libraries(common ${NUMA_LINK_LIBRARIES})
+endif()
 
 
 set(HYPER_TRANSLATORS
