@@ -17,8 +17,10 @@ size_t activeNumaNodes = detectNumaNodes();
 #ifdef NUMA_MBIND
 struct NumaPoolInitializer {
    NumaPoolInitializer() {
+      std::cerr << "[NUMA] Detected " << activeNumaNodes << " NUMA nodes" << std::endl;
       for (size_t i = 0; i < MAX_NUMA_NODES; ++i) {
          numaPools[i].setNumaNode(static_cast<int>(i));
+         std::cerr << "[NUMA] Pool " << i << " bound to node " << i << std::endl;
       }
    }
 } numaPoolInit;
