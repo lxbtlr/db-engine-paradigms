@@ -63,8 +63,8 @@ extern thread_local bool currentBarrier;
 
 
 // Used to control thread scheduling, by default we use the provided method
-//#define NEW_POLICY 1
-//#define NUMA_BANDWIDTH 1
+#define NEW_POLICY 1
+#define NUMA_BANDWIDTH 1
 //#define NUMA_LATENCY 1
 class Worker
 /// information about the worker thread.
