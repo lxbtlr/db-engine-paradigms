@@ -139,8 +139,16 @@ template <typename PAYLOAD> class DebugOperator : public UnaryOperator {
 class Scan : public Operator {
  public:
    struct Shared : public SharedState {
-      std::atomic<size_t> pos;
-      Shared() : pos(0){};
+      // One atomic counter per NUMA region, padded to a cache line each to
+      // prevent false sharing between regions.  fetch_add uses relaxed order:
+      // the counter only gates which chunk a thread claims, and the actual
+      // data access imposes the necessary ordering through the column pointer
+      // arithmetic that follows.
+      struct alignas(64) PaddedAtomic {
+         std::atomic<size_t> val{0};
+      };
+      std::array<PaddedAtomic, runtime::NUM_NUMA_REGIONS> pos;
+      Shared() = default;
    };
 
  private:
