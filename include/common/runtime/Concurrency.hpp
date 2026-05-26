@@ -20,6 +20,38 @@ namespace runtime {
 class Worker;
 class WorkerGroup;
 
+// -------------------------------------------------------------------------
+// NUMA topology constants (compile-time; must match the hardware this binary
+// is built for).  These drive both the scheduling policies below and the
+// regionOf() helper used for per-NUMA work distribution.
+// -------------------------------------------------------------------------
+static constexpr size_t SOCKETS_COUNT    = 4;
+static constexpr size_t CORES_PER_SOCKET = 22;
+static constexpr size_t SMT_PER_CORE     = 2;
+static constexpr size_t NUM_NUMA_REGIONS = SOCKETS_COUNT; // one region per socket
+
+// regionOf(thread_id) — single source of truth for thread → NUMA region mapping.
+//
+// Under NUMA_BANDWIDTH (fan-out schedule): threads are interleaved across
+// sockets, so thread t lands on socket t % SOCKETS_COUNT.
+//
+// Under NUMA_POOLS (consolidated schedule): threads are packed per socket,
+// so the first CORES_PER_SOCKET*SMT_PER_CORE threads are on socket 0, etc.
+//
+// Memory-order note: this is a pure arithmetic mapping; no atomics involved.
+#if defined(NUMA_BANDWIDTH)
+inline size_t regionOf(size_t thread_id) {
+    return thread_id % SOCKETS_COUNT;
+}
+#elif defined(NUMA_POOLS)
+inline size_t regionOf(size_t thread_id) {
+    return thread_id / (CORES_PER_SOCKET * SMT_PER_CORE);
+}
+#else
+#error "Neither NUMA_BANDWIDTH nor NUMA_POOLS is defined. \
+ Exactly one must be set at compile time."
+#endif
+
 extern thread_local Worker* this_worker;
 #ifdef NUMA_POOLS
 constexpr size_t MAX_NUMA_NODES = 4;
@@ -75,6 +107,7 @@ class Worker
    WorkerGroup* group;
    Allocator allocator;
    HierarchicBarrier* barrier;
+   size_t worker_id = 0; // logical index assigned by WorkerGroup::run (0-based)
 #ifdef NUMA_POOLS
    size_t numaNode = 0;
 #endif
@@ -249,6 +282,7 @@ inline void WorkerGroup::run(std::function<void()> f) {
 #endif
       size_t node = cpuToNumaNode(selection, 4, 22); // 4 sockets, 22 cores per socket
       threads.emplace_back(this, f, barriers[group]);
+      threads.back().worker_id = i;
       threads.back().numaNode = node;
       threads.back().allocator.setSource(getNumaPool(node));
 
@@ -262,6 +296,7 @@ inline void WorkerGroup::run(std::function<void()> f) {
       }
 #else
       threads.emplace_back(this, f, barriers[group]);
+      threads.back().worker_id = i;
 #endif
       auto worker = &threads.back();
 #ifndef NUMA_POOLS
@@ -300,13 +335,16 @@ inline void WorkerGroup::run(std::function<void()> f) {
    auto prevGroup = this_worker->group;
    auto prevBarrier = currentBarrier;
    auto prevBarrierPtr = this_worker->barrier;
+   auto prevWorkerId = this_worker->worker_id;
    this_worker->group = this;
    this_worker->barrier = barriers.back();
+   this_worker->worker_id = size - 1; // calling thread is the last logical worker
    currentBarrier = 0;
    f();
    this_worker->group = prevGroup;
    currentBarrier = prevBarrier;
    this_worker->barrier = prevBarrierPtr;
+   this_worker->worker_id = prevWorkerId;
 
    g.wait();
 
