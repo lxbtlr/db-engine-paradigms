@@ -79,7 +79,6 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
     importTPCH(tpchPath, tpch);
-
     // Now, filter the master query set
     std::unordered_set<std::string> allQueries = {"1h", "1v", "3h", "3v", "5h", "5v", "6h", "6v" ,"18h", "18v", "9h", "9v"};
     std::unordered_set<std::string> q;
@@ -170,6 +169,7 @@ int main(int argc, char* argv[]) {
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           auto result = q6_hyper(tpch, nrThreads);
+                          printf("%x\n", result);
                           escape(&result);
                        },
                        repetitions);
