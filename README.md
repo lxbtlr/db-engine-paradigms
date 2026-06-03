@@ -14,6 +14,47 @@ Had to do some wonky stuff like:
 
 - explicitly scoped types in querybuilder.hpp to prevent naming conflicts with member functions.
 
+## allocator policy
+
+We have experimented with different allocator strategies, these can be toggled in the cmake step.
+
+### CMake options
+
+| Option | Default | Effect |
+|---|---|---|
+| `NUMA_LATENCY` | OFF | Consolidated schedule — threads packed per socket (latency-optimised). When OFF, `NUMA_BANDWIDTH` is injected automatically (fan-out, threads interleaved across sockets). |
+| `NUMA_POOLS` | OFF | Enables per-NUMA pool array; threads allocate from their local socket's pool. |
+| `NUMA_MBIND` | OFF | Enables `mbind()` in `malloc_huge` to physically bind memory to NUMA nodes. Requires `NUMA_POOLS=ON` and `libnuma`. |
+
+### Underlying macros
+
+These are injected by CMake based on the options above. They can also be passed directly via `CMAKE_CXX_FLAGS` for fine-grained control.
+
+| Macro | Effect |
+|---|---|
+| `NUMA_BANDWIDTH` | Fan-out schedule — `regionOf(tid) = tid % SOCKETS_COUNT`. Default when `NUMA_LATENCY` is off. |
+| `NUMA_LATENCY` | Consolidated schedule alias — selects packed-per-socket CPU pinning in `WorkerGroup::run`. |
+| `NUMA_POOLS` | Consolidated `regionOf` — `regionOf(tid) = tid / (CORES_PER_SOCKET * SMT_PER_CORE)`. Also enables per-NUMA pool array. |
+| `NUMA_MBIND` | Enables `mbind()` binding inside `malloc_huge`. Requires `NUMA_POOLS`. |
+| `NEW_POLICY` | Use `schedule[]` array for CPU pinning instead of sequential assignment. Pass via `CMAKE_CXX_FLAGS`. |
+
+> `NUMA_BANDWIDTH` and `NUMA_POOLS` are mutually exclusive. The build will `#error` if neither is defined. When `NUMA_LATENCY=ON`, `NUMA_POOLS` is injected automatically to satisfy the `regionOf()` guard.
+
+### Default — fan-out bandwidth schedule (NUMA_BANDWIDTH injected automatically)
+```
+  cmake ..
+```
+
+### Consolidated latency schedule
+```
+  cmake -DNUMA_LATENCY=ON ..
+```
+
+### Consolidated latency + per-NUMA pools + mbind
+```
+  cmake -DNUMA_LATENCY=ON -DNUMA_POOLS=ON -DNUMA_MBIND=ON ..
+```
+
 # Original README below
 ...
 
