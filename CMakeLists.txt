@@ -106,6 +106,14 @@ ELSE()
   set(NUMA_LINK_LIBRARIES "")
 ENDIF(NUMA_POOLS)
 
+IF(NUMA_LATENCY)
+  ADD_DEFINITIONS(-DNUMA_LATENCY)
+  message(STATUS "NUMA schedule: consolidated (latency-optimised, threads packed per socket)")
+ELSE()
+  ADD_DEFINITIONS(-DNUMA_BANDWIDTH)
+  message(STATUS "NUMA schedule: fan-out (bandwidth, default)")
+ENDIF(NUMA_LATENCY)
+
 
 
 IF(AUTOVECTORIZE)
