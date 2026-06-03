@@ -404,7 +404,7 @@ size_t getCurrentRSS() {
    return (size_t)rss * (size_t)sysconf(_SC_PAGESIZE);
 }
 
-#define USE_MIN_MODE
+//#define USE_MIN_MODE
 
 // Logic for report printing (switches based on macro)
 void PerfEvents::timeAndProfile(std::string s, uint64_t count,
