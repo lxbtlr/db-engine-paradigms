@@ -23,11 +23,11 @@ from itertools import permutations
 # ---------------------------------------------------------------------------
 
 PREDICATES = [
-    "l_shipdate[i] >= c1",   # P0
-    "l_shipdate[i] < c2",    # P1
-    "l_quantity[i] < c5",    # P2
-    "l_discount[i] >= c3",   # P3
-    "l_discount[i] <= c4",   # P4
+    "l_shipdate >= c1",   # P0
+    "l_shipdate < c2",    # P1
+    "l_quantity < c5",    # P2
+    "l_discount >= c3",   # P3
+    "l_discount <= c4",   # P4
 ]
 
 # ---------------------------------------------------------------------------
@@ -89,8 +89,6 @@ def generate(out):
     w(f'#  error "PERMUTATION_INDEX must be between 0 and {n_perms - 1}"')
     w("#endif")
     w()
-    w("// CONJUNCT_OP is an implementation detail; do not use it directly.")
-    w("#undef CONJUNCT_OP")
 
 def main():
     parser = argparse.ArgumentParser(description="Generate selection_kernel.hpp")

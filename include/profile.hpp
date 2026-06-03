@@ -1,5 +1,6 @@
 #include "common/Compat.hpp"
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <iomanip>
@@ -12,7 +13,7 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-
+#include <valgrind/callgrind.h>
 
 #include <asm/unistd.h>
 #include <linux/perf_event.h>
@@ -22,6 +23,12 @@
 
 // Comment out this next line if you ever successfully link the jevents library
 #define NO_JEVENTS 
+
+extern "C" {
+    __attribute__((noinline)) void magic_trace_stop_indicator() {
+        asm(""); 
+    }
+}
 
 #if (defined(__x86_64__) || defined(__i386__)) && !defined(NO_JEVENTS)
     extern "C" {
@@ -149,6 +156,9 @@ struct PerfEvents {
          add("l1-hits", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
              (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+
+         add("stores", "mem_inst_retired.all_stores");
+         add("loads", "mem_inst_retired.all_loads");
          //add("stores", "cpu/mem-stores/");
          //add("loads", "cpu/mem-loads/");
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
@@ -180,6 +190,7 @@ struct PerfEvents {
          pe.exclude_hv = true;
          pe.read_format =
              PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
+         if ((eventID & 0xff) == 0xd0) pe.precise_ip = 2;
       }
 #else
       compat::unused(name, type, eventID);
@@ -195,7 +206,9 @@ struct PerfEvents {
          auto& pe = event.pe;
          memset(&pe, 0, sizeof(struct perf_event_attr));
          if (resolve_event(const_cast<char*>(str.c_str()), &pe) < 0)
-            std::cerr << "Error resolving perf event " << str << std::endl;
+
+            perror("perf_event_open");
+            //std::cerr << "Error resolving perf event " << str << std::endl;
          pe.disabled = true;
          pe.inherit = 1;
          pe.inherit_stat = 0;
@@ -221,8 +234,9 @@ struct PerfEvents {
             else
                event.fd = syscall(__NR_perf_event_open, &event.pe, 0, i, -1, 0);
             if (event.fd < 0)
-               std::cerr << "Error opening perf event " << ev.first
-                         << std::endl;
+               perror("perf_event_open");
+               //std::cerr << "Error opening perf event " << ev.first
+                //         << std::endl;
 #else
             compat::unused(event);
 #endif
@@ -238,7 +252,9 @@ struct PerfEvents {
            ioctl(event.fd, PERF_EVENT_IOC_ENABLE, 0);
            if (read(event.fd, &event.prev, sizeof(uint64_t) * 3) !=
                sizeof(uint64_t) * 3)
-             std::cerr << "Error reading counter " << ev.first << std::endl;
+
+               perror("perf_event_open");
+             //std::cerr << "Error reading counter " << ev.first << std::endl;
 #else
             compat::unused(event);
 #endif
@@ -322,6 +338,10 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
 
    uint64_t memStart = 0;
    if (mem) memStart = getCurrentRSS();
+   CALLGRIND_STOP_INSTRUMENTATION;
+   CALLGRIND_ZERO_STATS;  
+  
+   CALLGRIND_START_INSTRUMENTATION;
    startAll();
    double start = gettime();
    size_t performedRep = 0;
@@ -331,6 +351,11 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    }
    double end = gettime();
    readAll();
+
+
+   fn();
+   magic_trace_stop_indicator();
+   
    std::cout.precision(3);
    std::cout.setf(std::ios::fixed, std::ios::floatfield);
    if (writeHeader) {
@@ -340,6 +365,8 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                 << "," << setw(printFieldWidth) << " IPC"
                 << "," << setw(printFieldWidth) << " GHz"
                 << "," << setw(printFieldWidth) << " Bandwidth"
+                << "," << setw(printFieldWidth) << " stores"
+                << "," << setw(printFieldWidth) << " loads"
                 << ",";
       printHeader(std::cout);
       std::cout << std::endl;
@@ -361,8 +388,13 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                 << ",";
       std::cout << setw(printFieldWidth)
                 << ((((*this)["all_rd"] * 64.0) / (1024 * 1024)) /
-                    (end - start))
-                << ",";
+                    (end - start)) << ",";
+
+   std::cout << setw(printFieldWidth)
+          << (*this)["stores"] / (count * performedRep) << ",";
+
+   std::cout << setw(printFieldWidth)
+          << (*this)["loads"] / (count * performedRep) << ",";
    }
 #endif
    // std::cout <<

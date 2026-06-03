@@ -25,14 +25,15 @@ OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 
-
+# TO TOGGLE STRESS TEST Q1
+add_compile_definitions(STRESS_TEST)
 # Only set defaults if they aren't provided by the command line (sweep script)
 if(NOT CMAKE_CXX_FLAGS OR CMAKE_CXX_FLAGS STREQUAL "")
-    set(CMAKE_CXX_FLAGS "-O3 -march=native -mtune=native -fPIC -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-O3 -march=native -g -mtune=native -fPIC -fno-omit-frame-pointer")
 endif()
 
 if(NOT CMAKE_C_FLAGS OR CMAKE_C_FLAGS STREQUAL "")
-    set(CMAKE_C_FLAGS "-O3 -fPIC -fno-omit-frame-pointer -fdiagnostics-color")
+    set(CMAKE_C_FLAGS "-O3 -fPIC -fno-omit-frame-pointer -g -fdiagnostics-color")
 endif()
 
 
@@ -346,6 +347,7 @@ if(AVX512EXPERIMENTS)
 endif(AVX512EXPERIMENTS)
 
 include(ablation_study.cmake)
+
 foreach(OP RANGE 0 1)
   foreach(PERM RANGE 0 119)
 
