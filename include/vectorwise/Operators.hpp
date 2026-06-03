@@ -325,6 +325,10 @@ class HashGroup : public UnaryOperator {
       /// Find group entries for all in flight tuples.
       /// Write matches to htMatches
       pos_t findGroups(pos_t n, decltype(ht) & ht);
+      /// Issue prefetches for all HT buckets corresponding to groupHashes[0..n).
+      /// Call after groupHash.evaluate(n) and before findGroups to hide memory
+      /// latency on the scattered hash table loads.
+      void prefetchBuckets(pos_t n, decltype(ht) & ht);
       /// Buffer which contains hashes of group keys
       hash_t* groupHashes;
       /// Buffer which contains entry pointers after group lookup
@@ -416,6 +420,14 @@ class HashGroup : public UnaryOperator {
  private:
    void clearHashtable();
 };
+
+template <typename T>
+void HashGroup::GroupLookup<T>::prefetchBuckets(pos_t n, runtime::Hashmap& ht) {
+   for (pos_t i = 0; i < n; ++i) {
+      auto pos = self()->hashForTuple(i) & ht.mask;
+      __builtin_prefetch(&ht.entries[pos], 0, 1);
+   }
+}
 
 template <typename T>
 pos_t INTERPRET_SEPARATE

@@ -875,9 +875,16 @@ size_t HashGroup::next() {
       };
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
+         // 1. Hash: compute group key hashes for the entire morsel
          groupHash.evaluate(n);
+         // 2. Prefetch: issue HT bucket loads for all hashes before any lookup
+         //    touches them, hiding random-access memory latency
+         preAggregation.prefetchBuckets(n, ht);
+         // 3. Lookup: find existing groups / classify misses
          preAggregation.findGroups(n, ht);
+         // 4. Create: allocate and insert entries for unseen groups
          auto groupsCreated = preAggregation.createMissingGroups(ht, false);
+         // 5. Aggregate: update accumulators for all matched groups
          updateGroups.evaluate(n);
          groups += groupsCreated;
          if (groups >= maxFill) flushAndClear();
@@ -909,6 +916,8 @@ size_t HashGroup::next() {
                   // for group lookup and creation
                   auto data = addBytes(chunk->data<void>(), pos * elementSize);
                   globalAggregation.rowData = data;
+                  // Prefetch HT buckets for all rows in this slice before lookup
+                  globalAggregation.prefetchBuckets(n, ht);
                   findGroupsFromPartition(data, n);
                   auto cGroups = [&]() INTERPRET_SEPARATE {
                      globalAggregation.createMissingGroups(ht, true);
