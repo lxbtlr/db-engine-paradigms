@@ -26,6 +26,7 @@ OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 OPTION(NUMA_POOLS "Enable NUMA-aware memory pools (one pool per NUMA node)" OFF)
 OPTION(NUMA_MBIND "Enable mbind() to bind memory to NUMA nodes (requires NUMA_POOLS and libnuma)" OFF)
+OPTION(NUMA_LATENCY "Use consolidated (latency-optimised) thread schedule, packing threads per socket. Default OFF uses fan-out (bandwidth) schedule." OFF)
 
 
 # Only set defaults if they aren't provided by the command line (sweep script)
@@ -106,7 +107,13 @@ ELSE()
   set(NUMA_LINK_LIBRARIES "")
 ENDIF(NUMA_POOLS)
 
-
+IF(NUMA_LATENCY)
+  ADD_DEFINITIONS(-DNUMA_LATENCY)
+  message(STATUS "NUMA schedule: consolidated (latency-optimised, threads packed per socket)")
+ELSE()
+  ADD_DEFINITIONS(-DNUMA_BANDWIDTH)
+  message(STATUS "NUMA schedule: fan-out (bandwidth, default)")
+ENDIF(NUMA_LATENCY)
 
 IF(AUTOVECTORIZE)
   if(CMAKE_C_COMPILER STREQUAL "clang") 
