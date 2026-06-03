@@ -54,6 +54,7 @@ using vectorwise::primitives::hash_t;
 
 static volatile int64_t cse_barrier_1 = 1;
 static volatile int64_t cse_barrier_2 = 1;
+static volatile int64_t cse_barrier_3 = 1;
 
 NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
                                                      size_t nrThreads) {
@@ -79,28 +80,38 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
    // These will always be 1 at runtime; the compiler cannot know that.
    const int64_t b1 = cse_barrier_1;
    const int64_t b2 = cse_barrier_2;
+   const int64_t b3 = cse_barrier_3;
 
-   // Original 5 aggregates + 8 extra duplicates to stress register pressure.
+   // 20 accumulators: 5 original + 3 duplicate sets of 5 (inc. count_order).
    // get<0>  = sum_qty          (original)
    // get<1>  = sum_base_price   (original)
    // get<2>  = sum_disc_price   (original)
    // get<3>  = sum_charge       (original)
    // get<4>  = count_order      (original)
-   // get<5>  = sum_qty_2        (duplicate set 1)
+   // get<5>  = sum_qty_2        (duplicate set 1, barrier b1)
    // get<6>  = sum_base_price_2 (duplicate set 1)
    // get<7>  = sum_disc_price_2 (duplicate set 1)
    // get<8>  = sum_charge_2     (duplicate set 1)
-   // get<9>  = sum_qty_3        (duplicate set 2)
-   // get<10> = sum_base_price_3 (duplicate set 2)
-   // get<11> = sum_disc_price_3 (duplicate set 2)
-   // get<12> = sum_charge_3     (duplicate set 2)
+   // get<9>  = count_order_2    (duplicate set 1)
+   // get<10> = sum_qty_3        (duplicate set 2, barrier b2)
+   // get<11> = sum_base_price_3 (duplicate set 2)
+   // get<12> = sum_disc_price_3 (duplicate set 2)
+   // get<13> = sum_charge_3     (duplicate set 2)
+   // get<14> = count_order_3    (duplicate set 2)
+   // get<15> = sum_qty_4        (duplicate set 3, barrier b3)
+   // get<16> = sum_base_price_4 (duplicate set 3)
+   // get<17> = sum_disc_price_4 (duplicate set 3)
+   // get<18> = sum_charge_4     (duplicate set 3)
+   // get<19> = count_order_4    (duplicate set 3)
    auto groupOp = make_GroupBy<tuple<Char<1>, Char<1>>,
                                tuple<Numeric<12, 2>, Numeric<12, 2>,
                                      Numeric<12, 4>, Numeric<12, 6>, int64_t,
                                      Numeric<12, 2>, Numeric<12, 2>,
-                                     Numeric<12, 4>, Numeric<12, 6>,
+                                     Numeric<12, 4>, Numeric<12, 6>, int64_t,
                                      Numeric<12, 2>, Numeric<12, 2>,
-                                     Numeric<12, 4>, Numeric<12, 6>>,
+                                     Numeric<12, 4>, Numeric<12, 6>, int64_t,
+                                     Numeric<12, 2>, Numeric<12, 2>,
+                                     Numeric<12, 4>, Numeric<12, 6>, int64_t>,
                                hash>(
        [](auto& acc, auto&& value) {
           // original aggregates
@@ -110,22 +121,32 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
           get<3>(acc) += get<3>(value);
           get<4>(acc) += get<4>(value);
           // duplicate set 1
-          get<5>(acc) += get<5>(value);
-          get<6>(acc) += get<6>(value);
-          get<7>(acc) += get<7>(value);
-          get<8>(acc) += get<8>(value);
-          // duplicate set 2
+          get<5>(acc)  += get<5>(value);
+          get<6>(acc)  += get<6>(value);
+          get<7>(acc)  += get<7>(value);
+          get<8>(acc)  += get<8>(value);
           get<9>(acc)  += get<9>(value);
+          // duplicate set 2
           get<10>(acc) += get<10>(value);
           get<11>(acc) += get<11>(value);
           get<12>(acc) += get<12>(value);
+          get<13>(acc) += get<13>(value);
+          get<14>(acc) += get<14>(value);
+          // duplicate set 3
+          get<15>(acc) += get<15>(value);
+          get<16>(acc) += get<16>(value);
+          get<17>(acc) += get<17>(value);
+          get<18>(acc) += get<18>(value);
+          get<19>(acc) += get<19>(value);
        },
        make_tuple(Numeric<12, 2>(), Numeric<12, 2>(), Numeric<12, 4>(),
                   Numeric<12, 6>(), int64_t(0),
                   Numeric<12, 2>(), Numeric<12, 2>(), Numeric<12, 4>(),
-                  Numeric<12, 6>(),
+                  Numeric<12, 6>(), int64_t(0),
                   Numeric<12, 2>(), Numeric<12, 2>(), Numeric<12, 4>(),
-                  Numeric<12, 6>()),
+                  Numeric<12, 6>(), int64_t(0),
+                  Numeric<12, 2>(), Numeric<12, 2>(), Numeric<12, 4>(),
+                  Numeric<12, 6>(), int64_t(0)),
        nrThreads);
 
    tbb::parallel_for(
@@ -146,31 +167,44 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
                 get<3>(group) += charge;
                 get<4>(group) += 1;
 
-                // duplicate set 1 -- multiply inputs by b1 (always 1 at
-                // runtime, opaque to optimizer) to produce a distinct
-                // expression the compiler cannot CSE with the originals
-                auto ep1 = Numeric<12,2>(l_extendedprice[i].value * b1);
-                auto disc1 = Numeric<12,2>(l_discount[i].value * b1);
-                auto tax1  = Numeric<12,2>(l_tax[i].value * b1);
-                auto qty1  = Numeric<12,2>(l_quantity[i].value * b1);
-                get<5>(group) += qty1;
-                get<6>(group) += ep1;
+                // duplicate set 1 (barrier b1)
+                auto ep1        = Numeric<12,2>(l_extendedprice[i].value * b1);
+                auto disc1      = Numeric<12,2>(l_discount[i].value * b1);
+                auto tax1       = Numeric<12,2>(l_tax[i].value * b1);
+                auto qty1       = Numeric<12,2>(l_quantity[i].value * b1);
                 auto disc_price2 = ep1 * (one - disc1);
-                get<7>(group) += disc_price2;
-                auto charge2 = disc_price2 * (one + tax1);
-                get<8>(group) += charge2;
+                auto charge2    = disc_price2 * (one + tax1);
+                get<5>(group)  += qty1;
+                get<6>(group)  += ep1;
+                get<7>(group)  += disc_price2;
+                get<8>(group)  += charge2;
+                get<9>(group)  += 1;
 
-                // duplicate set 2 -- same strategy with b2
-                auto ep2 = Numeric<12,2>(l_extendedprice[i].value * b2);
-                auto disc2 = Numeric<12,2>(l_discount[i].value * b2);
-                auto tax2  = Numeric<12,2>(l_tax[i].value * b2);
-                auto qty2  = Numeric<12,2>(l_quantity[i].value * b2);
-                get<9>(group)  += qty2;
-                get<10>(group) += ep2;
+                // duplicate set 2 (barrier b2)
+                auto ep2        = Numeric<12,2>(l_extendedprice[i].value * b2);
+                auto disc2      = Numeric<12,2>(l_discount[i].value * b2);
+                auto tax2       = Numeric<12,2>(l_tax[i].value * b2);
+                auto qty2       = Numeric<12,2>(l_quantity[i].value * b2);
                 auto disc_price3 = ep2 * (one - disc2);
-                get<11>(group) += disc_price3;
-                auto charge3 = disc_price3 * (one + tax2);
-                get<12>(group) += charge3;
+                auto charge3    = disc_price3 * (one + tax2);
+                get<10>(group) += qty2;
+                get<11>(group) += ep2;
+                get<12>(group) += disc_price3;
+                get<13>(group) += charge3;
+                get<14>(group) += 1;
+
+                // duplicate set 3 (barrier b3)
+                auto ep3        = Numeric<12,2>(l_extendedprice[i].value * b3);
+                auto disc3      = Numeric<12,2>(l_discount[i].value * b3);
+                auto tax3       = Numeric<12,2>(l_tax[i].value * b3);
+                auto qty3       = Numeric<12,2>(l_quantity[i].value * b3);
+                auto disc_price4 = ep3 * (one - disc3);
+                auto charge4    = disc_price4 * (one + tax3);
+                get<15>(group) += qty3;
+                get<16>(group) += ep3;
+                get<17>(group) += disc_price4;
+                get<18>(group) += charge4;
+                get<19>(group) += 1;
              }
           }
        });
@@ -305,8 +339,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order, sizeof(uint64_t)))
-       // duplicate set 1 -- separate output buffers force genuine extra
-       // materialization work in vectorwise
+       // duplicate set 1
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
@@ -329,6 +362,12 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price_2, sizeof(types::Numeric<12, 2>)))
+       .addValue(Buffer(charge, sizeof(uint64_t)),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_count_star,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(count_order_2, sizeof(uint64_t)))
        // duplicate set 2
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_plus_int64_t_col,
@@ -351,7 +390,42 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                  primitives::aggr_sel_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
-                 Buffer(sum_base_price_3, sizeof(types::Numeric<12, 2>)));
+                 Buffer(sum_base_price_3, sizeof(types::Numeric<12, 2>)))
+       .addValue(Buffer(charge, sizeof(uint64_t)),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_count_star,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(count_order_3, sizeof(uint64_t)))
+       // duplicate set 3
+       .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_disc_price_4, sizeof(types::Numeric<12, 4>)))
+       .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_charge_4, sizeof(types::Numeric<12, 4>)))
+       .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_sel_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_qty_4, sizeof(types::Numeric<12, 2>)))
+       .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_sel_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_base_price_4, sizeof(types::Numeric<12, 2>)))
+       .addValue(Buffer(charge, sizeof(uint64_t)),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_count_star,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(count_order_4, sizeof(uint64_t)));
 
    result.addValue("l_returnflag", Buffer(returnflag))
        .addValue("l_linestatus", Buffer(linestatus))
@@ -360,16 +434,21 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
        .addValue("sum_disc_price", Buffer(sum_disc_price))
        .addValue("sum_charge", Buffer(sum_charge))
        .addValue("count_order", Buffer(count_order))
-       // extra aggregates included in result so the compiler cannot
-       // dead-code-eliminate the extra addValue calls above
        .addValue("sum_qty_2", Buffer(sum_qty_2))
        .addValue("sum_base_price_2", Buffer(sum_base_price_2))
        .addValue("sum_disc_price_2", Buffer(sum_disc_price_2))
        .addValue("sum_charge_2", Buffer(sum_charge_2))
+       .addValue("count_order_2", Buffer(count_order_2))
        .addValue("sum_qty_3", Buffer(sum_qty_3))
        .addValue("sum_base_price_3", Buffer(sum_base_price_3))
        .addValue("sum_disc_price_3", Buffer(sum_disc_price_3))
        .addValue("sum_charge_3", Buffer(sum_charge_3))
+       .addValue("count_order_3", Buffer(count_order_3))
+       .addValue("sum_qty_4", Buffer(sum_qty_4))
+       .addValue("sum_base_price_4", Buffer(sum_base_price_4))
+       .addValue("sum_disc_price_4", Buffer(sum_disc_price_4))
+       .addValue("sum_charge_4", Buffer(sum_charge_4))
+       .addValue("count_order_4", Buffer(count_order_4))
        .finalize();
 
    r->rootOp = popOperator();

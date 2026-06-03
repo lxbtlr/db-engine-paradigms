@@ -25,8 +25,11 @@ OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 
-# TO TOGGLE STRESS TEST Q1
-add_compile_definitions(STRESS_TEST)
+OPTION(STRESS_TEST "Enable Q1 stress test with 20 accumulators to probe register pressure" OFF)
+IF(STRESS_TEST)
+  ADD_DEFINITIONS(-DSTRESS_TEST)
+  message(STATUS "Q1 stress test enabled (20 accumulators)")
+ENDIF(STRESS_TEST)
 # Only set defaults if they aren't provided by the command line (sweep script)
 if(NOT CMAKE_CXX_FLAGS OR CMAKE_CXX_FLAGS STREQUAL "")
     set(CMAKE_CXX_FLAGS "-O3 -march=native -mtune=native -fPIC -fno-omit-frame-pointer")

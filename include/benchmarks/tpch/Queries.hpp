@@ -51,9 +51,10 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
     disc_price, charge,
     returnflag, linestatus,
     sum_qty, sum_base_price, sum_disc_price, sum_charge, count_order,
-    // new buffers for register pressure experiment
-    sum_qty_2, sum_base_price_2, sum_disc_price_2, sum_charge_2,
-    sum_qty_3, sum_base_price_3, sum_disc_price_3, sum_charge_3
+    // duplicate sets for register pressure experiment (20 accumulators total)
+    sum_qty_2, sum_base_price_2, sum_disc_price_2, sum_charge_2, count_order_2,
+    sum_qty_3, sum_base_price_3, sum_disc_price_3, sum_charge_3, count_order_3,
+    sum_qty_4, sum_base_price_4, sum_disc_price_4, sum_charge_4, count_order_4
   };
   struct Q1 {
     types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
