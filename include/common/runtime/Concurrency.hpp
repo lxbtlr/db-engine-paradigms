@@ -288,12 +288,12 @@ inline void WorkerGroup::run(std::function<void()> f) {
 
       // Debug output (will be compiled out in release if desired)
       static std::once_flag debug_flag;
-      std::call_once(debug_flag, []() {
-         std::cerr << "[NUMA] Worker assignment (first few): thread -> CPU -> NUMA node" << std::endl;
-      });
-      if (i < 4) {
-         std::cerr << "[NUMA] Worker " << i << " -> CPU " << selection << " -> Node " << node << std::endl;
-      }
+      // std::call_once(debug_flag, []() {
+      //    std::cerr << "[NUMA] Worker assignment (first few): thread -> CPU -> NUMA node" << std::endl;
+      // });
+      // if (i < 4) {
+      //    std::cerr << "[NUMA] Worker " << i << " -> CPU " << selection << " -> Node " << node << std::endl;
+      // }
 #else
       threads.emplace_back(this, f, barriers[group]);
       threads.back().worker_id = i;
