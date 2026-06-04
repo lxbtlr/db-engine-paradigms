@@ -26,8 +26,8 @@ OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 OPTION(NUMA_POOLS "Enable NUMA-aware memory pools (one pool per NUMA node)" OFF)
 OPTION(NUMA_MBIND "Enable mbind() to bind memory to NUMA nodes (requires NUMA_POOLS and libnuma)" OFF)
-OPTION(VW_SPLIT_HASHGROUP "Decompose HashGroup into Hash, GroupLookup, and Aggregate operators" OFF)
-OPTION(VW_AGGR_TUPLE_OUTER "Use tuple-outer aggregation loop (Option 1) instead of op-outer (Option 2, default)" OFF)
+set(VW_SPLIT_HASHGROUP OFF CACHE BOOL "Decompose HashGroup into Hash, GroupLookup, and Aggregate operators")
+set(VW_AGGR_TUPLE_OUTER OFF CACHE BOOL "Use tuple-outer aggregation loop (Option 1) instead of op-outer (Option 2, default)")
 
 
 # Only set defaults if they aren't provided by the command line (sweep script)
@@ -139,21 +139,21 @@ ENDIF(AUTOVECTORIZE)
 
 
 # Download and unpack googletest at configure time
-configure_file(3rdparty/GTest.CMakeLists.txt googletest-download/CMakeLists.txt)
-execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" .
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download" )
-execute_process(COMMAND "${CMAKE_COMMAND}" --build .
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download" )
-
-# Prevent GoogleTest from overriding our compiler/linker options
-# when building with Visual Studio
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-
-# Add googletest directly to our build. This adds
-# the following targets: gtest, gtest_main, gmock
-# and gmock_main
-add_subdirectory("${CMAKE_BINARY_DIR}/googletest-src"
-                 "${CMAKE_BINARY_DIR}/googletest-build")
+# configure_file(3rdparty/GTest.CMakeLists.txt googletest-download/CMakeLists.txt)
+# execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" .
+#     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download" )
+# execute_process(COMMAND "${CMAKE_COMMAND}" --build .
+#     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download" )
+# 
+# # Prevent GoogleTest from overriding our compiler/linker options
+# # when building with Visual Studio
+# set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+# 
+# # Add googletest directly to our build. This adds
+# # the following targets: gtest, gtest_main, gmock
+# # and gmock_main
+# add_subdirectory("${CMAKE_BINARY_DIR}/googletest-src"
+#                  "${CMAKE_BINARY_DIR}/googletest-build")
 
 # The gtest/gmock targets carry header search path
 # dependencies automatically when using CMake 2.8.11 or
