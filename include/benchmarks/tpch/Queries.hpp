@@ -10,6 +10,7 @@
 #include "vectorwise/Query.hpp"
 #include "vectorwise/QueryBuilder.hpp"
 
+#ifndef STRESS_TEST
 struct Q1Builder : public Query, private vectorwise::QueryBuilder {
    enum {
       sel_date,
@@ -40,6 +41,36 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
    std::unique_ptr<Q1> getQuerySplit();
 #endif
 };
+#endif
+
+#ifdef STRESS_TEST
+// STRESS TEST VERSION REMOVE LATER
+struct Q1Builder : public Query, private vectorwise::QueryBuilder {
+  enum {
+    sel_date, sel_date_grouped, selScat,
+    result_proj_minus, result_proj_plus,
+    disc_price, charge,
+    returnflag, linestatus,
+    sum_qty, sum_base_price, sum_disc_price, sum_charge, count_order,
+    // duplicate sets for register pressure experiment (20 accumulators total)
+    sum_qty_2, sum_base_price_2, sum_disc_price_2, sum_charge_2, count_order_2,
+    sum_qty_3, sum_base_price_3, sum_disc_price_3, sum_charge_3, count_order_3,
+    sum_qty_4, sum_base_price_4, sum_disc_price_4, sum_charge_4, count_order_4
+  };
+  struct Q1 {
+    types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
+    types::Date c1 = types::Date::castString("1998-09-02");
+    std::unique_ptr<vectorwise::Operator> rootOp;
+  };
+  Q1Builder(runtime::Database& db, vectorwise::SharedStateManager& shared,
+      size_t size = 1024)
+    : QueryBuilder(db, shared, size) {}
+  std::unique_ptr<Q1> getQuery();
+};
+#endif
+
+
+
 
 std::unique_ptr<runtime::Query>
 q1_hyper(runtime::Database& db,

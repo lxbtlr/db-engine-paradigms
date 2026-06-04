@@ -30,6 +30,12 @@ OPTION(VW_SPLIT_HASHGROUP "Decompose HashGroup into Hash, GroupLookup, and Aggre
 OPTION(VW_AGGR_TUPLE_OUTER "Use tuple-outer aggregation loop (Option 1) instead of op-outer (Option 2, default)" OFF)
 
 
+OPTION(STRESS_TEST "Enable Q1 stress test with 20 accumulators to probe register pressure" OFF)
+IF(STRESS_TEST)
+  ADD_DEFINITIONS(-DSTRESS_TEST)
+  message(STATUS "Q1 stress test enabled (20 accumulators)")
+ENDIF(STRESS_TEST)
+
 # Only set defaults if they aren't provided by the command line (sweep script)
 if(NOT CMAKE_CXX_FLAGS OR CMAKE_CXX_FLAGS STREQUAL "")
     set(CMAKE_CXX_FLAGS "-O3 -march=native -mtune=native -fPIC -fno-omit-frame-pointer")
@@ -133,7 +139,6 @@ ELSE()
   ADD_DEFINITIONS(-DNUMA_BANDWIDTH)
   message(STATUS "NUMA schedule: fan-out (bandwidth, default)")
 ENDIF(NUMA_LATENCY)
-
 
 IF(AUTOVECTORIZE)
   if(CMAKE_C_COMPILER STREQUAL "clang") 

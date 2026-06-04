@@ -155,6 +155,8 @@ struct PerfEvents {
                  (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+         add("stores", "mem_inst_retired.all_stores");
+         add("loads", "mem_inst_retired.all_loads");
       }
       add("task-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK);
 #endif
@@ -465,7 +467,10 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                 << "," << std::setw(printFieldWidth) << "CPUs"
                 << "," << std::setw(printFieldWidth) << "IPC"
                 << "," << std::setw(printFieldWidth) << "GHz"
-                << "," << std::setw(printFieldWidth) << "Bandwidth" << ",";
+                << "," << std::setw(printFieldWidth) << "Bandwidth" 
+                //<< "," << std::setw(printFieldWidth) << "stores"
+                //<< "," << std::setw(printFieldWidth) << "loads"
+                << ",";
       for (auto& n : ordered_names)
          std::cout << std::setw(printFieldWidth) << n << ",";
       std::cout << std::endl;
