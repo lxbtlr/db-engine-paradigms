@@ -71,14 +71,14 @@ pos_t aggr_plus_int64_t_col_avx512_(pos_t n, int64_t* RES entries[],
 
    for (; i < n - rest; i += 8) {
       // Load 8 entry pointers
-      auto ptrs = _mm512_loadu_si512(entries + i);
+      auto ptrs = _mm512_loadu_si512((const void*)(entries + i));
       // Compute aggregate addresses: ptr + offset
       auto addrs = _mm512_add_epi64(ptrs, _mm512_set1_epi64(offset));
 
       // Gather current aggregate values from entry+offset
       auto aggregates = _mm512_i64gather_epi64(addrs, nullptr, 1);
       // Load 8 column values
-      auto values = _mm512_loadu_si512(param1 + i);
+      auto values = _mm512_loadu_si512((const void*)(param1 + i));
       // Add
       auto results = _mm512_add_epi64(aggregates, values);
 
@@ -119,7 +119,7 @@ pos_t aggr_sel_plus_int64_t_col_avx512_(pos_t n, int64_t* RES entries[],
 
    for (; i < n - rest; i += 8) {
       // Load 8 entry pointers
-      auto ptrs = _mm512_loadu_si512(entries + i);
+      auto ptrs = _mm512_loadu_si512((const void*)(entries + i));
       // Compute aggregate addresses: ptr + offset
       auto addrs = _mm512_add_epi64(ptrs, _mm512_set1_epi64(offset));
 
@@ -167,7 +167,7 @@ pos_t aggr_count_star_avx512_(pos_t n, int64_t* RES entries[],
    auto ones = _mm512_set1_epi64(1);
 
    for (; i < n - rest; i += 8) {
-      auto ptrs = _mm512_loadu_si512(entries + i);
+      auto ptrs = _mm512_loadu_si512((const void*)(entries + i));
       auto addrs = _mm512_add_epi64(ptrs, _mm512_set1_epi64(offset));
 
       auto aggregates = _mm512_i64gather_epi64(addrs, nullptr, 1);
