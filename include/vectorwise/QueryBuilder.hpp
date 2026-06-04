@@ -167,12 +167,13 @@ class QueryBuilder {
    HashGroupBuilder HashGroup();
 
    // -------------------------------------------------------------------------
-   // Split HashGroup builder.
+   // Split HashGroup builder (compiled only when VW_SPLIT_HASHGROUP is defined).
    // Creates HashComputeOp, GroupLookupOp, and GroupAggregateOp chained
    // together.  Returns a builder that shares the same addKey / addValue /
    // padToAlign / pushKeySelVec interface as HashGroupBuilder so the query
    // DSL is unchanged; the underlying operator objects differ.
    // -------------------------------------------------------------------------
+#ifdef VW_SPLIT_HASHGROUP
    struct SplitHashGroupBuilder {
       QueryBuilder& base;
       vectorwise::HashGroup* group;       // non-owning, for wiring primitives
@@ -218,6 +219,7 @@ class QueryBuilder {
    };
 
    SplitHashGroupBuilder SplitHashGroup();
+#endif // VW_SPLIT_HASHGROUP
 
    ~QueryBuilder();
 
