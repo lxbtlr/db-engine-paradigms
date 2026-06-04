@@ -529,7 +529,6 @@ HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
    for (size_t i = 0; i < n;) {
       auto hash = self()->hashForTuple(i);
       auto el = ht.find_chain(hash);
-
       if (el != ht.end()) {
          if (el->hash == hash) {
             htMatches[i] = el;

@@ -122,8 +122,13 @@ int main(int argc, char* argv[]) {
       e.timeAndProfile("q1 vectorwise", nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
+#ifdef VW_SPLIT_HASHGROUP
+                          auto result =
+                              q1_vectorwise_split(tpch, nrThreads, vectorSize);
+#else
                           auto result =
                               q1_vectorwise(tpch, nrThreads, vectorSize);
+#endif
                           escape(&result);
                        },
                        repetitions);
