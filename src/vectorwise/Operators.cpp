@@ -838,8 +838,9 @@ Hashjoin::~Hashjoin() {
 }
 
 // ---------------------------------------------------------------------------
-// Split HashGroup operator implementations
+// Split HashGroup operator implementations (VW_SPLIT_HASHGROUP only)
 // ---------------------------------------------------------------------------
+#ifdef VW_SPLIT_HASHGROUP
 
 size_t HashComputeOp::next() {
    auto n = child->next();
@@ -962,6 +963,8 @@ size_t GroupAggregateOp::next() {
    }
    return EndOfStream;
 }
+
+#endif // VW_SPLIT_HASHGROUP
 
 // ---------------------------------------------------------------------------
 

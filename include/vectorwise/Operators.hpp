@@ -438,8 +438,9 @@ class HashGroup : public UnaryOperator {
 // All three share the same underlying HashGroup state object.
 // The builder wires them up; GroupAggregateOp owns the HashGroup.
 //
-// Enable the split path in q1 with: #define VW_SPLIT_HASHGROUP
+// Compiled only when VW_SPLIT_HASHGROUP is defined.
 // ---------------------------------------------------------------------------
+#ifdef VW_SPLIT_HASHGROUP
 
 /// Computes group-key hashes into groupHashes buffer.
 /// child->next() provides the morsel; result is forwarded unchanged.
@@ -476,6 +477,8 @@ class GroupAggregateOp : public Operator {
    explicit GroupAggregateOp(HashGroup::Shared& s);
    virtual size_t next() override;
 };
+
+#endif // VW_SPLIT_HASHGROUP
 
 template <typename T>
 void HashGroup::GroupLookup<T>::prefetchBuckets(pos_t n, runtime::Hashmap& ht) {

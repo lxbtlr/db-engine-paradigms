@@ -518,8 +518,9 @@ QueryBuilder::HashGroupBuilder QueryBuilder::HashGroup() {
 }
 
 // ---------------------------------------------------------------------------
-// SplitHashGroup builder
+// SplitHashGroup builder (VW_SPLIT_HASHGROUP only)
 // ---------------------------------------------------------------------------
+#ifdef VW_SPLIT_HASHGROUP
 
 QueryBuilder::SplitHashGroupBuilder::SplitHashGroupBuilder(QueryBuilder& b)
     : base(b) {}
@@ -887,6 +888,8 @@ QueryBuilder::SplitHashGroupBuilder::addValue(
    op.gatherGroups.ops.push_back(move(gather_groups));
    return *this;
 }
+
+#endif // VW_SPLIT_HASHGROUP
 
 // ---------------------------------------------------------------------------
 
