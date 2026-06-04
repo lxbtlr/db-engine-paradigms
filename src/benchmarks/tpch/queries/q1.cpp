@@ -12,6 +12,7 @@
 #include <deque>
 #include <iostream>
 
+
 using namespace runtime;
 using namespace std;
 using vectorwise::primitives::Char_1;
@@ -692,3 +693,4 @@ std::unique_ptr<runtime::Query> q1_vectorwise(Database& db, size_t nrThreads,
 
    return result;
 }
+#endif

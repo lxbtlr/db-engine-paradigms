@@ -23,6 +23,7 @@
 
 
 
+using namespace std;
 using namespace runtime;
 
 static void escape(void* p) { asm volatile("" : : "g"(p) : "memory"); }
