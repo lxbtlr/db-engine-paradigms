@@ -158,76 +158,45 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
                 auto& group =
                     locals.getGroup(make_tuple(l_returnflag[i], l_linestatus[i]));
 
-                // Anti-pattern: deferred consumption + binary tree dependencies
-                // + cross-set dependencies to force register spilling.
-                //
-                // All 12 intermediates are computed before any accumulator is
-                // written. Cross-set multiplications create binary tree nodes
-                // that require values from multiple sets to be simultaneously
-                // live. The wide fan-in at the end forces ~12 values live at
-                // the point of accumulation.
-
-                // --- compute all intermediates up front (deferred consumption)
-                // set 0 (original inputs)
+                // Anti-pattern: deferred consumption.
+                // All intermediates are computed before any accumulator write.
+                // This forces all values simultaneously live, exhausting
+                // registers and causing the compiler to spill to the stack.
                 auto disc_price  = l_extendedprice[i] * (one - l_discount[i]);
                 auto charge      = disc_price * (one + l_tax[i]);
-                auto qty0        = l_quantity[i];
 
-                // set 1 (barrier b1) -- kept live, not yet consumed
                 auto ep1         = Numeric<12,2>(l_extendedprice[i].value * b1);
-                auto disc1       = Numeric<12,2>(l_discount[i].value * b1);
-                auto tax1        = Numeric<12,2>(l_tax[i].value * b1);
-                auto disc_price2 = ep1 * (one - disc1);
-                auto charge2     = disc_price2 * (one + tax1);
+                auto disc_price2 = ep1 * (one - Numeric<12,2>(l_discount[i].value * b1));
+                auto charge2     = disc_price2 * (one + Numeric<12,2>(l_tax[i].value * b1));
 
-                // set 2 (barrier b2) -- kept live, not yet consumed
                 auto ep2         = Numeric<12,2>(l_extendedprice[i].value * b2);
-                auto disc2       = Numeric<12,2>(l_discount[i].value * b2);
-                auto tax2        = Numeric<12,2>(l_tax[i].value * b2);
-                auto disc_price3 = ep2 * (one - disc2);
-                auto charge3     = disc_price3 * (one + tax2);
+                auto disc_price3 = ep2 * (one - Numeric<12,2>(l_discount[i].value * b2));
+                auto charge3     = disc_price3 * (one + Numeric<12,2>(l_tax[i].value * b2));
 
-                // set 3 (barrier b3) -- kept live, not yet consumed
                 auto ep3         = Numeric<12,2>(l_extendedprice[i].value * b3);
-                auto disc3       = Numeric<12,2>(l_discount[i].value * b3);
-                auto tax3        = Numeric<12,2>(l_tax[i].value * b3);
-                auto disc_price4 = ep3 * (one - disc3);
-                auto charge4     = disc_price4 * (one + tax3);
+                auto disc_price4 = ep3 * (one - Numeric<12,2>(l_discount[i].value * b3));
+                auto charge4     = disc_price4 * (one + Numeric<12,2>(l_tax[i].value * b3));
 
-                // --- binary tree cross-set combinations
-                // Each node requires two intermediates from different sets to
-                // be simultaneously live, widening the live set further.
-                auto cross_dp_01 = disc_price  * disc_price2; // sets 0+1 live
-                auto cross_dp_23 = disc_price3 * disc_price4; // sets 2+3 live
-                auto cross_ch_01 = charge       * charge2;    // sets 0+1 live
-                auto cross_ch_23 = charge3      * charge4;    // sets 2+3 live
-                // tree depth 2: all four disc_price values must still be live
-                auto tree_dp     = cross_dp_01 * cross_dp_23;
-                auto tree_ch     = cross_ch_01 * cross_ch_23;
-
-                // --- wide fan-in: all intermediates simultaneously live at
-                // the point of accumulation (anti-pattern 4)
-                get<0>(group)  += qty0;
-                get<1>(group)  += disc_price;
-                get<2>(group)  += charge;
-                get<3>(group)  += disc_price2;
+                // all 12 intermediates simultaneously live here
+                get<0>(group)  += l_quantity[i];
+                get<1>(group)  += l_extendedprice[i];
+                get<2>(group)  += Numeric<12,4>(disc_price.value);
+                get<3>(group)  += Numeric<12,6>(charge.value);
                 get<4>(group)  += 1;
-                get<5>(group)  += charge2;
-                get<6>(group)  += ep1;
-                get<7>(group)  += disc_price3;
-                get<8>(group)  += charge3;
+                get<5>(group)  += ep1;
+                get<6>(group)  += Numeric<12,4>(disc_price2.value);
+                get<7>(group)  += Numeric<12,6>(charge2.value);
+                get<8>(group)  += ep2;
                 get<9>(group)  += 1;
-                get<10>(group) += ep2;
-                get<11>(group) += disc_price4;
-                get<12>(group) += charge4;
-                get<13>(group) += ep3;
+                get<10>(group) += Numeric<12,4>(disc_price3.value);
+                get<11>(group) += Numeric<12,6>(charge3.value);
+                get<12>(group) += ep3;
+                get<13>(group) += Numeric<12,4>(disc_price4.value);
                 get<14>(group) += 1;
-                // tree nodes written last — forces tree values live across all
-                // prior accumulator writes above (cross-set anti-pattern)
-                get<15>(group) += tree_dp;
-                get<16>(group) += tree_ch;
-                get<17>(group) += cross_dp_01;
-                get<18>(group) += cross_ch_01;
+                get<15>(group) += Numeric<12,6>(charge4.value);
+                get<16>(group) += Numeric<12,2>(l_quantity[i].value * b1);
+                get<17>(group) += Numeric<12,2>(l_quantity[i].value * b2);
+                get<18>(group) += Numeric<12,2>(l_quantity[i].value * b3);
                 get<19>(group) += 1;
              }
           }
@@ -288,7 +257,11 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
    Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
+   // Project all four disc_price/charge pairs into separate buffers before
+   // aggregation, matching the hyper plan's deferred-consumption layout where
+   // all 12 intermediates are simultaneously live at the point of accumulation.
    Project()
+       // set 0
        .addExpression(
            Expression()
                .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
@@ -308,6 +281,69 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
                       Buffer(charge, sizeof(int64_t)),
                       Buffer(disc_price, sizeof(int64_t)),
+                      Buffer(result_proj_plus, sizeof(int64_t))))
+       // set 1
+       .addExpression(
+           Expression()
+               .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
+                      Buffer(sel_date),
+                      Buffer(result_proj_minus, sizeof(int64_t)),
+                      Value(&r->one), Column(lineitem, "l_discount"))
+               .addOp(conf.proj_multiplies_sel_int64_t_col_int64_t_col(),
+                      Buffer(sel_date), Buffer(disc_price_2, sizeof(int64_t)),
+                      Column(lineitem, "l_extendedprice"),
+                      Buffer(result_proj_minus, sizeof(int64_t))))
+       .addExpression(
+           Expression()
+               .addOp(conf.proj_sel_plus_int64_t_col_int64_t_val(),
+                      Buffer(sel_date),
+                      Buffer(result_proj_plus, sizeof(int64_t)),
+                      Column(lineitem, "l_tax"), Value(&r->one))
+               .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
+                      Buffer(charge_2, sizeof(int64_t)),
+                      Buffer(disc_price_2, sizeof(int64_t)),
+                      Buffer(result_proj_plus, sizeof(int64_t))))
+       // set 2
+       .addExpression(
+           Expression()
+               .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
+                      Buffer(sel_date),
+                      Buffer(result_proj_minus, sizeof(int64_t)),
+                      Value(&r->one), Column(lineitem, "l_discount"))
+               .addOp(conf.proj_multiplies_sel_int64_t_col_int64_t_col(),
+                      Buffer(sel_date), Buffer(disc_price_3, sizeof(int64_t)),
+                      Column(lineitem, "l_extendedprice"),
+                      Buffer(result_proj_minus, sizeof(int64_t))))
+       .addExpression(
+           Expression()
+               .addOp(conf.proj_sel_plus_int64_t_col_int64_t_val(),
+                      Buffer(sel_date),
+                      Buffer(result_proj_plus, sizeof(int64_t)),
+                      Column(lineitem, "l_tax"), Value(&r->one))
+               .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
+                      Buffer(charge_3, sizeof(int64_t)),
+                      Buffer(disc_price_3, sizeof(int64_t)),
+                      Buffer(result_proj_plus, sizeof(int64_t))))
+       // set 3
+       .addExpression(
+           Expression()
+               .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
+                      Buffer(sel_date),
+                      Buffer(result_proj_minus, sizeof(int64_t)),
+                      Value(&r->one), Column(lineitem, "l_discount"))
+               .addOp(conf.proj_multiplies_sel_int64_t_col_int64_t_col(),
+                      Buffer(sel_date), Buffer(disc_price_4, sizeof(int64_t)),
+                      Column(lineitem, "l_extendedprice"),
+                      Buffer(result_proj_minus, sizeof(int64_t))))
+       .addExpression(
+           Expression()
+               .addOp(conf.proj_sel_plus_int64_t_col_int64_t_val(),
+                      Buffer(sel_date),
+                      Buffer(result_proj_plus, sizeof(int64_t)),
+                      Column(lineitem, "l_tax"), Value(&r->one))
+               .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
+                      Buffer(charge_4, sizeof(int64_t)),
+                      Buffer(disc_price_4, sizeof(int64_t)),
                       Buffer(result_proj_plus, sizeof(int64_t))));
    HashGroup()
        .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
@@ -334,17 +370,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                primitives::gather_val_Char_1_col,
                Buffer(linestatus, sizeof(Char_1)))
        .padToAlign(sizeof(types::Numeric<12, 4>))
-       // original aggregates
-       .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_disc_price, sizeof(types::Numeric<12, 4>)))
-       .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
+       // accumulators ordered to match hyper plan layout
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_sel_plus_int64_t_col,
@@ -357,77 +383,78 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price, sizeof(types::Numeric<12, 2>)))
+       .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_disc_price, sizeof(types::Numeric<12, 4>)))
+       .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_count_star,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order, sizeof(uint64_t)))
-       // duplicate set 1
-       .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_disc_price_2, sizeof(types::Numeric<12, 4>)))
-       .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_charge_2, sizeof(types::Numeric<12, 4>)))
-       .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
-                 primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_qty_2, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_sel_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price_2, sizeof(types::Numeric<12, 2>)))
-       .addValue(Buffer(charge, sizeof(uint64_t)),
-                 primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(count_order_2, sizeof(uint64_t)))
-       // duplicate set 2
-       .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
+       .addValue(Buffer(disc_price_2), primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
-                 Buffer(sum_disc_price_3, sizeof(types::Numeric<12, 4>)))
-       .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
+                 Buffer(sum_disc_price_2, sizeof(types::Numeric<12, 4>)))
+       .addValue(Buffer(charge_2), primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
-                 Buffer(sum_charge_3, sizeof(types::Numeric<12, 4>)))
-       .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
-                 primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_qty_3, sizeof(types::Numeric<12, 2>)))
+                 Buffer(sum_charge_2, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_sel_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
-                 Buffer(sum_base_price_3, sizeof(types::Numeric<12, 2>)))
-       .addValue(Buffer(charge, sizeof(uint64_t)),
+                 Buffer(sum_qty_2, sizeof(types::Numeric<12, 2>)))
+       .addValue(Buffer(charge_2, sizeof(uint64_t)),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_count_star,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(count_order_2, sizeof(uint64_t)))
+       .addValue(Buffer(disc_price_3), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_disc_price_3, sizeof(types::Numeric<12, 4>)))
+       .addValue(Buffer(charge_3), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_charge_3, sizeof(types::Numeric<12, 4>)))
+       .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_sel_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_qty_3, sizeof(types::Numeric<12, 2>)))
+       .addValue(Buffer(disc_price_4), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_disc_price_4, sizeof(types::Numeric<12, 4>)))
+       .addValue(Buffer(charge_3, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_count_star,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order_3, sizeof(uint64_t)))
-       // duplicate set 3
-       .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_disc_price_4, sizeof(types::Numeric<12, 4>)))
-       .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
+       .addValue(Buffer(charge_4), primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
@@ -444,12 +471,18 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price_4, sizeof(types::Numeric<12, 2>)))
-       .addValue(Buffer(charge, sizeof(uint64_t)),
+       .addValue(Buffer(charge_4, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_count_star,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
-                 Buffer(count_order_4, sizeof(uint64_t)));
+                 Buffer(count_order_4, sizeof(uint64_t)))
+       .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_sel_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_base_price_3, sizeof(types::Numeric<12, 2>)));
 
    result.addValue("l_returnflag", Buffer(returnflag))
        .addValue("l_linestatus", Buffer(linestatus))

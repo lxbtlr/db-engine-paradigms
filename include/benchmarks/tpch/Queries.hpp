@@ -49,6 +49,10 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
     sel_date, sel_date_grouped, selScat,
     result_proj_minus, result_proj_plus,
     disc_price, charge,
+    // intermediate projection buffers for duplicate sets
+    disc_price_2, charge_2, ep_1,
+    disc_price_3, charge_3, ep_2,
+    disc_price_4, charge_4, ep_3,
     returnflag, linestatus,
     sum_qty, sum_base_price, sum_disc_price, sum_charge, count_order,
     // duplicate sets for register pressure experiment (20 accumulators total)
