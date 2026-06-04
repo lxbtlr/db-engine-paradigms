@@ -25,9 +25,26 @@ void Aggregates::operator+=(std::unique_ptr<Op>&& op) {
 }
 
 pos_t Aggregates::evaluate(pos_t n) {
+   // Option 2: op-outer, tuple-inner.
+   // Each primitive loops over all n tuples before the next primitive runs.
    auto found = 0;
    for (auto& aggr : ops) found = aggr->run(n);
    return found;
+}
+
+pos_t Aggregates::evaluate_tuple_outer(pos_t n) {
+   // Option 1: tuple-outer, op-inner.
+   // For each tuple i, every primitive is applied to that single tuple before
+   // moving to tuple i+1.  Ops advance their internal data pointers by 1 after
+   // each tuple via Op::advance(1).
+   for (pos_t i = 0; i < n; ++i) {
+      for (auto& aggr : ops) aggr->run(1);
+      for (auto& aggr : ops) aggr->advance(1);
+   }
+   // Restore all op pointers to their original positions so the next morsel
+   // starts from index 0 again.
+   for (auto& aggr : ops) aggr->advance(-static_cast<ptrdiff_t>(n));
+   return n;
 }
 
 Scatter::ScatterInfo::ScatterInfo(std::unique_ptr<Op>&& operation, void** s,

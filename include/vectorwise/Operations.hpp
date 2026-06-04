@@ -23,8 +23,13 @@ class Expression {
 class Aggregates {
  public:
    std::vector<std::unique_ptr<Op>> ops;
-   /// Evaluate all operations of this aggregate
+   /// Option 2 (default): op-outer, tuple-inner.
+   /// Calls each primitive once with the full batch of n tuples.
    pos_t evaluate(pos_t n);
+   /// Option 1: tuple-outer, op-inner.
+   /// Iterates one tuple at a time; for each tuple calls every primitive
+   /// with n=1 so that all ops are applied to a single row before moving on.
+   pos_t evaluate_tuple_outer(pos_t n);
    void operator+=(std::unique_ptr<Expression> other);
    void operator+=(std::unique_ptr<Op>&& op);
 };
@@ -45,6 +50,11 @@ class Scatter {
 
 struct Op {
    virtual pos_t run(pos_t n) = 0;
+   /// Advance all data pointers by `step` elements (element size is
+   /// op-specific).  Used by Aggregates::evaluate_tuple_outer to step through
+   /// one tuple at a time.  Negative step rewinds.  Default is a no-op; ops
+   /// that participate in tuple-outer aggregation must override this.
+   virtual void advance(ptrdiff_t /*step*/) {}
    virtual ~Op() = default;
 };
 
@@ -72,10 +82,76 @@ class OpArgs<pos_t (*)(pos_t, Args...)> : public Op {
 using FScatterOp = OpArgs<primitives::FScatter>;
 using FScatterSelOp = OpArgs<primitives::FScatterSel>;
 using FScatterSelRowOp = OpArgs<primitives::FScatterSelRow>;
-using FAggrOp = OpArgs<primitives::FAggr>;
-using FAggrSelOp = OpArgs<primitives::FAggrSel>;
 using FAggrRowOp = OpArgs<primitives::FAggrRow>;
 using FAggrInitOp = OpArgs<primitives::FAggrInit>;
+
+// FAggrOp and FAggrSelOp are defined as named structs (not OpArgs aliases)
+// so they can carry elemSize and override advance() for tuple-outer evaluation.
+// FAggr signature: pos_t(pos_t n, void* entries[], void* param1, size_t offset)
+//   arg 0: entries (void**) — htMatches array, advances by sizeof(void*)/element
+//   arg 1: param1  (void*)  — column data, advances by elemSize bytes
+//   arg 2: offset  (size_t) — constant
+struct FAggrOp : public Op {
+   primitives::FAggr function;
+   void** entries;   // htMatches
+   void*  param1;    // column data
+   size_t offset;
+   size_t elemSize;  // byte size of one element in param1 column
+
+   FAggrOp(primitives::FAggr f, void** e, void* p, size_t off, size_t esz)
+       : function(f), entries(e), param1(p), offset(off), elemSize(esz) {}
+   // Convenience ctor without elemSize (defaults 0; advance() is no-op)
+   FAggrOp(primitives::FAggr f, void** e, void* p, size_t off)
+       : FAggrOp(f, e, p, off, 0) {}
+
+   // Required by existing QueryBuilder code that calls get<N>() on the op.
+   // Map indices to fields to match original OpArgs<FAggr> layout.
+   template <unsigned N> auto& get();
+
+   virtual pos_t run(pos_t n) override {
+      return function(n, entries, param1, offset);
+   }
+   virtual void advance(ptrdiff_t step) override {
+      entries += step;
+      param1 = addBytes(param1, step * static_cast<ptrdiff_t>(elemSize));
+   }
+};
+
+template <> inline auto& FAggrOp::get<0>() { return entries; }
+template <> inline auto& FAggrOp::get<1>() { return param1; }
+template <> inline auto& FAggrOp::get<2>() { return offset; }
+
+// FAggrSel signature: pos_t(pos_t n, void* entries[], pos_t* sel, void* param1, size_t offset)
+//   arg 0: entries (void**) — advances by 1 pointer per step
+//   arg 1: sel     (pos_t*) — selection vector into param1, advances by 1
+//   arg 2: param1  (void*)  — column data base, does NOT advance (sel does the indirection)
+//   arg 3: offset  (size_t) — constant
+struct FAggrSelOp : public Op {
+   primitives::FAggrSel function;
+   void**  entries;
+   pos_t*  sel;
+   void*   param1;
+   size_t  offset;
+
+   FAggrSelOp(primitives::FAggrSel f, void** e, pos_t* s, void* p, size_t off)
+       : function(f), entries(e), sel(s), param1(p), offset(off) {}
+
+   template <unsigned N> auto& get();
+
+   virtual pos_t run(pos_t n) override {
+      return function(n, entries, sel, param1, offset);
+   }
+   virtual void advance(ptrdiff_t step) override {
+      entries += step;
+      sel     += step;
+      // param1 is indexed via sel, so its base pointer stays fixed
+   }
+};
+
+template <> inline auto& FAggrSelOp::get<0>() { return entries; }
+template <> inline auto& FAggrSelOp::get<1>() { return sel; }
+template <> inline auto& FAggrSelOp::get<2>() { return param1; }
+template <> inline auto& FAggrSelOp::get<3>() { return offset; }
 using FPartitionByKeyOp = OpArgs<primitives::FPartitionByKey>;
 using FPartitionByKeySelOp = OpArgs<primitives::FPartitionByKeySel>;
 using FPartitionByKeyRowOp = OpArgs<primitives::FPartitionByKeyRow>;

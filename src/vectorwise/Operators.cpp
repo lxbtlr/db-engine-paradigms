@@ -892,8 +892,16 @@ size_t GroupAggregateOp::next() {
       // GroupLookupOp) so we can use it directly for the flush threshold.
       for (pos_t n = pipeline->next(); n != EndOfStream;
            n = pipeline->next()) {
-         // updateGroups uses htMatches written by GroupLookupOp
+         // updateGroups uses htMatches written by GroupLookupOp.
+         // Option 1 (VW_AGGR_TUPLE_OUTER): tuple-outer, op-inner —
+         //   for each tuple, apply all aggregate ops before moving on.
+         // Option 2 (default): op-outer, tuple-inner —
+         //   apply each aggregate op across all tuples before the next op.
+#ifdef VW_AGGR_TUPLE_OUTER
+         op.updateGroups.evaluate_tuple_outer(n);
+#else
          op.updateGroups.evaluate(n);
+#endif
          if (op.preAggregation.entries_in_ht >= op.maxFill_ref())
             flushAndClear();
       }

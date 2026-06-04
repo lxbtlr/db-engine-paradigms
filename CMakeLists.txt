@@ -27,6 +27,7 @@ OPTION(HASH_SIZE_32 OFF)
 OPTION(NUMA_POOLS "Enable NUMA-aware memory pools (one pool per NUMA node)" OFF)
 OPTION(NUMA_MBIND "Enable mbind() to bind memory to NUMA nodes (requires NUMA_POOLS and libnuma)" OFF)
 OPTION(VW_SPLIT_HASHGROUP "Decompose HashGroup into Hash, GroupLookup, and Aggregate operators" OFF)
+OPTION(VW_AGGR_TUPLE_OUTER "Use tuple-outer aggregation loop (Option 1) instead of op-outer (Option 2, default)" OFF)
 
 
 # Only set defaults if they aren't provided by the command line (sweep script)
@@ -86,6 +87,14 @@ IF(VW_SPLIT_HASHGROUP)
   ADD_DEFINITIONS(-DVW_SPLIT_HASHGROUP)
   message(STATUS "Split HashGroup operators enabled")
 ENDIF(VW_SPLIT_HASHGROUP)
+
+IF(VW_AGGR_TUPLE_OUTER)
+  if(NOT VW_SPLIT_HASHGROUP)
+    message(FATAL_ERROR "VW_AGGR_TUPLE_OUTER requires VW_SPLIT_HASHGROUP=ON")
+  endif()
+  ADD_DEFINITIONS(-DVW_AGGR_TUPLE_OUTER)
+  message(STATUS "Tuple-outer aggregation loop (Option 1) enabled")
+ENDIF(VW_AGGR_TUPLE_OUTER)
 
 IF(NUMA_POOLS)
   ADD_DEFINITIONS(-DNUMA_POOLS)
