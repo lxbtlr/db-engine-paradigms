@@ -490,13 +490,18 @@ void HashGroup::GroupLookup<T>::htProbe(pos_t n, runtime::Hashmap& ht) {
 
    const pos_t primeEnd = std::min(n, PREFETCH_DIST);
    for (pos_t j = 0; j < primeEnd; ++j) {
-      __builtin_prefetch(&ht.entries[self()->hashForTuple(j) & ht.mask], 0, 1);
+      auto h = self()->hashForTuple(j);
+      groupHashes[j] = h;
+      __builtin_prefetch(&ht.entries[h & ht.mask], 0, 1);
    }
 
    for (pos_t i = 0; i < n; ++i) {
-      if (i + PREFETCH_DIST < n)
-         __builtin_prefetch(&ht.entries[self()->hashForTuple(i + PREFETCH_DIST) & ht.mask], 0, 1);
-      htMatches[i] = ht.find_chain(self()->hashForTuple(i));
+      if (i + PREFETCH_DIST < n) {
+         auto hf = self()->hashForTuple(i + PREFETCH_DIST);
+         groupHashes[i + PREFETCH_DIST] = hf;
+         __builtin_prefetch(&ht.entries[hf & ht.mask], 0, 1);
+      }
+      htMatches[i] = ht.find_chain(groupHashes[i]);
       groupsFound[i] = i; // all tuples are candidates until htLookup filters them
    }
 }
@@ -509,7 +514,7 @@ HashGroup::GroupLookup<T>::htLookup(pos_t n, decltype(ht) & ht) {
    // groupsNotFound (empty bucket or no hash match in chain).
    pos_t found = 0;
    for (pos_t i = 0; i < n; ++i) {
-      auto hash = self()->hashForTuple(i);
+      auto hash = groupHashes[i];
       auto el = htMatches[i];
       if (el != ht.end()) {
          if (el->hash == hash) {
@@ -537,8 +542,8 @@ pos_t HashGroup::GroupLookup<T>::htFollow(runtime::Hashmap& ht)
    pos_t found = 0;
    for (size_t i = 0, end = keysNEq->size(); i < end;) {
       auto idx = keysNEq->operator[](i);
+      auto hash = groupHashes[idx];
       for (auto e = htMatches[idx]->next; e != ht.end(); e = e->next) {
-         auto hash = self()->hashForTuple(idx);
          if (e->hash == hash) {
             htMatches[idx] = e;
             groupsFound[found++] = idx;
