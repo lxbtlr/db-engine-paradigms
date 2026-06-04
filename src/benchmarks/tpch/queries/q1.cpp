@@ -260,7 +260,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
 
    auto r = make_unique<Q1>();
    auto lineitem = Scan("lineitem");
-   Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
+   Select(Expression().addOp(conf.sel_less_equal_int32_t_col_int32_t_val(),
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
    Project()
@@ -311,117 +311,117 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
        .padToAlign(sizeof(types::Numeric<12, 4>))
        // original aggregates
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order, sizeof(uint64_t)))
        // duplicate set 1
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price_2, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge_2, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty_2, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price_2, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order_2, sizeof(uint64_t)))
        // duplicate set 2
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price_3, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge_3, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty_3, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price_3, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order_3, sizeof(uint64_t)))
        // duplicate set 3
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price_4, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge_4, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty_4, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price_4, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order_4, sizeof(uint64_t)));
@@ -482,7 +482,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuerySplit() {
 
    auto r = make_unique<Q1>();
    auto lineitem = Scan("lineitem");
-   Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
+   Select(Expression().addOp(conf.sel_less_equal_int32_t_col_int32_t_val(),
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
    Project()
@@ -534,117 +534,117 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuerySplit() {
        .padToAlign(sizeof(types::Numeric<12, 4>))
        // original aggregates
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order, sizeof(uint64_t)))
        // duplicate set 1
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price_2, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge_2, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty_2, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price_2, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order_2, sizeof(uint64_t)))
        // duplicate set 2
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price_3, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge_3, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty_3, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price_3, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order_3, sizeof(uint64_t)))
        // duplicate set 3
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price_4, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge_4, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty_4, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price_4, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order_4, sizeof(uint64_t)));
@@ -806,7 +806,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
 
    auto r = make_unique<Q1>();
    auto lineitem = Scan("lineitem");
-   Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
+   Select(Expression().addOp(conf.sel_less_equal_int32_t_col_int32_t_val(),
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
    Project()
@@ -856,30 +856,30 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                Buffer(linestatus, sizeof(Char_1)))
        .padToAlign(sizeof(types::Numeric<12, 4>))
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order, sizeof(uint64_t)));
@@ -926,7 +926,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuerySplit() {
 
    auto r = make_unique<Q1>();
    auto lineitem = Scan("lineitem");
-   Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
+   Select(Expression().addOp(conf.sel_less_equal_int32_t_col_int32_t_val(),
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
    Project()
@@ -977,30 +977,30 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuerySplit() {
                Buffer(linestatus, sizeof(Char_1)))
        .padToAlign(sizeof(types::Numeric<12, 4>))
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_disc_price, sizeof(types::Numeric<12, 4>)))
        .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
+                 conf.aggr_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_qty, sizeof(types::Numeric<12, 2>)))
        .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
+                 conf.aggr_sel_plus_int64_t_col(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_base_price, sizeof(types::Numeric<12, 2>)))
        .addValue(Buffer(charge, sizeof(uint64_t)),
                  primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
+                 conf.aggr_count_star(),
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order, sizeof(uint64_t)));
