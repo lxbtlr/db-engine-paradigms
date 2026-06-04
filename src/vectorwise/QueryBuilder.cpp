@@ -830,11 +830,7 @@ QueryBuilder::SplitHashGroupBuilder::addValue(
    global.buildScatter += move(aggregateInitGlobalOp);
 
    auto aggr_op = make_unique<FAggrOp>(
-       aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset
-#ifdef VW_AGGR_TUPLE_OUTER
-       , col.dataSize
-#endif
-   );
+       aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset);
    col.registerDS(&aggr_op->get<1>());
    op.updateGroups += move(aggr_op);
 
