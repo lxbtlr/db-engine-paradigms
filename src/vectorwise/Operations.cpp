@@ -89,23 +89,21 @@ pos_t Aggregates::evaluate_tuple_outer(pos_t n) {
       }
    }
 
-   // Tight tuple-outer loop: for each tuple, call all aggregate primitives
-   // with n=1, advancing pointers manually.
+   // Tight tuple-outer loop: for each tuple, load the HT entry once, then
+   // apply all aggregates to that entry before moving to the next tuple.
+   // All aggregate values are int64_t and use += (plus), so we inline directly.
    for (pos_t i = 0; i < n; ++i) {
+      auto* entry = reinterpret_cast<char*>(info[0].entries[i]);
       for (size_t j = 0; j < nOps; ++j) {
          auto& c = info[j];
+         auto* aggregate = reinterpret_cast<int64_t*>(entry + c.offset);
          if (c.kind == AggrInfo::COL) {
-            c.fn_col(1, c.entries + i, c.param1, c.offset);
-            // advance param1 for next iteration
+            auto* col = reinterpret_cast<int64_t*>(c.param1);
+            *aggregate += *col;
+            c.param1 = reinterpret_cast<void*>(col + 1);
          } else {
-            c.fn_sel(1, c.entries + i, c.sel + i, c.param1, c.offset);
-         }
-      }
-      // Advance param1 for COL ops (SEL ops index via sel, no advance needed)
-      for (size_t j = 0; j < nOps; ++j) {
-         if (info[j].kind == AggrInfo::COL) {
-            info[j].param1 = reinterpret_cast<void*>(
-                reinterpret_cast<uintptr_t>(info[j].param1) + info[j].elemSize);
+            auto* col = reinterpret_cast<int64_t*>(c.param1);
+            *aggregate += col[c.sel[i]];
          }
       }
    }
