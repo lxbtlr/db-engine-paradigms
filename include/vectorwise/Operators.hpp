@@ -279,6 +279,11 @@ class HashGroup : public UnaryOperator {
    const size_t initialMapSize = 1024;
 
  public:
+   /// Expose the hash table for use by split operators (GroupLookupOp,
+   /// GroupAggregateOp) that need direct access without subclassing.
+   runtime::Hashmap& ht_ref() { return ht; }
+   size_t& maxFill_ref() { return maxFill; }
+
    using hash_t = decltype(ht)::hash_t;
    using deque_t = runtime::PartitionedDeque<1024>;
    using EntryHeader = runtime::Hashmap::EntryHeader;
@@ -419,6 +424,57 @@ class HashGroup : public UnaryOperator {
 
  private:
    void clearHashtable();
+};
+
+// ---------------------------------------------------------------------------
+// Split HashGroup: three separate operators that together replace HashGroup.
+//
+// HashComputeOp    — computes group-key hashes for each incoming morsel
+// GroupLookupOp    — looks up / creates HT entries, populates htMatches
+// GroupAggregateOp — orchestrates the two-phase aggregation (spill+barrier),
+//                    calling updateGroups per morsel in phase 1 and
+//                    updateGroupsFromPartition + gatherGroups in phase 2.
+//
+// All three share the same underlying HashGroup state object.
+// The builder wires them up; GroupAggregateOp owns the HashGroup.
+//
+// Enable the split path in q1 with: #define VW_SPLIT_HASHGROUP
+// ---------------------------------------------------------------------------
+
+/// Computes group-key hashes into groupHashes buffer.
+/// child->next() provides the morsel; result is forwarded unchanged.
+class HashComputeOp : public UnaryOperator {
+ public:
+   HashGroup* hg = nullptr; // non-owning reference to shared HashGroup state
+   virtual size_t next() override;
+};
+
+/// Looks up / creates group entries in the local pre-aggregation HT.
+/// Must be placed above HashComputeOp in the pipeline.
+class GroupLookupOp : public UnaryOperator {
+ public:
+   HashGroup* hg = nullptr; // non-owning reference to shared HashGroup state
+   virtual size_t next() override;
+};
+
+/// Top-level two-phase aggregation operator.
+/// Owns the HashGroup object; the inner pipeline (GroupLookupOp ->
+/// HashComputeOp -> data source) is stored in `pipeline` and is called
+/// per morsel during phase 1.
+///
+/// Aggregation work (updateGroups) is done here, not in the sub-operators,
+/// so that each conceptual step is performed by exactly one operator.
+class GroupAggregateOp : public Operator {
+ public:
+   // Owns all HashGroup state including the HT, spill storage, etc.
+   std::unique_ptr<HashGroup> hg;
+
+   // Inner pipeline: GroupLookupOp -> HashComputeOp -> data source.
+   // GroupAggregateOp drives this pipeline during phase 1.
+   std::unique_ptr<Operator> pipeline;
+
+   explicit GroupAggregateOp(HashGroup::Shared& s);
+   virtual size_t next() override;
 };
 
 template <typename T>

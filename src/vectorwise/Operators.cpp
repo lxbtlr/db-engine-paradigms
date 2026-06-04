@@ -837,6 +837,126 @@ Hashjoin::~Hashjoin() {
    // for (auto& block : allocations) free(block.first);
 }
 
+// ---------------------------------------------------------------------------
+// Split HashGroup operator implementations
+// ---------------------------------------------------------------------------
+
+size_t HashComputeOp::next() {
+   auto n = child->next();
+   if (n == EndOfStream) return EndOfStream;
+   hg->groupHash.evaluate(n);
+   return n;
+}
+
+size_t GroupLookupOp::next() {
+   auto n = child->next();
+   if (n == EndOfStream) return EndOfStream;
+   // child (HashComputeOp) has already evaluated groupHash.
+   // Now do prefetch + HT lookup + group creation.
+   hg->preAggregation.prefetchBuckets(n, hg->ht_ref());
+   hg->preAggregation.findGroups(n, hg->ht_ref());
+   hg->preAggregation.createMissingGroups(hg->ht_ref(), false);
+   return n;
+}
+
+GroupAggregateOp::GroupAggregateOp(HashGroup::Shared& s)
+    : hg(std::make_unique<HashGroup>(s)) {}
+
+size_t GroupAggregateOp::next() {
+   using header_t = runtime::Hashmap::EntryHeader;
+   auto& op = *hg;
+   auto& cont = op.cont;
+
+   if (!cont.consumed) {
+      // Phase 1: drive inner pipeline (HashComputeOp -> GroupLookupOp),
+      // then perform aggregation (updateGroups) on each morsel.
+      auto& spill = op.shared.spillStorage.local();
+      auto entry_size = op.preAggregation.ht_entry_size;
+
+      auto flushAndClear = [&]() INTERPRET_SEPARATE {
+         assert(offsetof(header_t, next) + sizeof(header_t::next) ==
+                offsetof(header_t, hash));
+         for (auto& alloc : op.preAggregation.allocations) {
+            for (auto entry = reinterpret_cast<header_t*>(alloc.first),
+                      end = addBytes(entry, alloc.second * entry_size);
+                 entry < end; entry = addBytes(entry, entry_size))
+               spill.push_back(&entry->hash, entry->hash);
+         }
+         op.preAggregation.allocations.clear();
+         op.preAggregation.clearHashtable(op.ht_ref());
+      };
+
+      // pipeline is: GroupLookupOp -> HashComputeOp -> data source.
+      // It returns n after hashing + HT lookup + group creation.
+      // entries_in_ht is updated inside createMissingGroups (called by
+      // GroupLookupOp) so we can use it directly for the flush threshold.
+      for (pos_t n = pipeline->next(); n != EndOfStream;
+           n = pipeline->next()) {
+         // updateGroups uses htMatches written by GroupLookupOp
+         op.updateGroups.evaluate(n);
+         if (op.preAggregation.entries_in_ht >= op.maxFill_ref())
+            flushAndClear();
+      }
+      flushAndClear();
+      barrier();
+
+      cont.consumed = true;
+      cont.partition = op.shared.partition.fetch_add(1);
+      cont.partitionNeedsAggregation = true;
+   }
+
+   // Phase 2: global aggregation — identical to HashGroup::next() phase 2.
+   for (; cont.partition < op.nrPartitions;) {
+      if (cont.partitionNeedsAggregation) {
+         auto partNr = cont.partition;
+         for (auto& threadPartitions : op.shared.spillStorage.threadData) {
+            auto& partition =
+                threadPartitions.second.getPartitions()[partNr];
+            for (auto chunk = partition.first; chunk; chunk = chunk->next) {
+               auto elementSize = threadPartitions.second.entrySize;
+               auto nPart = partition.size(chunk, elementSize);
+               for (size_t n = std::min(nPart, op.vecSize), pos = 0; n;
+                    nPart -= n, pos += n,
+                        n = std::min(nPart, op.vecSize)) {
+                  auto data =
+                      addBytes(chunk->data<void>(), pos * elementSize);
+                  op.globalAggregation.rowData = data;
+                  op.globalAggregation.prefetchBuckets(n, op.ht_ref());
+                  op.findGroupsFromPartition(data, n);
+                  auto cGroups = [&]() INTERPRET_SEPARATE {
+                     op.globalAggregation.createMissingGroups(op.ht_ref(),
+                                                              true);
+                  };
+                  cGroups();
+                  op.updateGroupsFromPartition.evaluate(n);
+               }
+            }
+         }
+         cont.partitionNeedsAggregation = false;
+         cont.iter = op.globalAggregation.allocations.begin();
+      }
+      if (cont.iter != op.globalAggregation.allocations.end()) {
+         auto& block = *cont.iter;
+         *op.globalAggregation.htMatches =
+             reinterpret_cast<header_t*>(block.first);
+         auto n = block.second;
+         op.gatherGroups.evaluate(n);
+         cont.iter++;
+         return n;
+      } else {
+         auto htClear = [&]() INTERPRET_SEPARATE {
+            op.globalAggregation.clearHashtable(op.ht_ref());
+         };
+         htClear();
+         cont.partitionNeedsAggregation = true;
+         cont.partition = op.shared.partition.fetch_add(1);
+      }
+   }
+   return EndOfStream;
+}
+
+// ---------------------------------------------------------------------------
+
 HashGroup::HashGroup(Shared& s)
     : shared(s), preAggregation(*this), globalAggregation(*this) {
    maxFill = ht.setSize(initialMapSize);
