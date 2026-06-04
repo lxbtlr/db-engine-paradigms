@@ -894,11 +894,8 @@ size_t GroupAggregateOp::next() {
       // It returns n after hashing + HT lookup + group creation.
       // entries_in_ht is updated inside createMissingGroups (called by
       // GroupLookupOp) so we can use it directly for the flush threshold.
-      size_t dbg_morsels = 0, dbg_tuples = 0;
       for (pos_t n = pipeline->next(); n != EndOfStream;
            n = pipeline->next()) {
-         dbg_morsels++;
-         dbg_tuples += n;
          // updateGroups uses htMatches written by GroupLookupOp.
          // Option 1 (VW_AGGR_TUPLE_OUTER): tuple-outer, op-inner —
          //   for each tuple, apply all aggregate ops before moving on.
@@ -912,8 +909,6 @@ size_t GroupAggregateOp::next() {
          if (op.preAggregation.entries_in_ht >= op.maxFill_ref())
             flushAndClear();
       }
-      //fprintf(stderr, "[GroupAggregateOp] phase1: morsels=%zu tuples=%zu aggr_ops=%zu\n",
-      //        dbg_morsels, dbg_tuples, op.updateGroups.ops.size());
       flushAndClear();
       barrier();
 
@@ -1013,10 +1008,7 @@ size_t HashGroup::next() {
          preAggregation.clearHashtable(ht);
       };
 
-      size_t dbg_morsels = 0, dbg_tuples = 0;
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         dbg_morsels++;
-         dbg_tuples += n;
          // 1. Hash: compute group key hashes for the entire morsel
          groupHash.evaluate(n);
          // 2. Prefetch: issue HT bucket loads for all hashes before any lookup
@@ -1031,8 +1023,6 @@ size_t HashGroup::next() {
          groups += groupsCreated;
          if (groups >= maxFill) flushAndClear();
       }
-      //fprintf(stderr, "[HashGroup] phase1: morsels=%zu tuples=%zu aggr_ops=%zu\n",
-      //        dbg_morsels, dbg_tuples, updateGroups.ops.size());
       flushAndClear(); // flush remaining entries into spillStorage
       barrier();       // Wait until all workers have finished phase 1
 
