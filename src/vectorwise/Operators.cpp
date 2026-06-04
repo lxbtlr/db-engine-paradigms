@@ -853,8 +853,7 @@ size_t GroupLookupOp::next() {
    auto n = child->next();
    if (n == EndOfStream) return EndOfStream;
    // child (HashComputeOp) has already evaluated groupHash.
-   // Now do prefetch + HT lookup + group creation.
-   hg->preAggregation.prefetchBuckets(n, hg->ht_ref());
+   // findGroups handles prefetching internally.
    hg->preAggregation.findGroups(n, hg->ht_ref());
    hg->preAggregation.createMissingGroups(hg->ht_ref(), false);
    return n;
@@ -930,7 +929,6 @@ size_t GroupAggregateOp::next() {
                   auto data =
                       addBytes(chunk->data<void>(), pos * elementSize);
                   op.globalAggregation.rowData = data;
-                  op.globalAggregation.prefetchBuckets(n, op.ht_ref());
                   op.findGroupsFromPartition(data, n);
                   auto cGroups = [&]() INTERPRET_SEPARATE {
                      op.globalAggregation.createMissingGroups(op.ht_ref(),
