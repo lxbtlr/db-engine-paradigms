@@ -1007,8 +1007,7 @@ size_t HashGroup::next() {
          // 1. Hash: compute group key hashes for the entire morsel
          groupHash.evaluate(n);
          // 2. Lookup: find existing groups / classify misses.
-         //    htLookup pipelines prefetches internally (prefetch i+D, process i)
-         //    to hide HT bucket load latency without a separate pass.
+         //    htProbe prefetches HT buckets; htLookup compares over cached entries.
          preAggregation.findGroups(n, ht);
          // 3. Create: allocate and insert entries for unseen groups
          auto groupsCreated = preAggregation.createMissingGroups(ht, false);
