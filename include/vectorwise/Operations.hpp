@@ -89,8 +89,47 @@ using FScatterSelRowOp = OpArgs<primitives::FScatterSelRow>;
 using FAggrRowOp = OpArgs<primitives::FAggrRow>;
 using FAggrInitOp = OpArgs<primitives::FAggrInit>;
 
-using FAggrOp    = OpArgs<primitives::FAggr>;
-using FAggrSelOp = OpArgs<primitives::FAggrSel>;
+// FAggr signature: pos_t(pos_t n, void* result[], void* param1, size_t offset)
+// args tuple:  <0> = void** result (htMatches ptr), <1> = void* param1 (col data), <2> = size_t offset
+struct FAggrOp : public OpArgs<primitives::FAggr> {
+   using Base = OpArgs<primitives::FAggr>;
+   size_t elemSize = 0;
+   FAggrOp(primitives::FAggr f, void** result, void* param1, size_t offset)
+       : Base(f, result, param1, offset) {}
+   FAggrOp(primitives::FAggr f, void** result, void* param1, size_t offset,
+           size_t es)
+       : Base(f, result, param1, offset), elemSize(es) {}
+#ifdef VW_AGGR_TUPLE_OUTER
+   void advance(ptrdiff_t step) override {
+      std::get<0>(args) = reinterpret_cast<void**>(
+          reinterpret_cast<char*>(std::get<0>(args)) +
+          step * static_cast<ptrdiff_t>(sizeof(void*)));
+      std::get<1>(args) = reinterpret_cast<void*>(
+          reinterpret_cast<char*>(std::get<1>(args)) +
+          step * static_cast<ptrdiff_t>(elemSize));
+   }
+#endif
+};
+
+// FAggrSel signature: pos_t(pos_t n, void* result[], pos_t* sel, void* param1, size_t offset)
+// args tuple:  <0> = void** result (htMatches ptr), <1> = pos_t* sel, <2> = void* param1 (col data), <3> = size_t offset
+struct FAggrSelOp : public OpArgs<primitives::FAggrSel> {
+   using Base = OpArgs<primitives::FAggrSel>;
+   using Base::Base;
+#ifdef VW_AGGR_TUPLE_OUTER
+   void advance(ptrdiff_t step) override {
+      // advance result (void**) by step entries
+      std::get<0>(args) = reinterpret_cast<void**>(
+          reinterpret_cast<char*>(std::get<0>(args)) +
+          step * static_cast<ptrdiff_t>(sizeof(void*)));
+      // advance sel (pos_t*) by step entries
+      std::get<1>(args) = reinterpret_cast<pos_t*>(
+          reinterpret_cast<char*>(std::get<1>(args)) +
+          step * static_cast<ptrdiff_t>(sizeof(pos_t)));
+      // param1 is NOT advanced — it's indexed via the selection vector
+   }
+#endif
+};
 
 using FPartitionByKeyOp = OpArgs<primitives::FPartitionByKey>;
 using FPartitionByKeySelOp = OpArgs<primitives::FPartitionByKeySel>;

@@ -830,7 +830,8 @@ QueryBuilder::SplitHashGroupBuilder::addValue(
    global.buildScatter += move(aggregateInitGlobalOp);
 
    auto aggr_op = make_unique<FAggrOp>(
-       aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset);
+       aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset,
+       col.dataSize);
    col.registerDS(&aggr_op->get<1>());
    op.updateGroups += move(aggr_op);
 
@@ -1101,7 +1102,8 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    global.buildScatter += move(aggregateInitGlobalOp);
 
    auto aggr_op = make_unique<FAggrOp>(
-       aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset);
+       aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset,
+       col.dataSize);
    col.registerDS(&aggr_op->get<1>());
    op.updateGroups += move(aggr_op);
 
