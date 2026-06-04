@@ -518,11 +518,7 @@ void HashGroup::GroupLookup<T>::htProbe(pos_t n, runtime::Hashmap& ht) {
          __builtin_prefetch(&ht.entries[hf & ht.mask], 0, 1);
       }
       htMatches[i] = ht.find_chain(groupHashes[i]);
-<<<<<<< HEAD
       groupsFound[i] = i; // all tuples are candidates until htLookup filters them
-=======
-      groupsFound[i] = i;
->>>>>>> e70c6ad (wip: 2nd attempt to resolve baseline regression)
    }
 }
 
@@ -530,15 +526,10 @@ template <typename T>
 pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
    pos_t found = 0;
-<<<<<<< HEAD
-   for (pos_t i = 0; i < n; ++i) {
-      auto hash = groupHashes[i];
-      auto el = htMatches[i];
-=======
    for (size_t i = 0; i < n;) {
       auto hash = self()->hashForTuple(i);
       auto el = ht.find_chain(hash);
->>>>>>> e70c6ad (wip: 2nd attempt to resolve baseline regression)
+
       if (el != ht.end()) {
          if (el->hash == hash) {
             htMatches[i] = el;
