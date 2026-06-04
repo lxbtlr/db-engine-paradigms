@@ -106,11 +106,11 @@ struct FAggrOp : public OpArgs<primitives::FAggr> {
          fprintf(stderr, "[FAggrOp::advance] step=%td elemSize=%zu\n", step, elemSize);
          logged_ = true;
       }
-      std::get<0>(args) = reinterpret_cast<void**>(
-          reinterpret_cast<char*>(std::get<0>(args)) +
-          step * static_cast<ptrdiff_t>(sizeof(void*)));
-      std::get<1>(args) = reinterpret_cast<void*>(
-          reinterpret_cast<char*>(std::get<1>(args)) +
+      auto& r = std::get<0>(args);
+      r = r + step;
+      auto& p = std::get<1>(args);
+      p = reinterpret_cast<void*>(
+          reinterpret_cast<uintptr_t>(p) +
           step * static_cast<ptrdiff_t>(elemSize));
    }
 #endif
@@ -128,14 +128,10 @@ struct FAggrSelOp : public OpArgs<primitives::FAggrSel> {
          fprintf(stderr, "[FAggrSelOp::advance] step=%td\n", step);
          logged_ = true;
       }
-      // advance result (void**) by step entries
-      std::get<0>(args) = reinterpret_cast<void**>(
-          reinterpret_cast<char*>(std::get<0>(args)) +
-          step * static_cast<ptrdiff_t>(sizeof(void*)));
-      // advance sel (pos_t*) by step entries
-      std::get<1>(args) = reinterpret_cast<pos_t*>(
-          reinterpret_cast<char*>(std::get<1>(args)) +
-          step * static_cast<ptrdiff_t>(sizeof(pos_t)));
+      auto& r = std::get<0>(args);
+      r = r + step;
+      auto& s = std::get<1>(args);
+      s = s + step;
       // param1 is NOT advanced — it's indexed via the selection vector
    }
 #endif
