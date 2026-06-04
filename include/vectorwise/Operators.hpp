@@ -335,6 +335,8 @@ class HashGroup : public UnaryOperator {
       /// Find group entries for all in flight tuples.
       /// Write matches to htMatches
       pos_t findGroups(pos_t n, decltype(ht) & ht);
+      /// Issue prefetches for all HT buckets corresponding to groupHashes[0..n).
+      void prefetchBuckets(pos_t n, decltype(ht) & ht);
       /// Buffer which contains hashes of group keys
       hash_t* groupHashes;
       /// Buffer which contains entry pointers after group lookup
@@ -481,11 +483,25 @@ class GroupAggregateOp : public Operator {
 
 #endif // VW_SPLIT_HASHGROUP
 
+// ---------------------------------------------------------------------------
+// prefetchBuckets: issue software prefetches for HT bucket loads.
+// This is the original f5e34fe approach — prefetch-only, no stores.
+// Used by HashGroup::next() on the baseline (non-split) path.
+// ---------------------------------------------------------------------------
+template <typename T>
+void HashGroup::GroupLookup<T>::prefetchBuckets(pos_t n, runtime::Hashmap& ht) {
+   for (pos_t i = 0; i < n; ++i) {
+      auto pos = self()->hashForTuple(i) & ht.mask;
+      __builtin_prefetch(&ht.entries[pos], 0, 1);
+   }
+}
+
+// ---------------------------------------------------------------------------
+// htProbe: software-pipelined prefetch + find_chain into htMatches.
+// Used by the split HashGroup operators (VW_SPLIT_HASHGROUP) via findGroups.
+// ---------------------------------------------------------------------------
 template <typename T>
 void HashGroup::GroupLookup<T>::htProbe(pos_t n, runtime::Hashmap& ht) {
-   // Pass 1: scatter — load chain heads for all n tuples into htMatches.
-   // Prefetch distance of 16 keeps ~16 cache misses in flight, hiding the
-   // latency of scattered HT bucket loads before htLookup inspects them.
    static constexpr pos_t PREFETCH_DIST = 16;
 
    const pos_t primeEnd = std::min(n, PREFETCH_DIST);
@@ -502,20 +518,27 @@ void HashGroup::GroupLookup<T>::htProbe(pos_t n, runtime::Hashmap& ht) {
          __builtin_prefetch(&ht.entries[hf & ht.mask], 0, 1);
       }
       htMatches[i] = ht.find_chain(groupHashes[i]);
+<<<<<<< HEAD
       groupsFound[i] = i; // all tuples are candidates until htLookup filters them
+=======
+      groupsFound[i] = i;
+>>>>>>> e70c6ad (wip: 2nd attempt to resolve baseline regression)
    }
 }
 
 template <typename T>
 pos_t INTERPRET_SEPARATE
-HashGroup::GroupLookup<T>::htLookup(pos_t n, decltype(ht) & ht) {
-   // Pass 2: compare — htMatches is already populated by htProbe.
-   // Walk each chain head and classify into groupsFound (hash match) or
-   // groupsNotFound (empty bucket or no hash match in chain).
+HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
    pos_t found = 0;
+<<<<<<< HEAD
    for (pos_t i = 0; i < n; ++i) {
       auto hash = groupHashes[i];
       auto el = htMatches[i];
+=======
+   for (size_t i = 0; i < n;) {
+      auto hash = self()->hashForTuple(i);
+      auto el = ht.find_chain(hash);
+>>>>>>> e70c6ad (wip: 2nd attempt to resolve baseline regression)
       if (el != ht.end()) {
          if (el->hash == hash) {
             htMatches[i] = el;
@@ -530,7 +553,8 @@ HashGroup::GroupLookup<T>::htLookup(pos_t n, decltype(ht) & ht) {
             }
       }
       groupsNotFound->push_back(i);
-   nextChain:;
+   nextChain:
+      ++i;
    }
    return found;
 }
@@ -562,11 +586,7 @@ pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    keysNEq->clear();
    groupsNotFound->clear();
-   // Pass 1: prefetch + load all chain heads into htMatches (no comparison)
-   htProbe(n, ht);
-   // Pass 2: hash comparison + chain walk over already-loaded htMatches
    auto found = htLookup(n, ht);
-   // Pass 3: key equality check over candidates
    auto keysEqual = keyEquality.evaluate(found);
    while (keysNEq->size()) {
       found = htFollow(ht);

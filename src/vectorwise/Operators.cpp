@@ -857,7 +857,7 @@ size_t GroupLookupOp::next() {
    auto n = child->next();
    if (n == EndOfStream) return EndOfStream;
    // child (HashComputeOp) has already evaluated groupHash.
-   // findGroups handles prefetching internally.
+   hg->preAggregation.prefetchBuckets(n, hg->ht_ref());
    hg->preAggregation.findGroups(n, hg->ht_ref());
    hg->preAggregation.createMissingGroups(hg->ht_ref(), false);
    return n;
@@ -933,6 +933,7 @@ size_t GroupAggregateOp::next() {
                   auto data =
                       addBytes(chunk->data<void>(), pos * elementSize);
                   op.globalAggregation.rowData = data;
+                  op.globalAggregation.prefetchBuckets(n, op.ht_ref());
                   op.findGroupsFromPartition(data, n);
                   auto cGroups = [&]() INTERPRET_SEPARATE {
                      op.globalAggregation.createMissingGroups(op.ht_ref(),
@@ -1010,12 +1011,14 @@ size_t HashGroup::next() {
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
          // 1. Hash: compute group key hashes for the entire morsel
          groupHash.evaluate(n);
-         // 2. Lookup: find existing groups / classify misses.
-         //    htProbe prefetches HT buckets; htLookup compares over cached entries.
+         // 2. Prefetch: issue HT bucket loads for all hashes before any lookup
+         //    touches them, hiding random-access memory latency
+         preAggregation.prefetchBuckets(n, ht);
+         // 3. Lookup: find existing groups / classify misses
          preAggregation.findGroups(n, ht);
-         // 3. Create: allocate and insert entries for unseen groups
+         // 4. Create: allocate and insert entries for unseen groups
          auto groupsCreated = preAggregation.createMissingGroups(ht, false);
-         // 4. Aggregate: update accumulators for all matched groups
+         // 5. Aggregate: update accumulators for all matched groups
          updateGroups.evaluate(n);
          groups += groupsCreated;
          if (groups >= maxFill) flushAndClear();
@@ -1047,6 +1050,8 @@ size_t HashGroup::next() {
                   // for group lookup and creation
                   auto data = addBytes(chunk->data<void>(), pos * elementSize);
                   globalAggregation.rowData = data;
+                  // Prefetch HT buckets for all rows in this slice before lookup
+                  globalAggregation.prefetchBuckets(n, ht);
                   findGroupsFromPartition(data, n);
                   auto cGroups = [&]() INTERPRET_SEPARATE {
                      globalAggregation.createMissingGroups(ht, true);
