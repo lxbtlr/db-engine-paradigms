@@ -158,52 +158,76 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
                 auto& group =
                     locals.getGroup(make_tuple(l_returnflag[i], l_linestatus[i]));
 
-                // original aggregates
-                get<0>(group) += l_quantity[i];
-                get<1>(group) += l_extendedprice[i];
-                auto disc_price = l_extendedprice[i] * (one - l_discount[i]);
-                get<2>(group) += disc_price;
-                auto charge = disc_price * (one + l_tax[i]);
-                get<3>(group) += charge;
-                get<4>(group) += 1;
+                // Anti-pattern: deferred consumption + binary tree dependencies
+                // + cross-set dependencies to force register spilling.
+                //
+                // All 12 intermediates are computed before any accumulator is
+                // written. Cross-set multiplications create binary tree nodes
+                // that require values from multiple sets to be simultaneously
+                // live. The wide fan-in at the end forces ~12 values live at
+                // the point of accumulation.
 
-                // duplicate set 1 (barrier b1)
-                auto ep1        = Numeric<12,2>(l_extendedprice[i].value * b1);
-                auto disc1      = Numeric<12,2>(l_discount[i].value * b1);
-                auto tax1       = Numeric<12,2>(l_tax[i].value * b1);
-                auto qty1       = Numeric<12,2>(l_quantity[i].value * b1);
+                // --- compute all intermediates up front (deferred consumption)
+                // set 0 (original inputs)
+                auto disc_price  = l_extendedprice[i] * (one - l_discount[i]);
+                auto charge      = disc_price * (one + l_tax[i]);
+                auto qty0        = l_quantity[i];
+
+                // set 1 (barrier b1) -- kept live, not yet consumed
+                auto ep1         = Numeric<12,2>(l_extendedprice[i].value * b1);
+                auto disc1       = Numeric<12,2>(l_discount[i].value * b1);
+                auto tax1        = Numeric<12,2>(l_tax[i].value * b1);
                 auto disc_price2 = ep1 * (one - disc1);
-                auto charge2    = disc_price2 * (one + tax1);
-                get<5>(group)  += qty1;
-                get<6>(group)  += ep1;
-                get<7>(group)  += disc_price2;
-                get<8>(group)  += charge2;
-                get<9>(group)  += 1;
+                auto charge2     = disc_price2 * (one + tax1);
 
-                // duplicate set 2 (barrier b2)
-                auto ep2        = Numeric<12,2>(l_extendedprice[i].value * b2);
-                auto disc2      = Numeric<12,2>(l_discount[i].value * b2);
-                auto tax2       = Numeric<12,2>(l_tax[i].value * b2);
-                auto qty2       = Numeric<12,2>(l_quantity[i].value * b2);
+                // set 2 (barrier b2) -- kept live, not yet consumed
+                auto ep2         = Numeric<12,2>(l_extendedprice[i].value * b2);
+                auto disc2       = Numeric<12,2>(l_discount[i].value * b2);
+                auto tax2        = Numeric<12,2>(l_tax[i].value * b2);
                 auto disc_price3 = ep2 * (one - disc2);
-                auto charge3    = disc_price3 * (one + tax2);
-                get<10>(group) += qty2;
-                get<11>(group) += ep2;
-                get<12>(group) += disc_price3;
-                get<13>(group) += charge3;
-                get<14>(group) += 1;
+                auto charge3     = disc_price3 * (one + tax2);
 
-                // duplicate set 3 (barrier b3)
-                auto ep3        = Numeric<12,2>(l_extendedprice[i].value * b3);
-                auto disc3      = Numeric<12,2>(l_discount[i].value * b3);
-                auto tax3       = Numeric<12,2>(l_tax[i].value * b3);
-                auto qty3       = Numeric<12,2>(l_quantity[i].value * b3);
+                // set 3 (barrier b3) -- kept live, not yet consumed
+                auto ep3         = Numeric<12,2>(l_extendedprice[i].value * b3);
+                auto disc3       = Numeric<12,2>(l_discount[i].value * b3);
+                auto tax3        = Numeric<12,2>(l_tax[i].value * b3);
                 auto disc_price4 = ep3 * (one - disc3);
-                auto charge4    = disc_price4 * (one + tax3);
-                get<15>(group) += qty3;
-                get<16>(group) += ep3;
-                get<17>(group) += disc_price4;
-                get<18>(group) += charge4;
+                auto charge4     = disc_price4 * (one + tax3);
+
+                // --- binary tree cross-set combinations
+                // Each node requires two intermediates from different sets to
+                // be simultaneously live, widening the live set further.
+                auto cross_dp_01 = disc_price  * disc_price2; // sets 0+1 live
+                auto cross_dp_23 = disc_price3 * disc_price4; // sets 2+3 live
+                auto cross_ch_01 = charge       * charge2;    // sets 0+1 live
+                auto cross_ch_23 = charge3      * charge4;    // sets 2+3 live
+                // tree depth 2: all four disc_price values must still be live
+                auto tree_dp     = cross_dp_01 * cross_dp_23;
+                auto tree_ch     = cross_ch_01 * cross_ch_23;
+
+                // --- wide fan-in: all intermediates simultaneously live at
+                // the point of accumulation (anti-pattern 4)
+                get<0>(group)  += qty0;
+                get<1>(group)  += disc_price;
+                get<2>(group)  += charge;
+                get<3>(group)  += disc_price2;
+                get<4>(group)  += 1;
+                get<5>(group)  += charge2;
+                get<6>(group)  += ep1;
+                get<7>(group)  += disc_price3;
+                get<8>(group)  += charge3;
+                get<9>(group)  += 1;
+                get<10>(group) += ep2;
+                get<11>(group) += disc_price4;
+                get<12>(group) += charge4;
+                get<13>(group) += ep3;
+                get<14>(group) += 1;
+                // tree nodes written last — forces tree values live across all
+                // prior accumulator writes above (cross-set anti-pattern)
+                get<15>(group) += tree_dp;
+                get<16>(group) += tree_ch;
+                get<17>(group) += cross_dp_01;
+                get<18>(group) += cross_ch_01;
                 get<19>(group) += 1;
              }
           }
