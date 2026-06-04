@@ -26,10 +26,12 @@ class Aggregates {
    /// Option 2 (default): op-outer, tuple-inner.
    /// Calls each primitive once with the full batch of n tuples.
    pos_t evaluate(pos_t n);
+#ifdef VW_AGGR_TUPLE_OUTER
    /// Option 1: tuple-outer, op-inner.
    /// Iterates one tuple at a time; for each tuple calls every primitive
    /// with n=1 so that all ops are applied to a single row before moving on.
    pos_t evaluate_tuple_outer(pos_t n);
+#endif
    void operator+=(std::unique_ptr<Expression> other);
    void operator+=(std::unique_ptr<Op>&& op);
 };
@@ -50,11 +52,13 @@ class Scatter {
 
 struct Op {
    virtual pos_t run(pos_t n) = 0;
+#ifdef VW_AGGR_TUPLE_OUTER
    /// Advance all data pointers by `step` elements (element size is
    /// op-specific).  Used by Aggregates::evaluate_tuple_outer to step through
    /// one tuple at a time.  Negative step rewinds.  Default is a no-op; ops
    /// that participate in tuple-outer aggregation must override this.
    virtual void advance(ptrdiff_t /*step*/) {}
+#endif
    virtual ~Op() = default;
 };
 
@@ -85,6 +89,7 @@ using FScatterSelRowOp = OpArgs<primitives::FScatterSelRow>;
 using FAggrRowOp = OpArgs<primitives::FAggrRow>;
 using FAggrInitOp = OpArgs<primitives::FAggrInit>;
 
+#ifdef VW_AGGR_TUPLE_OUTER
 // FAggrOp and FAggrSelOp are defined as named structs (not OpArgs aliases)
 // so they can carry elemSize and override advance() for tuple-outer evaluation.
 // FAggr signature: pos_t(pos_t n, void* entries[], void* param1, size_t offset)
@@ -152,6 +157,12 @@ template <> inline auto& FAggrSelOp::get<0>() { return entries; }
 template <> inline auto& FAggrSelOp::get<1>() { return sel; }
 template <> inline auto& FAggrSelOp::get<2>() { return param1; }
 template <> inline auto& FAggrSelOp::get<3>() { return offset; }
+#else
+// Without tuple-outer evaluation, FAggrOp and FAggrSelOp are simple OpArgs aliases.
+using FAggrOp    = OpArgs<primitives::FAggr>;
+using FAggrSelOp = OpArgs<primitives::FAggrSel>;
+#endif // VW_AGGR_TUPLE_OUTER
+
 using FPartitionByKeyOp = OpArgs<primitives::FPartitionByKey>;
 using FPartitionByKeySelOp = OpArgs<primitives::FPartitionByKeySel>;
 using FPartitionByKeyRowOp = OpArgs<primitives::FPartitionByKeyRow>;

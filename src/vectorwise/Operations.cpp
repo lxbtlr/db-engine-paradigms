@@ -32,6 +32,7 @@ pos_t Aggregates::evaluate(pos_t n) {
    return found;
 }
 
+#ifdef VW_AGGR_TUPLE_OUTER
 pos_t Aggregates::evaluate_tuple_outer(pos_t n) {
    // Option 1: tuple-outer, op-inner.
    // For each tuple i, every primitive is applied to that single tuple before
@@ -46,6 +47,7 @@ pos_t Aggregates::evaluate_tuple_outer(pos_t n) {
    for (auto& aggr : ops) aggr->advance(-static_cast<ptrdiff_t>(n));
    return n;
 }
+#endif // VW_AGGR_TUPLE_OUTER
 
 Scatter::ScatterInfo::ScatterInfo(std::unique_ptr<Op>&& operation, void** s,
                                   size_t off)
