@@ -92,18 +92,45 @@ pos_t Aggregates::evaluate_tuple_outer(pos_t n) {
    // Tight tuple-outer loop: for each tuple, load the HT entry once, then
    // apply all aggregates to that entry before moving to the next tuple.
    // All aggregate values are int64_t and use += (plus), so we inline directly.
+   //
+   // Three cases per op:
+   //   COL:   entry[offset] += *col++;        (aggr_plus with column data)
+   //   SEL:   entry[offset] += col[sel[i]]    (aggr_sel_plus with selection vector)
+   //   COUNT: entry[offset] += 1              (aggr_count_star, ignores param1)
+   //
+   // Detect COUNT by comparing rawFn to primitives::aggr_count_star.
+   enum AggrKind { COL, SEL, COUNT };
+   AggrKind kinds[16];
+   for (size_t j = 0; j < nOps; ++j) {
+      if (info[j].kind == AggrInfo::SEL)
+         kinds[j] = SEL;
+      else if (info[j].fn_col == primitives::aggr_count_star)
+         kinds[j] = COUNT;
+      else
+         kinds[j] = COL;
+   }
+
    for (pos_t i = 0; i < n; ++i) {
       auto* entry = reinterpret_cast<char*>(info[0].entries[i]);
       for (size_t j = 0; j < nOps; ++j) {
          auto& c = info[j];
          auto* aggregate = reinterpret_cast<int64_t*>(entry + c.offset);
-         if (c.kind == AggrInfo::COL) {
-            auto* col = reinterpret_cast<int64_t*>(c.param1);
-            *aggregate += *col;
-            c.param1 = reinterpret_cast<void*>(col + 1);
-         } else {
-            auto* col = reinterpret_cast<int64_t*>(c.param1);
-            *aggregate += col[c.sel[i]];
+         switch (kinds[j]) {
+            case COL: {
+               auto* col = reinterpret_cast<int64_t*>(c.param1);
+               *aggregate += *col;
+               c.param1 = reinterpret_cast<void*>(col + 1);
+               break;
+            }
+            case SEL: {
+               auto* col = reinterpret_cast<int64_t*>(c.param1);
+               *aggregate += col[c.sel[i]];
+               break;
+            }
+            case COUNT: {
+               *aggregate += 1;
+               break;
+            }
          }
       }
    }
