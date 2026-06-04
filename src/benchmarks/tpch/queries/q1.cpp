@@ -177,27 +177,29 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
                 auto disc_price4 = ep3 * (one - Numeric<12,2>(l_discount[i].value * b3));
                 auto charge4     = disc_price4 * (one + Numeric<12,2>(l_tax[i].value * b3));
 
-                // all 12 intermediates simultaneously live here
-                get<0>(group)  += l_quantity[i];
-                get<1>(group)  += l_extendedprice[i];
-                get<2>(group)  += Numeric<12,4>(disc_price.value);
-                get<3>(group)  += Numeric<12,6>(charge.value);
-                get<4>(group)  += 1;
-                get<5>(group)  += ep1;
-                get<6>(group)  += Numeric<12,4>(disc_price2.value);
-                get<7>(group)  += Numeric<12,6>(charge2.value);
-                get<8>(group)  += ep2;
-                get<9>(group)  += 1;
-                get<10>(group) += Numeric<12,4>(disc_price3.value);
-                get<11>(group) += Numeric<12,6>(charge3.value);
-                get<12>(group) += ep3;
-                get<13>(group) += Numeric<12,4>(disc_price4.value);
-                get<14>(group) += 1;
-                get<15>(group) += Numeric<12,6>(charge4.value);
-                get<16>(group) += Numeric<12,2>(l_quantity[i].value * b1);
-                get<17>(group) += Numeric<12,2>(l_quantity[i].value * b2);
-                get<18>(group) += Numeric<12,2>(l_quantity[i].value * b3);
-                get<19>(group) += 1;
+                // all 12 intermediates simultaneously live here;
+                // each written to the slot matching its precision:
+                // <12,2>=qty/ep, <12,4>=disc_price, <12,6>=charge, int64_t=count
+                get<0>(group)  += l_quantity[i];                    // <12,2>
+                get<1>(group)  += l_extendedprice[i];               // <12,2>
+                get<2>(group)  += Numeric<12,4>(disc_price.value);  // <12,4>
+                get<3>(group)  += Numeric<12,6>(charge.value);      // <12,6>
+                get<4>(group)  += 1;                                // int64_t
+                get<5>(group)  += ep1;                              // <12,2>
+                get<6>(group)  += ep2;                              // <12,2>
+                get<7>(group)  += Numeric<12,4>(disc_price2.value); // <12,4>
+                get<8>(group)  += Numeric<12,6>(charge2.value);     // <12,6>
+                get<9>(group)  += 1;                                // int64_t
+                get<10>(group) += ep3;                              // <12,2>
+                get<11>(group) += Numeric<12,2>(l_quantity[i].value * b1); // <12,2>
+                get<12>(group) += Numeric<12,4>(disc_price3.value); // <12,4>
+                get<13>(group) += Numeric<12,6>(charge3.value);     // <12,6>
+                get<14>(group) += 1;                                // int64_t
+                get<15>(group) += Numeric<12,2>(l_quantity[i].value * b2); // <12,2>
+                get<16>(group) += Numeric<12,2>(l_quantity[i].value * b3); // <12,2>
+                get<17>(group) += Numeric<12,4>(disc_price4.value); // <12,4>
+                get<18>(group) += Numeric<12,6>(charge4.value);     // <12,6>
+                get<19>(group) += 1;                                // int64_t
              }
           }
        });
