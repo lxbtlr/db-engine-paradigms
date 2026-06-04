@@ -62,31 +62,21 @@ void Scan::addConsumer(void** colPtr, size_t typeSize) {
 }
 
 size_t Scan::next() {
+#ifdef NUMA_POOLS
    auto step = 1;
 
    if (vecInChunk == scanChunkSize) {
-      // Determine which NUMA region this thread belongs to and claim the next
-      // chunk from that region's counter.  relaxed is sufficient: the counter
-      // only determines *which* chunk we own; the subsequent pointer arithmetic
-      // and data reads impose no cross-thread ordering requirement on the
-      // counter itself.
       auto thread_id = runtime::this_worker->worker_id;
       auto numthreads = runtime::this_worker->group->size;
       auto region_id  = runtime::regionOf(thread_id);
       auto prevChunk  = currentChunk;
       currentChunk = shared.pos[region_id].val.fetch_add(1, std::memory_order_relaxed);
 
-      // Work-claiming formula:
-      //   offset = (totalsize / numthreads) * thread_id + pos * chunksize
-      // Each thread owns its own slice of the input; pos walks within that slice.
       auto sliceSize   = nrTuples / numthreads;
       auto sliceOffset = sliceSize * thread_id;
       auto chunkSkip   = currentChunk - prevChunk;
       if (needsInit) {
-         // First claim: jump to thread's slice start + pos * chunksize
-         // (chunkSkip * scanChunkSize gives the initial offset within the slice)
          step = static_cast<size_t>(sliceOffset / vecSize) + chunkSkip * scanChunkSize;
-         // Reset lastOffset so nextBegin is computed from 0 on the first call
          lastOffset = 0;
          needsInit = false;
       } else {
@@ -104,6 +94,20 @@ size_t Scan::next() {
    lastOffset = nextBegin;
    vecInChunk++;
    return nextBatchSize;
+#else
+   // Original single-counter cooperative work-stealing scan.
+   if (vecInChunk == scanChunkSize) {
+      currentChunk = shared.pos.fetch_add(1, std::memory_order_relaxed);
+      vecInChunk = 0;
+   }
+   auto nextBegin = currentChunk * scanChunkSize * vecSize + vecInChunk * vecSize;
+   if (nextBegin >= nrTuples) return EndOfStream;
+   auto nextBatchSize = std::min(nrTuples - nextBegin, vecSize);
+   for (auto& cons : consumers)
+      *cons.first = (void*)(*(uint8_t**)cons.first + cons.second);
+   vecInChunk++;
+   return nextBatchSize;
+#endif
 }
 
 ResultWriter::Input::Input(void* d, size_t size,
