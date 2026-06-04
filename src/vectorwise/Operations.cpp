@@ -2,6 +2,11 @@
 
 namespace vectorwise {
 
+#ifdef VW_AGGR_TUPLE_OUTER
+bool FAggrOp::logged_ = false;
+bool FAggrSelOp::logged_ = false;
+#endif
+
 pos_t Expression::evaluate(pos_t n) {
    pos_t found = n;
    for (auto& op : ops) { found = op->run(found); }

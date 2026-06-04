@@ -100,7 +100,12 @@ struct FAggrOp : public OpArgs<primitives::FAggr> {
            size_t es)
        : Base(f, result, param1, offset), elemSize(es) {}
 #ifdef VW_AGGR_TUPLE_OUTER
+   static bool logged_;
    void advance(ptrdiff_t step) override {
+      if (!logged_) {
+         fprintf(stderr, "[FAggrOp::advance] step=%td elemSize=%zu\n", step, elemSize);
+         logged_ = true;
+      }
       std::get<0>(args) = reinterpret_cast<void**>(
           reinterpret_cast<char*>(std::get<0>(args)) +
           step * static_cast<ptrdiff_t>(sizeof(void*)));
@@ -117,7 +122,12 @@ struct FAggrSelOp : public OpArgs<primitives::FAggrSel> {
    using Base = OpArgs<primitives::FAggrSel>;
    using Base::Base;
 #ifdef VW_AGGR_TUPLE_OUTER
+   static bool logged_;
    void advance(ptrdiff_t step) override {
+      if (!logged_) {
+         fprintf(stderr, "[FAggrSelOp::advance] step=%td\n", step);
+         logged_ = true;
+      }
       // advance result (void**) by step entries
       std::get<0>(args) = reinterpret_cast<void**>(
           reinterpret_cast<char*>(std::get<0>(args)) +
