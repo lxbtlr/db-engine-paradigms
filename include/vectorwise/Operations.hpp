@@ -66,6 +66,7 @@ template <typename> class OpArgs;
 
 template <typename... Args>
 class OpArgs<pos_t (*)(pos_t, Args...)> : public Op {
+ protected:
    std::function<pos_t(pos_t, Args...)> function;
 
  public:
@@ -94,47 +95,22 @@ using FAggrInitOp = OpArgs<primitives::FAggrInit>;
 struct FAggrOp : public OpArgs<primitives::FAggr> {
    using Base = OpArgs<primitives::FAggr>;
    size_t elemSize = 0;
+   primitives::FAggr rawFn;
    FAggrOp(primitives::FAggr f, void** result, void* param1, size_t offset)
-       : Base(f, result, param1, offset) {}
+       : Base(f, result, param1, offset), rawFn(f) {}
    FAggrOp(primitives::FAggr f, void** result, void* param1, size_t offset,
            size_t es)
-       : Base(f, result, param1, offset), elemSize(es) {}
-#ifdef VW_AGGR_TUPLE_OUTER
-   static bool logged_;
-   void advance(ptrdiff_t step) override {
-      if (!logged_) {
-         fprintf(stderr, "[FAggrOp::advance] step=%td elemSize=%zu\n", step, elemSize);
-         logged_ = true;
-      }
-      auto& r = std::get<0>(args);
-      r = r + step;
-      auto& p = std::get<1>(args);
-      p = reinterpret_cast<void*>(
-          reinterpret_cast<uintptr_t>(p) +
-          step * static_cast<ptrdiff_t>(elemSize));
-   }
-#endif
+       : Base(f, result, param1, offset), rawFn(f), elemSize(es) {}
 };
 
 // FAggrSel signature: pos_t(pos_t n, void* result[], pos_t* sel, void* param1, size_t offset)
 // args tuple:  <0> = void** result (htMatches ptr), <1> = pos_t* sel, <2> = void* param1 (col data), <3> = size_t offset
 struct FAggrSelOp : public OpArgs<primitives::FAggrSel> {
    using Base = OpArgs<primitives::FAggrSel>;
-   using Base::Base;
-#ifdef VW_AGGR_TUPLE_OUTER
-   static bool logged_;
-   void advance(ptrdiff_t step) override {
-      if (!logged_) {
-         fprintf(stderr, "[FAggrSelOp::advance] step=%td\n", step);
-         logged_ = true;
-      }
-      auto& r = std::get<0>(args);
-      r = r + step;
-      auto& s = std::get<1>(args);
-      s = s + step;
-      // param1 is NOT advanced — it's indexed via the selection vector
-   }
-#endif
+   primitives::FAggrSel rawFn;
+   FAggrSelOp(primitives::FAggrSel f, void** result, pos_t* sel, void* param1,
+              size_t offset)
+       : Base(f, result, sel, param1, offset), rawFn(f) {}
 };
 
 using FPartitionByKeyOp = OpArgs<primitives::FPartitionByKey>;

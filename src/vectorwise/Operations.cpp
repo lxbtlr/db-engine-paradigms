@@ -2,10 +2,6 @@
 
 namespace vectorwise {
 
-#ifdef VW_AGGR_TUPLE_OUTER
-bool FAggrOp::logged_ = false;
-bool FAggrSelOp::logged_ = false;
-#endif
 
 pos_t Expression::evaluate(pos_t n) {
    pos_t found = n;
@@ -39,17 +35,80 @@ pos_t Aggregates::evaluate(pos_t n) {
 
 #ifdef VW_AGGR_TUPLE_OUTER
 pos_t Aggregates::evaluate_tuple_outer(pos_t n) {
-   // Option 1: tuple-outer, op-inner.
-   // For each tuple i, every primitive is applied to that single tuple before
-   // moving to tuple i+1.  Ops advance their internal data pointers by 1 after
-   // each tuple via Op::advance(1).
-   for (pos_t i = 0; i < n; ++i) {
-      for (auto& aggr : ops) aggr->run(1);
-      for (auto& aggr : ops) aggr->advance(1);
+   // Tuple-outer, op-inner aggregation.
+   // For each tuple i, apply all aggregate primitives to htMatches[i] before
+   // moving to tuple i+1. This improves cache locality when the HT is large.
+   //
+   // We extract raw function pointers and args from each Op, then call them
+   // directly in a tight loop — avoiding virtual dispatch, std::function, and
+   // std::experimental::apply overhead per tuple.
+
+   struct AggrInfo {
+      enum Kind { COL, SEL } kind;
+      primitives::FAggr fn_col;
+      primitives::FAggrSel fn_sel;
+      void* RES * entries;
+      void* param1;
+      pos_t* sel;
+      size_t offset;
+      size_t elemSize;
+   };
+
+   auto nOps = ops.size();
+   AggrInfo info[16];
+   assert(nOps <= 16);
+
+   for (size_t j = 0; j < nOps; ++j) {
+      auto* op = ops[j].get();
+      if (auto* a = dynamic_cast<FAggrOp*>(op)) {
+         info[j].kind = AggrInfo::COL;
+         info[j].entries = std::get<0>(a->args);
+         info[j].param1 = std::get<1>(a->args);
+         info[j].sel = nullptr;
+         info[j].offset = std::get<2>(a->args);
+         info[j].elemSize = a->elemSize;
+         info[j].fn_col = a->rawFn;
+         info[j].fn_sel = nullptr;
+      } else if (auto* a = dynamic_cast<FAggrSelOp*>(op)) {
+         info[j].kind = AggrInfo::SEL;
+         info[j].entries = std::get<0>(a->args);
+         info[j].sel = std::get<1>(a->args);
+         info[j].param1 = std::get<2>(a->args);
+         info[j].offset = std::get<3>(a->args);
+         info[j].elemSize = 0;
+         info[j].fn_col = nullptr;
+         info[j].fn_sel = a->rawFn;
+      } else {
+         // Unknown op — fall back to virtual dispatch
+         for (pos_t i = 0; i < n; ++i) {
+            for (auto& aggr : ops) aggr->run(1);
+            for (auto& aggr : ops) aggr->advance(1);
+         }
+         for (auto& aggr : ops) aggr->advance(-static_cast<ptrdiff_t>(n));
+         return n;
+      }
    }
-   // Restore all op pointers to their original positions so the next morsel
-   // starts from index 0 again.
-   for (auto& aggr : ops) aggr->advance(-static_cast<ptrdiff_t>(n));
+
+   // Tight tuple-outer loop: for each tuple, call all aggregate primitives
+   // with n=1, advancing pointers manually.
+   for (pos_t i = 0; i < n; ++i) {
+      for (size_t j = 0; j < nOps; ++j) {
+         auto& c = info[j];
+         if (c.kind == AggrInfo::COL) {
+            c.fn_col(1, c.entries + i, c.param1, c.offset);
+            // advance param1 for next iteration
+         } else {
+            c.fn_sel(1, c.entries + i, c.sel + i, c.param1, c.offset);
+         }
+      }
+      // Advance param1 for COL ops (SEL ops index via sel, no advance needed)
+      for (size_t j = 0; j < nOps; ++j) {
+         if (info[j].kind == AggrInfo::COL) {
+            info[j].param1 = reinterpret_cast<void*>(
+                reinterpret_cast<uintptr_t>(info[j].param1) + info[j].elemSize);
+         }
+      }
+   }
    return n;
 }
 #endif // VW_AGGR_TUPLE_OUTER
