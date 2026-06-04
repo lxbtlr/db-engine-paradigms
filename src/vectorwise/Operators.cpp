@@ -912,8 +912,8 @@ size_t GroupAggregateOp::next() {
          if (op.preAggregation.entries_in_ht >= op.maxFill_ref())
             flushAndClear();
       }
-      fprintf(stderr, "[GroupAggregateOp] phase1: morsels=%zu tuples=%zu aggr_ops=%zu\n",
-              dbg_morsels, dbg_tuples, op.updateGroups.ops.size());
+      //fprintf(stderr, "[GroupAggregateOp] phase1: morsels=%zu tuples=%zu aggr_ops=%zu\n",
+      //        dbg_morsels, dbg_tuples, op.updateGroups.ops.size());
       flushAndClear();
       barrier();
 
@@ -1031,8 +1031,8 @@ size_t HashGroup::next() {
          groups += groupsCreated;
          if (groups >= maxFill) flushAndClear();
       }
-      fprintf(stderr, "[HashGroup] phase1: morsels=%zu tuples=%zu aggr_ops=%zu\n",
-              dbg_morsels, dbg_tuples, updateGroups.ops.size());
+      //fprintf(stderr, "[HashGroup] phase1: morsels=%zu tuples=%zu aggr_ops=%zu\n",
+      //        dbg_morsels, dbg_tuples, updateGroups.ops.size());
       flushAndClear(); // flush remaining entries into spillStorage
       barrier();       // Wait until all workers have finished phase 1
 
