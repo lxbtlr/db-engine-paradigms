@@ -11,7 +11,7 @@ pushd /home/alexb/swole/db-engines/build/q1_vw
 
 rm -rf CMake*
 
-cmake -DCMAKE_BUILD_TYPE=Release -DNUMA_LATENCY=ON ../..
+cmake -DCMAKE_BUILD_TYPE=Release -DNUMA_LATENCY=ON ../.. > /dev/null
 
 make -j22 run_tpch 2> /dev/null
 
@@ -25,7 +25,8 @@ mv run_tpch control_run_tpch
 
 rm -rf CMake*
 
-cmake -DCMAKE_BUILD_TYPE=Release -DVW_SPLIT_HASHGROUP=ON ../..
+cmake -DCMAKE_BUILD_TYPE=Release -DVW_SPLIT_HASHGROUP=ON ../.. > /dev/null
+
 
 make -j22 run_tpch 2> /dev/null
 
@@ -38,11 +39,12 @@ mv run_tpch option2_run_tpch
 
 rm -rf CMake*
 
-cmake -DCMAKE_BUILD_TYPE=Release -DVW_SPLIT_HASHGROUP=ON -DVW_AGGR_TUPLE_OUTER=ON ../..
+cmake -DCMAKE_BUILD_TYPE=Release -DVW_SPLIT_HASHGROUP=ON -DVW_AGGR_TUPLE_OUTER=ON ../.. > /dev/null
+
 
 make -j22 run_tpch 
 
-mv run_tpch option1_run_tpch
+mv run_tpch option1_run_tpch 2> /dev/null
 
 popd
 
