@@ -854,12 +854,85 @@ size_t HashComputeOp::next() {
 }
 
 size_t GroupLookupOp::next() {
+   using EntryHeader = runtime::Hashmap::EntryHeader;
+
    auto n = child->next();
    if (n == EndOfStream) return EndOfStream;
-   // child (HashComputeOp) has already evaluated groupHash.
-   hg->preAggregation.prefetchBuckets(n, hg->ht_ref());
-   hg->preAggregation.findGroups(n, hg->ht_ref());
-   hg->preAggregation.createMissingGroups(hg->ht_ref(), false);
+
+   auto& local = hg->preAggregation;
+   auto& ht = hg->ht_ref();
+
+   local.keysNEq->clear();
+   local.groupsNotFound->clear();
+
+   // ---- Step 1: Initial probe (software-pipelined find_chain) ----
+   // htProbe fills htMatches[i] with chain head, groupHashes[i] with hash,
+   // and groupsFound[0..n) = {0,1,...,n-1} as initial candidates.
+   local.htProbe(n, ht);
+
+   // Classify initial probe results: null → not-found, non-null → candidate
+   pos_t nCandidates = 0;
+   for (pos_t i = 0; i < n; ++i) {
+      if (local.htMatches[i] != ht.end()) {
+         candidates[nCandidates++] = i;
+      } else {
+         local.groupsNotFound->push_back(i);
+      }
+   }
+
+   // ---- Step 2: Batched candidate loop ----
+   // Each iteration: hash-compare → key-compare → chain-follow
+   pos_t totalKeysEqual = 0;
+
+   while (nCandidates > 0) {
+      // 2a. Hash comparison: filter candidates by hash match
+      pos_t nHashMatch = 0;
+      pos_t nChainFollow = 0; // reuse tail of candidates for chain-follow set
+      for (pos_t j = 0; j < nCandidates; ++j) {
+         auto idx = candidates[j];
+         if (local.htMatches[idx]->hash == local.groupHashes[idx]) {
+            // Hash match → goes to key comparison
+            hashMatches[nHashMatch++] = idx;
+         } else {
+            // Hash mismatch → try next in chain
+            auto next = local.htMatches[idx]->next;
+            if (next != ht.end()) {
+               local.htMatches[idx] = next;
+               candidates[nChainFollow++] = idx;
+            } else {
+               local.groupsNotFound->push_back(idx);
+            }
+         }
+      }
+
+      // 2b. Key comparison on hash-matched candidates
+      // Write hash-matched indices into groupsFound for keyEquality
+      for (pos_t j = 0; j < nHashMatch; ++j)
+         local.groupsFound[j] = hashMatches[j];
+
+      local.keysNEq->clear();
+      auto nKeysEqual = local.keyEquality.evaluate(nHashMatch);
+      totalKeysEqual += nKeysEqual;
+
+      // 2c. Chain-follow for key mismatches (keysNEq)
+      for (pos_t j = 0, end = local.keysNEq->size(); j < end; ++j) {
+         auto idx = (*local.keysNEq)[j];
+         auto next = local.htMatches[idx]->next;
+         if (next != ht.end()) {
+            local.htMatches[idx] = next;
+            candidates[nChainFollow++] = idx;
+         } else {
+            local.groupsNotFound->push_back(idx);
+         }
+      }
+
+      // Remaining candidates for next iteration are in candidates[0..nChainFollow)
+      nCandidates = nChainFollow;
+   }
+
+   // ---- Step 3: Batch insertion for not-found tuples ----
+   local.createMissingGroups(ht, false);
+
    return n;
 }
 

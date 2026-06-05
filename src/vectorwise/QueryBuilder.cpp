@@ -544,6 +544,10 @@ QueryBuilder::SplitHashGroupBuilder QueryBuilder::SplitHashGroup() {
    lookupOpOwning->hg = b.group;
    hashOpOwning->hg = b.group;
 
+   // Allocate scratch buffers for the batched candidate loop in GroupLookupOp
+   lookupOpOwning->candidates = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   lookupOpOwning->hashMatches = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+
    // Chain: hashOp -> child (data source from stack)
    hashOpOwning->child = popOperator();
    // Chain: lookupOp -> hashOp
