@@ -62,31 +62,21 @@ void Scan::addConsumer(void** colPtr, size_t typeSize) {
 }
 
 size_t Scan::next() {
+#ifdef NUMA_POOLS
    auto step = 1;
 
    if (vecInChunk == scanChunkSize) {
-      // Determine which NUMA region this thread belongs to and claim the next
-      // chunk from that region's counter.  relaxed is sufficient: the counter
-      // only determines *which* chunk we own; the subsequent pointer arithmetic
-      // and data reads impose no cross-thread ordering requirement on the
-      // counter itself.
       auto thread_id = runtime::this_worker->worker_id;
       auto numthreads = runtime::this_worker->group->size;
       auto region_id  = runtime::regionOf(thread_id);
       auto prevChunk  = currentChunk;
       currentChunk = shared.pos[region_id].val.fetch_add(1, std::memory_order_relaxed);
 
-      // Work-claiming formula:
-      //   offset = (totalsize / numthreads) * thread_id + pos * chunksize
-      // Each thread owns its own slice of the input; pos walks within that slice.
       auto sliceSize   = nrTuples / numthreads;
       auto sliceOffset = sliceSize * thread_id;
       auto chunkSkip   = currentChunk - prevChunk;
       if (needsInit) {
-         // First claim: jump to thread's slice start + pos * chunksize
-         // (chunkSkip * scanChunkSize gives the initial offset within the slice)
          step = static_cast<size_t>(sliceOffset / vecSize) + chunkSkip * scanChunkSize;
-         // Reset lastOffset so nextBegin is computed from 0 on the first call
          lastOffset = 0;
          needsInit = false;
       } else {
@@ -104,6 +94,20 @@ size_t Scan::next() {
    lastOffset = nextBegin;
    vecInChunk++;
    return nextBatchSize;
+#else
+   // Original single-counter cooperative work-stealing scan.
+   if (vecInChunk == scanChunkSize) {
+      currentChunk = shared.pos.fetch_add(1, std::memory_order_relaxed);
+      vecInChunk = 0;
+   }
+   auto nextBegin = currentChunk * scanChunkSize * vecSize + vecInChunk * vecSize;
+   if (nextBegin >= nrTuples) return EndOfStream;
+   auto nextBatchSize = std::min(nrTuples - nextBegin, vecSize);
+   for (auto& cons : consumers)
+      *cons.first = (void*)(*(uint8_t**)cons.first + cons.second);
+   vecInChunk++;
+   return nextBatchSize;
+#endif
 }
 
 ResultWriter::Input::Input(void* d, size_t size,
@@ -837,6 +841,209 @@ Hashjoin::~Hashjoin() {
    // for (auto& block : allocations) free(block.first);
 }
 
+// ---------------------------------------------------------------------------
+// Split HashGroup operator implementations (VW_SPLIT_HASHGROUP only)
+// ---------------------------------------------------------------------------
+#ifdef VW_SPLIT_HASHGROUP
+
+size_t HashComputeOp::next() {
+   auto n = child->next();
+   if (n == EndOfStream) return EndOfStream;
+   hg->groupHash.evaluate(n);
+   return n;
+}
+
+size_t GroupLookupOp::next() {
+   using EntryHeader = runtime::Hashmap::EntryHeader;
+
+   auto n = child->next();
+   if (n == EndOfStream) return EndOfStream;
+
+   auto& local = hg->preAggregation;
+   auto& ht = hg->ht_ref();
+
+   local.keysNEq->clear();
+   local.groupsNotFound->clear();
+
+   // ---- Step 1: Initial probe (software-pipelined find_chain) ----
+   // htProbe fills htMatches[i] with chain head, groupHashes[i] with hash,
+   // and groupsFound[0..n) = {0,1,...,n-1} as initial candidates.
+   local.htProbe(n, ht);
+
+   // Classify initial probe results: null → not-found, non-null → candidate
+   pos_t nCandidates = 0;
+   for (pos_t i = 0; i < n; ++i) {
+      if (local.htMatches[i] != ht.end()) {
+         candidates[nCandidates++] = i;
+      } else {
+         local.groupsNotFound->push_back(i);
+      }
+   }
+
+   // ---- Step 2: Batched candidate loop ----
+   // Each iteration: hash-compare → key-compare → chain-follow
+   pos_t totalKeysEqual = 0;
+
+   while (nCandidates > 0) {
+      // 2a. Hash comparison: filter candidates by hash match
+      pos_t nHashMatch = 0;
+      pos_t nChainFollow = 0; // reuse tail of candidates for chain-follow set
+      for (pos_t j = 0; j < nCandidates; ++j) {
+         auto idx = candidates[j];
+         if (local.htMatches[idx]->hash == local.groupHashes[idx]) {
+            // Hash match → goes to key comparison
+            hashMatches[nHashMatch++] = idx;
+         } else {
+            // Hash mismatch → try next in chain
+            auto next = local.htMatches[idx]->next;
+            if (next != ht.end()) {
+               local.htMatches[idx] = next;
+               candidates[nChainFollow++] = idx;
+            } else {
+               local.groupsNotFound->push_back(idx);
+            }
+         }
+      }
+
+      // 2b. Key comparison on hash-matched candidates
+      // Write hash-matched indices into groupsFound for keyEquality
+      for (pos_t j = 0; j < nHashMatch; ++j)
+         local.groupsFound[j] = hashMatches[j];
+
+      local.keysNEq->clear();
+      auto nKeysEqual = local.keyEquality.evaluate(nHashMatch);
+      totalKeysEqual += nKeysEqual;
+
+      // 2c. Chain-follow for key mismatches (keysNEq)
+      for (pos_t j = 0, end = local.keysNEq->size(); j < end; ++j) {
+         auto idx = (*local.keysNEq)[j];
+         auto next = local.htMatches[idx]->next;
+         if (next != ht.end()) {
+            local.htMatches[idx] = next;
+            candidates[nChainFollow++] = idx;
+         } else {
+            local.groupsNotFound->push_back(idx);
+         }
+      }
+
+      // Remaining candidates for next iteration are in candidates[0..nChainFollow)
+      nCandidates = nChainFollow;
+   }
+
+   // ---- Step 3: Batch insertion for not-found tuples ----
+   local.createMissingGroups(ht, false);
+
+   return n;
+}
+
+GroupAggregateOp::GroupAggregateOp(HashGroup::Shared& s)
+    : hg(std::make_unique<HashGroup>(s)) {}
+
+size_t GroupAggregateOp::next() {
+   using header_t = runtime::Hashmap::EntryHeader;
+   auto& op = *hg;
+   auto& cont = op.cont;
+
+   if (!cont.consumed) {
+      // Phase 1: drive inner pipeline (HashComputeOp -> GroupLookupOp),
+      // then perform aggregation (updateGroups) on each morsel.
+      auto& spill = op.shared.spillStorage.local();
+      auto entry_size = op.preAggregation.ht_entry_size;
+
+      auto flushAndClear = [&]() INTERPRET_SEPARATE {
+         assert(offsetof(header_t, next) + sizeof(header_t::next) ==
+                offsetof(header_t, hash));
+         for (auto& alloc : op.preAggregation.allocations) {
+            for (auto entry = reinterpret_cast<header_t*>(alloc.first),
+                      end = addBytes(entry, alloc.second * entry_size);
+                 entry < end; entry = addBytes(entry, entry_size))
+               spill.push_back(&entry->hash, entry->hash);
+         }
+         op.preAggregation.allocations.clear();
+         op.preAggregation.clearHashtable(op.ht_ref());
+      };
+
+      // pipeline is: GroupLookupOp -> HashComputeOp -> data source.
+      // It returns n after hashing + HT lookup + group creation.
+      // entries_in_ht is updated inside createMissingGroups (called by
+      // GroupLookupOp) so we can use it directly for the flush threshold.
+      for (pos_t n = pipeline->next(); n != EndOfStream;
+           n = pipeline->next()) {
+         // updateGroups uses htMatches written by GroupLookupOp.
+         // Option 1 (VW_AGGR_TUPLE_OUTER): tuple-outer, op-inner —
+         //   for each tuple, apply all aggregate ops before moving on.
+         // Option 2 (default): op-outer, tuple-inner —
+         //   apply each aggregate op across all tuples before the next op.
+#ifdef VW_AGGR_TUPLE_OUTER
+         op.updateGroups.evaluate_tuple_outer(n);
+#else
+         op.updateGroups.evaluate(n);
+#endif
+         if (op.preAggregation.entries_in_ht >= op.maxFill_ref())
+            flushAndClear();
+      }
+      flushAndClear();
+      barrier();
+
+      cont.consumed = true;
+      cont.partition = op.shared.partition.fetch_add(1);
+      cont.partitionNeedsAggregation = true;
+   }
+
+   // Phase 2: global aggregation — identical to HashGroup::next() phase 2.
+   for (; cont.partition < op.nrPartitions;) {
+      if (cont.partitionNeedsAggregation) {
+         auto partNr = cont.partition;
+         for (auto& threadPartitions : op.shared.spillStorage.threadData) {
+            auto& partition =
+                threadPartitions.second.getPartitions()[partNr];
+            for (auto chunk = partition.first; chunk; chunk = chunk->next) {
+               auto elementSize = threadPartitions.second.entrySize;
+               auto nPart = partition.size(chunk, elementSize);
+               for (size_t n = std::min(nPart, op.vecSize), pos = 0; n;
+                    nPart -= n, pos += n,
+                        n = std::min(nPart, op.vecSize)) {
+                  auto data =
+                      addBytes(chunk->data<void>(), pos * elementSize);
+                  op.globalAggregation.rowData = data;
+                  op.globalAggregation.prefetchBuckets(n, op.ht_ref());
+                  op.findGroupsFromPartition(data, n);
+                  auto cGroups = [&]() INTERPRET_SEPARATE {
+                     op.globalAggregation.createMissingGroups(op.ht_ref(),
+                                                              true);
+                  };
+                  cGroups();
+                  op.updateGroupsFromPartition.evaluate(n);
+               }
+            }
+         }
+         cont.partitionNeedsAggregation = false;
+         cont.iter = op.globalAggregation.allocations.begin();
+      }
+      if (cont.iter != op.globalAggregation.allocations.end()) {
+         auto& block = *cont.iter;
+         *op.globalAggregation.htMatches =
+             reinterpret_cast<header_t*>(block.first);
+         auto n = block.second;
+         op.gatherGroups.evaluate(n);
+         cont.iter++;
+         return n;
+      } else {
+         auto htClear = [&]() INTERPRET_SEPARATE {
+            op.globalAggregation.clearHashtable(op.ht_ref());
+         };
+         htClear();
+         cont.partitionNeedsAggregation = true;
+         cont.partition = op.shared.partition.fetch_add(1);
+      }
+   }
+   return EndOfStream;
+}
+
+#endif // VW_SPLIT_HASHGROUP
+
+// ---------------------------------------------------------------------------
+
 HashGroup::HashGroup(Shared& s)
     : shared(s), preAggregation(*this), globalAggregation(*this) {
    maxFill = ht.setSize(initialMapSize);
@@ -877,13 +1084,14 @@ size_t HashGroup::next() {
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
          // 1. Hash: compute group key hashes for the entire morsel
          groupHash.evaluate(n);
-         // 2. Lookup: find existing groups / classify misses.
-         //    htLookup pipelines prefetches internally (prefetch i+D, process i)
-         //    to hide HT bucket load latency without a separate pass.
+         // 2. Prefetch: issue HT bucket loads for all hashes before any lookup
+         //    touches them, hiding random-access memory latency
+         preAggregation.prefetchBuckets(n, ht);
+         // 3. Lookup: find existing groups / classify misses
          preAggregation.findGroups(n, ht);
-         // 3. Create: allocate and insert entries for unseen groups
+         // 4. Create: allocate and insert entries for unseen groups
          auto groupsCreated = preAggregation.createMissingGroups(ht, false);
-         // 4. Aggregate: update accumulators for all matched groups
+         // 5. Aggregate: update accumulators for all matched groups
          updateGroups.evaluate(n);
          groups += groupsCreated;
          if (groups >= maxFill) flushAndClear();
@@ -915,6 +1123,8 @@ size_t HashGroup::next() {
                   // for group lookup and creation
                   auto data = addBytes(chunk->data<void>(), pos * elementSize);
                   globalAggregation.rowData = data;
+                  // Prefetch HT buckets for all rows in this slice before lookup
+                  globalAggregation.prefetchBuckets(n, ht);
                   findGroupsFromPartition(data, n);
                   auto cGroups = [&]() INTERPRET_SEPARATE {
                      globalAggregation.createMissingGroups(ht, true);

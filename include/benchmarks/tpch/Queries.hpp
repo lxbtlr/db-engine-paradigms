@@ -37,6 +37,9 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
              size_t size = 1024)
        : QueryBuilder(db, shared, size) {}
    std::unique_ptr<Q1> getQuery();
+#ifdef VW_SPLIT_HASHGROUP
+   std::unique_ptr<Q1> getQuerySplit();
+#endif
 };
 #endif
 
@@ -76,6 +79,13 @@ std::unique_ptr<runtime::Query>
 q1_vectorwise(runtime::Database& db,
               size_t nrThreads = std::thread::hardware_concurrency(),
               size_t vectorSize = 1024);
+
+#ifdef VW_SPLIT_HASHGROUP
+std::unique_ptr<runtime::Query>
+q1_vectorwise_split(runtime::Database& db,
+                    size_t nrThreads = std::thread::hardware_concurrency(),
+                    size_t vectorSize = 1024);
+#endif
 
 struct Q3Builder : private vectorwise::QueryBuilder {
    enum {

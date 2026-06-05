@@ -14,46 +14,64 @@ Had to do some wonky stuff like:
 
 - explicitly scoped types in querybuilder.hpp to prevent naming conflicts with member functions.
 
-## allocator policy
+## CMake Flags
 
-We have experimented with different allocator strategies, these can be toggled in the cmake step.
+Flags are passed at configure time as `-DFLAG=ON`, e.g.:
+```
+cmake -DCMAKE_BUILD_TYPE=Release -DVW_SPLIT_HASHGROUP=ON ../..
+```
 
-### CMake options
 
-| Option | Default | Effect |
-|---|---|---|
-| `NUMA_LATENCY` | OFF | Consolidated schedule — threads packed per socket (latency-optimised). When OFF, `NUMA_BANDWIDTH` is injected automatically (fan-out, threads interleaved across sockets). |
-| `NUMA_POOLS` | OFF | Enables per-NUMA pool array; threads allocate from their local socket's pool. |
-| `NUMA_MBIND` | OFF | Enables `mbind()` in `malloc_huge` to physically bind memory to NUMA nodes. Requires `NUMA_POOLS=ON` and `libnuma`. |
+### General flags
 
-### Underlying macros
+| Flag | Default | Description |
+|------|---------|-------------|
+| `VECTORWISE_BRANCHING` | `OFF` | Use branching vectorwise primitives instead of branchless |
+| `AUTOVECTORIZE` | `OFF` | Allow the compiler to auto-vectorize loops |
+| `DATADIR` | project dir | Path to directory containing TPC-H test data |
+| `INTERPRET_SEPARATE` | `OFF` | Compile certain hot loops into a separate translation unit to prevent inlining across operator boundaries |
+| `HASH_SIZE_32` | `OFF` | Use 32-bit hash values instead of 64-bit |
+| `AVX512EXPERIMENTS` | `OFF` | Build additional AVX-512 experiment binaries (`simdJoin`, `run_simd`, `run_join`); sets `-march=skylake-avx512` |
+| `HARDWARE_BENCHMARKS` | `OFF` | Build hardware microbenchmark binaries (`latency`, `randomWrites`) |
 
-These are injected by CMake based on the options above. They can also be passed directly via `CMAKE_CXX_FLAGS` for fine-grained control.
+### NUMA flags
 
-| Macro | Effect |
-|---|---|
-| `NUMA_BANDWIDTH` | Fan-out schedule — `regionOf(tid) = tid % SOCKETS_COUNT`. Default when `NUMA_LATENCY` is off. |
-| `NUMA_LATENCY` | Consolidated schedule alias — selects packed-per-socket CPU pinning in `WorkerGroup::run`. |
-| `NUMA_POOLS` | Consolidated `regionOf` — `regionOf(tid) = tid / (CORES_PER_SOCKET * SMT_PER_CORE)`. Also enables per-NUMA pool array. |
-| `NUMA_MBIND` | Enables `mbind()` binding inside `malloc_huge`. Requires `NUMA_POOLS`. |
-| `NEW_POLICY` | Use `schedule[]` array for CPU pinning instead of sequential assignment. Pass via `CMAKE_CXX_FLAGS`. |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `NUMA_BANDWIDTH`| OFF | Fan-out schedule — `regionOf(tid) = tid % SOCKETS_COUNT`. Default when `NUMA_LATENCY` is off. |
+| `NUMA_LATENCY` | OFF | Consolidated schedule alias — selects packed-per-socket CPU pinning in `WorkerGroup::run`. |
+| `NUMA_POOLS` | OFF | Consolidated `regionOf` — `regionOf(tid) = tid / (CORES_PER_SOCKET * SMT_PER_CORE)`. Also enables per-NUMA pool array. |
+| `NUMA_MBIND` |OFF  | Enables `mbind()` binding inside `malloc_huge`. Requires `NUMA_POOLS`. |
+| `NEW_POLICY` |OFF  | Use `schedule[]` array for CPU pinning instead of sequential assignment. Pass via `CMAKE_CXX_FLAGS`. |
 
 > `NUMA_BANDWIDTH` and `NUMA_POOLS` are mutually exclusive. The build will `#error` if neither is defined. When `NUMA_LATENCY=ON`, `NUMA_POOLS` is injected automatically to satisfy the `regionOf()` guard.
 
-### Default — fan-out bandwidth schedule (NUMA_BANDWIDTH injected automatically)
+
+#### Default — fan-out bandwidth schedule (NUMA_BANDWIDTH injected automatically)
 ```
   cmake ..
 ```
 
-### Consolidated latency schedule
+#### Consolidated latency schedule
 ```
   cmake -DNUMA_LATENCY=ON ..
 ```
 
-### Consolidated latency + per-NUMA pools + mbind
+#### Consolidated latency + per-NUMA pools + mbind
 ```
   cmake -DNUMA_LATENCY=ON -DNUMA_POOLS=ON -DNUMA_MBIND=ON ..
 ```
+
+
+### Vectorwise split HashGroup flags
+
+These flags control an experimental decomposition of the fused `HashGroup` operator into three separate pipeline-able operators: `HashComputeOp` (hashing), `GroupLookupOp` (HT lookup + group creation), and `GroupAggregateOp` (accumulation). Requires `VW_SPLIT_HASHGROUP=ON` to activate; the baseline fused path is used otherwise.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `VW_SPLIT_HASHGROUP` | `OFF` | Decompose `HashGroup::next()` into three chained operators. Enables `q1_vectorwise_split()` as an alternative entry point to `q1_vectorwise()` |
+| `VW_AGGR_TUPLE_OUTER` | `OFF` | Switch the aggregation loop order from **op-outer / tuple-inner** (Option 2, default: each primitive iterates all `n` tuples before the next runs) to **tuple-outer / op-inner** (Option 1: all primitives are applied to each tuple before advancing to the next). Requires `VW_SPLIT_HASHGROUP=ON` |
+
 
 # Original README below
 ...

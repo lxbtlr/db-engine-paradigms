@@ -1297,7 +1297,12 @@ extern F3 proj8_multiplies_int64_t_col_int64_t_col;
 extern F4 proj8_multiplies_sel_int64_t_col_int64_t_col;
 
 extern F3 sel_less_int32_t_col_int32_t_val_avx512;
+extern F3 sel_less_equal_int32_t_col_int32_t_val_avx512;
 extern F4 selsel_greater_equal_int32_t_col_int32_t_val_avx512;
+
+extern FAggr aggr_plus_int64_t_col_avx512;
+extern FAggrSel aggr_sel_plus_int64_t_col_avx512;
+extern FAggr aggr_count_star_avx512;
 extern F4 selsel_greater_equal_int64_t_col_int64_t_val_avx512;
 extern F4 selsel_less_int64_t_col_int64_t_val_avx512;
 extern F4 selsel_less_equal_int64_t_col_int64_t_val_avx512;

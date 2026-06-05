@@ -517,6 +517,386 @@ QueryBuilder::HashGroupBuilder QueryBuilder::HashGroup() {
    return b;
 }
 
+// ---------------------------------------------------------------------------
+// SplitHashGroup builder (VW_SPLIT_HASHGROUP only)
+// ---------------------------------------------------------------------------
+#ifdef VW_SPLIT_HASHGROUP
+
+QueryBuilder::SplitHashGroupBuilder::SplitHashGroupBuilder(QueryBuilder& b)
+    : base(b) {}
+
+QueryBuilder::SplitHashGroupBuilder QueryBuilder::SplitHashGroup() {
+   SplitHashGroupBuilder b(*this);
+   auto nr = nextOpNr();
+   auto& s = operatorState.get<HashGroup::Shared>(nr);
+
+   // Create the three operators
+   auto aggOpOwning = make_unique<GroupAggregateOp>(s);
+   auto lookupOpOwning = make_unique<GroupLookupOp>();
+   auto hashOpOwning = make_unique<HashComputeOp>();
+
+   b.aggOp = aggOpOwning.get();
+   b.lookupOp = lookupOpOwning.get();
+   b.hashOp = hashOpOwning.get();
+   b.group = aggOpOwning->hg.get();
+
+   // Wire back-references so the sub-operators can access HashGroup state
+   lookupOpOwning->hg = b.group;
+   hashOpOwning->hg = b.group;
+
+   // Allocate scratch buffers for the batched candidate loop in GroupLookupOp
+   lookupOpOwning->candidates = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   lookupOpOwning->hashMatches = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+
+   // Chain: hashOp -> child (data source from stack)
+   hashOpOwning->child = popOperator();
+   // Chain: lookupOp -> hashOp
+   lookupOpOwning->child = move(hashOpOwning);
+   // Store inner pipeline in aggOp (GroupLookupOp is the top of the inner chain)
+   aggOpOwning->pipeline = move(lookupOpOwning);
+
+   // Now set up HashGroup internals exactly like HashGroupBuilder does
+   auto& op = *b.group;
+   op.vecSize = vecs.getVecSize();
+   op.groupStore.setSource(&runtime::this_worker->allocator);
+
+   op.groupHt =
+       make_unique<runtime::HashmapSmall<pos_t, pos_t>>(vecs.getVecSize());
+
+   auto& local = op.preAggregation;
+   local.ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
+   local.groupHashes = static_cast<runtime::Hashmap::hash_t*>(
+       vecs.get(8 /*sizeof(runtime::Hashmap::hash_t)*/));
+   local.htMatches = static_cast<runtime::Hashmap::EntryHeader**>(
+       vecs.get(sizeof(runtime::Hashmap::EntryHeader*)));
+   local.groupsFound = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.groupsNotFound =
+       reinterpret_cast<SizeBuffer<pos_t>*>(vecs.getSizeBuffer(sizeof(pos_t)));
+   local.keysNEq =
+       reinterpret_cast<SizeBuffer<pos_t>*>(vecs.getSizeBuffer(sizeof(pos_t)));
+   local.partitionEndsIn = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.partitionEndsOut = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.unpartitionedRows = local.groupsNotFound->data();
+   local.partitionedRows = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.groupRepresentatives = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+
+   b.localLookup.partitionEndsIn = local.partitionEndsIn;
+   b.localLookup.partitionEndsOut = local.partitionEndsOut;
+   b.localLookup.unpartitionedRows = local.unpartitionedRows;
+   b.localLookup.partitionedRows = local.partitionedRows;
+
+   auto& global = op.globalAggregation;
+   global.ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
+   global.groupHashes = local.groupHashes;
+   global.htMatches = local.htMatches;
+   global.groupsFound = local.groupsFound;
+   global.groupsNotFound = local.groupsNotFound;
+   global.keysNEq = local.keysNEq;
+   global.partitionEndsIn = local.partitionEndsIn;
+   global.partitionEndsOut = local.partitionEndsOut;
+   global.unpartitionedRows = global.groupsNotFound->data();
+   global.partitionedRows = local.partitionedRows;
+   global.groupRepresentatives = local.groupRepresentatives;
+
+   b.globalLookup.partitionEndsIn = local.partitionEndsIn;
+   b.globalLookup.partitionEndsOut = local.partitionEndsOut;
+   b.globalLookup.unpartitionedRows = local.unpartitionedRows;
+   b.globalLookup.partitionedRows = local.partitionedRows;
+
+   // scatter hash (local)
+   auto scatter_build = make_unique<FScatterSelOp>(
+       primitives::scatter_sel_hash_t_col, Value(local.groupRepresentatives),
+       Value(local.groupHashes), reinterpret_cast<void**>(&local.scatterStart),
+       &local.ht_entry_size, offsetof(runtime::Hashmap::EntryHeader, hash));
+   local.buildScatter += move(scatter_build);
+
+   // scatter hash (global)
+   auto scatter_build_global = make_unique<FScatterSelRowOp>(
+       primitives::scatter_sel_row_hash_t_col,
+       Value(global.groupRepresentatives), &global.rowData, &global.rowSize, 0,
+       reinterpret_cast<void**>(&global.scatterStart), &global.ht_entry_size,
+       offsetof(runtime::Hashmap::EntryHeader, hash));
+   global.buildScatter += move(scatter_build_global);
+
+   pushOperator(move(aggOpOwning));
+   return b;
+}
+
+QueryBuilder::SplitHashGroupBuilder::~SplitHashGroupBuilder() {
+   auto& op = *group;
+   auto& local = op.preAggregation;
+   auto& global = op.globalAggregation;
+   local.partitionEndsOut = localLookup.partitionEndsIn;
+   local.partitionedRows = localLookup.unpartitionedRows;
+   global.partitionEndsOut = globalLookup.partitionEndsIn;
+   global.partitionedRows = globalLookup.unpartitionedRows;
+
+   local.ht_entry_size += padding(local.ht_entry_size, 8);
+   global.ht_entry_size += padding(local.ht_entry_size, 8);
+
+   auto rowSize =
+       local.ht_entry_size - sizeof(runtime::Hashmap::EntryHeader::next);
+   auto& spill = op.shared.spillStorage.create(
+       runtime::this_worker->group->size * 4, rowSize);
+   op.nrPartitions = spill.getPartitions().size();
+   global.rowSize = rowSize;
+}
+
+QueryBuilder::SplitHashGroupBuilder&
+QueryBuilder::SplitHashGroupBuilder::pushKeySelVec(DS sel, DS outBuf) {
+   auto lookup = move(base.Expression().addOp(
+       primitives::lookup_sel, outBuf,
+       base.Value(group->preAggregation.groupRepresentatives), sel));
+   group->preAggregation.buildScatter += move(lookup);
+   return *this;
+}
+
+QueryBuilder::SplitHashGroupBuilder&
+QueryBuilder::SplitHashGroupBuilder::padToAlign(size_t align) {
+   group->preAggregation.ht_entry_size +=
+       padding(group->preAggregation.ht_entry_size, align);
+   group->globalAggregation.ht_entry_size +=
+       padding(group->globalAggregation.ht_entry_size, align);
+   return *this;
+}
+
+QueryBuilder::SplitHashGroupBuilder&
+QueryBuilder::SplitHashGroupBuilder::addKey(
+    DS col, primitives::F2 hash, primitives::NEQCheck eq,
+    primitives::FPartitionByKey partitionByKey, primitives::FScatterSel scatter,
+    primitives::NEQCheckRow eqG, primitives::FPartitionByKeyRow partitionByKeyG,
+    primitives::FScatterSelRow scatterG, primitives::FGatherVal gatherFn,
+    DS out) {
+   // Delegate to a temporary HashGroupBuilder wired to the same group object.
+   // Since HashGroupBuilder::addKey is not re-usable without an instance of
+   // HashGroupBuilder, we duplicate the wiring logic here (same as
+   // HashGroupBuilder::addKey without selection vector).
+   auto& op = *group;
+   auto& local = op.preAggregation;
+   auto& global = op.globalAggregation;
+   auto entryOffset = local.ht_entry_size;
+   local.ht_entry_size += col.dataSize;
+   global.ht_entry_size += col.dataSize;
+
+   auto partitionOffset =
+       entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
+
+   // Hash goes into HashComputeOp's groupHash expression
+   op.groupHash +=
+       base.Expression().addOp(hash, base.Value(local.groupHashes), col);
+
+   auto neqCheck = make_unique<NEqualityCheck>(
+       eq, local.groupsFound, reinterpret_cast<void**>(local.htMatches), col,
+       entryOffset, local.keysNEq);
+   col.registerDS(&neqCheck->probeKey);
+   local.keyEquality += move(neqCheck);
+
+   auto neqCheckGlobal = make_unique<NEQCheckRowOp>(
+       eqG, global.groupsFound, reinterpret_cast<void**>(global.htMatches),
+       &global.rowData, entryOffset, &global.rowSize, partitionOffset,
+       global.keysNEq);
+   global.keyEquality += move(neqCheckGlobal);
+
+   auto partition = make_unique<FPartitionByKeyOp>(
+       partitionByKey, localLookup.unpartitionedRows, col, local.groupHashes,
+       localLookup.partitionEndsIn, localLookup.partitionedRows,
+       localLookup.partitionEndsOut, op.groupHt.get());
+   col.registerDS(&partition->get<1>());
+   local.partitionKeys += move(partition);
+   std::swap(localLookup.partitionEndsIn, localLookup.partitionEndsOut);
+   std::swap(localLookup.unpartitionedRows, localLookup.partitionedRows);
+
+   auto partitionGlobal = make_unique<FPartitionByKeyRowOp>(
+       partitionByKeyG, globalLookup.unpartitionedRows, &global.rowData, 0,
+       &global.rowSize, partitionOffset, globalLookup.partitionEndsIn,
+       globalLookup.partitionedRows, globalLookup.partitionEndsOut,
+       op.groupHt.get());
+   global.partitionKeys += move(partitionGlobal);
+   std::swap(globalLookup.partitionEndsIn, globalLookup.partitionEndsOut);
+   std::swap(globalLookup.unpartitionedRows, globalLookup.partitionedRows);
+
+   auto scatter_build = make_unique<FScatterSelOp>(
+       scatter, base.Value(local.groupRepresentatives), col,
+       reinterpret_cast<void**>(&local.scatterStart), &local.ht_entry_size,
+       entryOffset);
+   col.registerDS(&scatter_build->get<1>());
+   local.buildScatter += move(scatter_build);
+
+   auto scatter_build_global = make_unique<FScatterSelRowOp>(
+       scatterG, base.Value(global.groupRepresentatives), &global.rowData,
+       &global.rowSize, partitionOffset,
+       reinterpret_cast<void**>(&global.scatterStart), &global.ht_entry_size,
+       entryOffset);
+   global.buildScatter += move(scatter_build_global);
+
+   auto gather_groups = make_unique<GatherOpVal>(
+       gatherFn, reinterpret_cast<void**>(global.htMatches), entryOffset,
+       &global.ht_entry_size, out);
+   op.gatherGroups.ops.push_back(move(gather_groups));
+   return *this;
+}
+
+QueryBuilder::SplitHashGroupBuilder&
+QueryBuilder::SplitHashGroupBuilder::addKey(
+    DS col, DS sel, primitives::F3 hash, primitives::NEQCheckSel eq,
+    primitives::FPartitionByKeySel partitionByKey, DS selScat,
+    primitives::FScatterSel scatter, primitives::NEQCheckRow eqG,
+    primitives::FPartitionByKeyRow partitionByKeyG,
+    primitives::FScatterSelRow scatterG, primitives::FGatherVal gatherFn,
+    DS out) {
+   auto& op = *group;
+   auto& local = op.preAggregation;
+   auto& global = op.globalAggregation;
+   auto entryOffset = local.ht_entry_size;
+   local.ht_entry_size += col.dataSize;
+   global.ht_entry_size += col.dataSize;
+
+   auto partitionOffset =
+       entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
+
+   op.groupHash +=
+       base.Expression().addOp(hash, sel, base.Value(local.groupHashes), col);
+
+   auto neqCheck = make_unique<NEqualityCheckSel>(
+       eq, local.groupsFound, reinterpret_cast<void**>(local.htMatches), sel,
+       col, entryOffset, local.keysNEq);
+   sel.registerDS(&neqCheck->probeSel);
+   col.registerDS(&neqCheck->probeKey);
+   local.keyEquality += move(neqCheck);
+
+   auto neqCheckGlobal = make_unique<NEQCheckRowOp>(
+       eqG, global.groupsFound, reinterpret_cast<void**>(global.htMatches),
+       &global.rowData, entryOffset, &global.rowSize, partitionOffset,
+       global.keysNEq);
+   global.keyEquality += move(neqCheckGlobal);
+
+   auto partition = make_unique<FPartitionByKeySelOp>(
+       partitionByKey, localLookup.unpartitionedRows, sel, col,
+       local.groupHashes, localLookup.partitionEndsIn,
+       localLookup.partitionedRows, localLookup.partitionEndsOut,
+       op.groupHt.get());
+   col.registerDS(&partition->get<2>());
+   local.partitionKeys += move(partition);
+   std::swap(localLookup.partitionEndsIn, localLookup.partitionEndsOut);
+   std::swap(localLookup.unpartitionedRows, localLookup.partitionedRows);
+
+   auto partitionGlobal = make_unique<FPartitionByKeyRowOp>(
+       partitionByKeyG, globalLookup.unpartitionedRows, &global.rowData, 0,
+       &global.rowSize, partitionOffset, globalLookup.partitionEndsIn,
+       globalLookup.partitionedRows, globalLookup.partitionEndsOut,
+       op.groupHt.get());
+   global.partitionKeys += move(partitionGlobal);
+   std::swap(globalLookup.partitionEndsIn, globalLookup.partitionEndsOut);
+   std::swap(globalLookup.unpartitionedRows, globalLookup.partitionedRows);
+
+   auto scatter_build = make_unique<FScatterSelOp>(
+       scatter, selScat, col, reinterpret_cast<void**>(&local.scatterStart),
+       &local.ht_entry_size, entryOffset);
+   col.registerDS(&scatter_build->get<1>());
+   local.buildScatter += move(scatter_build);
+
+   auto scatter_build_global = make_unique<FScatterSelRowOp>(
+       scatterG, base.Value(global.groupRepresentatives), &global.rowData,
+       &global.rowSize, partitionOffset,
+       reinterpret_cast<void**>(&global.scatterStart), &global.ht_entry_size,
+       entryOffset);
+   global.buildScatter += move(scatter_build_global);
+
+   auto gather_groups = make_unique<GatherOpVal>(
+       gatherFn, reinterpret_cast<void**>(global.htMatches), entryOffset,
+       &global.ht_entry_size, out);
+   op.gatherGroups.ops.push_back(move(gather_groups));
+   return *this;
+}
+
+QueryBuilder::SplitHashGroupBuilder&
+QueryBuilder::SplitHashGroupBuilder::addValue(
+    DS col, primitives::FAggrInit aggrInit, primitives::FAggr aggr,
+    primitives::FAggrRow aggrGlobal, primitives::FGatherVal gatherFn, DS out) {
+   auto& op = *group;
+   auto& local = op.preAggregation;
+   auto& global = op.globalAggregation;
+   auto entryOffset = local.ht_entry_size;
+   local.ht_entry_size += col.dataSize;
+   global.ht_entry_size += col.dataSize;
+
+   auto partitionOffset =
+       entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
+
+   auto aggregateInitOp = make_unique<FAggrInitOp>(
+       aggrInit, reinterpret_cast<void**>(&local.scatterStart),
+       &local.ht_entry_size, entryOffset);
+   local.buildScatter += move(aggregateInitOp);
+
+   auto aggregateInitGlobalOp = make_unique<FAggrInitOp>(
+       aggrInit, reinterpret_cast<void**>(&global.scatterStart),
+       &global.ht_entry_size, entryOffset);
+   global.buildScatter += move(aggregateInitGlobalOp);
+
+   auto aggr_op = make_unique<FAggrOp>(
+       aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset,
+       col.dataSize);
+   col.registerDS(&aggr_op->get<1>());
+   op.updateGroups += move(aggr_op);
+
+   auto aggrGlobal_op = make_unique<FAggrRowOp>(
+       aggrGlobal, reinterpret_cast<void**>(global.htMatches), entryOffset,
+       &global.rowData, &global.rowSize, partitionOffset);
+   op.updateGroupsFromPartition += move(aggrGlobal_op);
+
+   auto gather_groups = make_unique<GatherOpVal>(
+       gatherFn, reinterpret_cast<void**>(global.htMatches), entryOffset,
+       &global.ht_entry_size, out);
+   op.gatherGroups.ops.push_back(move(gather_groups));
+   return *this;
+}
+
+QueryBuilder::SplitHashGroupBuilder&
+QueryBuilder::SplitHashGroupBuilder::addValue(
+    DS col, DS sel, primitives::FAggrInit aggrInit, primitives::FAggrSel aggr,
+    primitives::FAggrRow aggrGlobal, primitives::FGatherVal gatherFn, DS out) {
+   auto& op = *group;
+   auto& local = op.preAggregation;
+   auto& global = op.globalAggregation;
+   auto entryOffset = local.ht_entry_size;
+   local.ht_entry_size += col.dataSize;
+   global.ht_entry_size += col.dataSize;
+
+   auto partitionOffset =
+       entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
+
+   auto aggregateInitOp = make_unique<FAggrInitOp>(
+       aggrInit, reinterpret_cast<void**>(&local.scatterStart),
+       &local.ht_entry_size, entryOffset);
+   local.buildScatter += move(aggregateInitOp);
+
+   auto aggregateInitGlobalOp = make_unique<FAggrInitOp>(
+       aggrInit, reinterpret_cast<void**>(&global.scatterStart),
+       &global.ht_entry_size, entryOffset);
+   global.buildScatter += move(aggregateInitGlobalOp);
+
+   auto aggr_op = make_unique<FAggrSelOp>(
+       aggr, reinterpret_cast<void**>(local.htMatches), sel, col, entryOffset);
+   sel.registerDS(&aggr_op->get<1>());
+   col.registerDS(&aggr_op->get<2>());
+   op.updateGroups += move(aggr_op);
+
+   auto aggrGlobal_op = make_unique<FAggrRowOp>(
+       aggrGlobal, reinterpret_cast<void**>(global.htMatches), entryOffset,
+       &global.rowData, &global.rowSize, partitionOffset);
+   op.updateGroupsFromPartition += move(aggrGlobal_op);
+
+   auto gather_groups = make_unique<GatherOpVal>(
+       gatherFn, reinterpret_cast<void**>(global.htMatches), entryOffset,
+       &global.ht_entry_size, out);
+   op.gatherGroups.ops.push_back(move(gather_groups));
+   return *this;
+}
+
+#endif // VW_SPLIT_HASHGROUP
+
+// ---------------------------------------------------------------------------
+
 QueryBuilder::HashGroupBuilder::~HashGroupBuilder() {
 
    // set partitioning buffers in operator
@@ -726,7 +1106,8 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    global.buildScatter += move(aggregateInitGlobalOp);
 
    auto aggr_op = make_unique<FAggrOp>(
-       aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset);
+       aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset,
+       col.dataSize);
    col.registerDS(&aggr_op->get<1>());
    op.updateGroups += move(aggr_op);
 

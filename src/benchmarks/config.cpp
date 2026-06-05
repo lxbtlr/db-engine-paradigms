@@ -72,6 +72,12 @@ vectorwise::primitives::F3 ExperimentConfig::sel_less_int32_t_col_int32_t_val(){
 #endif
   return BF(vectorwise::primitives::sel_less_int32_t_col_int32_t_val);
 }
+vectorwise::primitives::F3 ExperimentConfig::sel_less_equal_int32_t_col_int32_t_val(){
+#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
+  if(useSimdSel) return vectorwise::primitives::sel_less_equal_int32_t_col_int32_t_val_avx512;
+#endif
+  return BF(vectorwise::primitives::sel_less_equal_int32_t_col_int32_t_val);
+}
 vectorwise::primitives::F4 ExperimentConfig::selsel_greater_equal_int32_t_col_int32_t_val() {
 #if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
   if(useSimdSel) return vectorwise::primitives::selsel_greater_equal_int32_t_col_int32_t_val_avx512;
@@ -97,6 +103,24 @@ vectorwise::primitives::F4 ExperimentConfig::selsel_less_equal_int64_t_col_int64
   return BF(vectorwise::primitives::selsel_less_equal_int64_t_col_int64_t_val);
 }
 
+vectorwise::primitives::FAggr ExperimentConfig::aggr_plus_int64_t_col(){
+#if defined(__AVX512F__) && defined(__AVX512CD__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
+  if(useSimdAggr) return vectorwise::primitives::aggr_plus_int64_t_col_avx512;
+#endif
+  return vectorwise::primitives::aggr_plus_int64_t_col;
+}
+vectorwise::primitives::FAggrSel ExperimentConfig::aggr_sel_plus_int64_t_col(){
+#if defined(__AVX512F__) && defined(__AVX512CD__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
+  if(useSimdAggr) return vectorwise::primitives::aggr_sel_plus_int64_t_col_avx512;
+#endif
+  return vectorwise::primitives::aggr_sel_plus_int64_t_col;
+}
+vectorwise::primitives::FAggr ExperimentConfig::aggr_count_star(){
+#if defined(__AVX512F__) && defined(__AVX512CD__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
+  if(useSimdAggr) return vectorwise::primitives::aggr_count_star_avx512;
+#endif
+  return vectorwise::primitives::aggr_count_star;
+}
 ExperimentConfig::joinFun ExperimentConfig::joinAll() {
 #if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
   if (useSimdJoin) return &vectorwise::Hashjoin::joinAllSIMD;
