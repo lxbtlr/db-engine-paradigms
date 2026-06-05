@@ -454,10 +454,18 @@ class HashComputeOp : public UnaryOperator {
 };
 
 /// Looks up / creates group entries in the local pre-aggregation HT.
-/// Must be placed above HashComputeOp in the pipeline.
+/// Uses the batched multi-bucket candidate loop pattern (cf. join probe):
+///   1. Initial probe: bulk find_chain into htMatches, classify null vs non-null
+///   2. Candidate loop: hash-compare → key-compare → chain-follow per level
+///   3. Batch insertion for not-found tuples via createMissingGroups
 class GroupLookupOp : public UnaryOperator {
  public:
    HashGroup* hg = nullptr; // non-owning reference to shared HashGroup state
+
+   // Scratch buffers for the batched candidate loop, allocated by the builder.
+   pos_t* candidates = nullptr;   // tuples still searching (indices into morsel)
+   pos_t* hashMatches = nullptr;  // subset that passed hash comparison
+
    virtual size_t next() override;
 };
 
