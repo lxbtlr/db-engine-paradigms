@@ -313,10 +313,6 @@ class HashGroup : public UnaryOperator {
 
    template <typename T> class GroupLookup {
 
-      /// Pass 1 of lookup: for each tuple, prefetch and load the chain head
-      /// from the HT into htMatches[i]. No comparison is done here — all n
-      /// tuples are written to groupsFound as candidates.
-      void htProbe(pos_t n, decltype(ht) & ht);
       /// Pass 2 of lookup: compare hashes in htMatches against groupHashes,
       /// classify into groupsFound (hit) or groupsNotFound (miss).
       pos_t htLookup(pos_t n, decltype(ht) & ht);
@@ -326,6 +322,10 @@ class HashGroup : public UnaryOperator {
       HashGroup& parent;
 
     public:
+      /// Pass 1 of lookup: for each tuple, prefetch and load the chain head
+      /// from the HT into htMatches[i]. No comparison is done here — all n
+      /// tuples are written to groupsFound as candidates.
+      void htProbe(pos_t n, decltype(ht) & ht);
       GroupLookup(HashGroup& p) : parent(p){};
       std::deque<std::pair<void*, size_t>> allocations;
 
