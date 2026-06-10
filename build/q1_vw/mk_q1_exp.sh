@@ -42,7 +42,7 @@ rm -rf CMake*
 cmake -DCMAKE_BUILD_TYPE=Release -DVW_SPLIT_HASHGROUP=ON -DVW_AGGR_TUPLE_OUTER=ON ../.. > /dev/null
 
 
-make -j22 run_tpch 
+make -j22 run_tpch 2> /dev/null
 
 mv run_tpch option1_run_tpch 2> /dev/null
 
