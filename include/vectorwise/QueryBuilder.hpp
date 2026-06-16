@@ -166,6 +166,61 @@ class QueryBuilder {
             pos_t (Hashjoin::*join)() = &Hashjoin::joinAllParallel);
    HashGroupBuilder HashGroup();
 
+   // -------------------------------------------------------------------------
+   // Split HashGroup builder (compiled only when VW_SPLIT_HASHGROUP is defined).
+   // Creates HashComputeOp, GroupLookupOp, and GroupAggregateOp chained
+   // together.  Returns a builder that shares the same addKey / addValue /
+   // padToAlign / pushKeySelVec interface as HashGroupBuilder so the query
+   // DSL is unchanged; the underlying operator objects differ.
+   // -------------------------------------------------------------------------
+#ifdef VW_SPLIT_HASHGROUP
+   struct SplitHashGroupBuilder {
+      QueryBuilder& base;
+      vectorwise::HashGroup* group;       // non-owning, for wiring primitives
+      vectorwise::GroupAggregateOp* aggOp; // owning operator (top of chain)
+      vectorwise::GroupLookupOp*  lookupOp;
+      vectorwise::HashComputeOp*  hashOp;
+
+      struct Lookup {
+         pos_t* partitionEndsIn;
+         pos_t* partitionEndsOut;
+         pos_t* unpartitionedRows;
+         pos_t* partitionedRows;
+      } localLookup, globalLookup;
+
+      SplitHashGroupBuilder(QueryBuilder& base);
+
+      using B = SplitHashGroupBuilder;
+      B& addKey(DS col, primitives::F2 hash,
+                primitives::NEQCheck eq,
+                primitives::FPartitionByKey partitionByKey,
+                primitives::FScatterSel scatter,
+                primitives::NEQCheckRow eqG,
+                primitives::FPartitionByKeyRow partitionByKeyG,
+                primitives::FScatterSelRow scatterG,
+                primitives::FGatherVal gather, DS out);
+      B& addKey(DS col, DS sel, primitives::F3 hash,
+                primitives::NEQCheckSel eq,
+                primitives::FPartitionByKeySel partitionByKey, DS selScat,
+                primitives::FScatterSel scatter,
+                primitives::NEQCheckRow eqG,
+                primitives::FPartitionByKeyRow partitionByKeyG,
+                primitives::FScatterSelRow scatterG,
+                primitives::FGatherVal gather, DS out);
+      B& pushKeySelVec(DS sel, DS outBuf);
+      B& addValue(DS col, primitives::FAggrInit aggrInit,
+                  primitives::FAggr aggr, primitives::FAggrRow aggrGlobal,
+                  primitives::FGatherVal gather, DS out);
+      B& addValue(DS col, DS sel, primitives::FAggrInit aggrInit,
+                  primitives::FAggrSel aggr, primitives::FAggrRow aggrGlobal,
+                  primitives::FGatherVal gather, DS out);
+      B& padToAlign(size_t align);
+      ~SplitHashGroupBuilder();
+   };
+
+   SplitHashGroupBuilder SplitHashGroup();
+#endif // VW_SPLIT_HASHGROUP
+
    ~QueryBuilder();
 
    ExpressionBuilder Expression();

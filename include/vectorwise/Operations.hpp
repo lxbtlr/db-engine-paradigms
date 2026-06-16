@@ -23,8 +23,15 @@ class Expression {
 class Aggregates {
  public:
    std::vector<std::unique_ptr<Op>> ops;
-   /// Evaluate all operations of this aggregate
+   /// Option 2 (default): op-outer, tuple-inner.
+   /// Calls each primitive once with the full batch of n tuples.
    pos_t evaluate(pos_t n);
+#ifdef VW_AGGR_TUPLE_OUTER
+   /// Option 1: tuple-outer, op-inner.
+   /// Iterates one tuple at a time; for each tuple calls every primitive
+   /// with n=1 so that all ops are applied to a single row before moving on.
+   pos_t evaluate_tuple_outer(pos_t n);
+#endif
    void operator+=(std::unique_ptr<Expression> other);
    void operator+=(std::unique_ptr<Op>&& op);
 };
@@ -45,6 +52,13 @@ class Scatter {
 
 struct Op {
    virtual pos_t run(pos_t n) = 0;
+#ifdef VW_AGGR_TUPLE_OUTER
+   /// Advance all data pointers by `step` elements (element size is
+   /// op-specific).  Used by Aggregates::evaluate_tuple_outer to step through
+   /// one tuple at a time.  Negative step rewinds.  Default is a no-op; ops
+   /// that participate in tuple-outer aggregation must override this.
+   virtual void advance(ptrdiff_t /*step*/) {}
+#endif
    virtual ~Op() = default;
 };
 
@@ -52,6 +66,7 @@ template <typename> class OpArgs;
 
 template <typename... Args>
 class OpArgs<pos_t (*)(pos_t, Args...)> : public Op {
+ protected:
    std::function<pos_t(pos_t, Args...)> function;
 
  public:
@@ -72,10 +87,32 @@ class OpArgs<pos_t (*)(pos_t, Args...)> : public Op {
 using FScatterOp = OpArgs<primitives::FScatter>;
 using FScatterSelOp = OpArgs<primitives::FScatterSel>;
 using FScatterSelRowOp = OpArgs<primitives::FScatterSelRow>;
-using FAggrOp = OpArgs<primitives::FAggr>;
-using FAggrSelOp = OpArgs<primitives::FAggrSel>;
 using FAggrRowOp = OpArgs<primitives::FAggrRow>;
 using FAggrInitOp = OpArgs<primitives::FAggrInit>;
+
+// FAggr signature: pos_t(pos_t n, void* result[], void* param1, size_t offset)
+// args tuple:  <0> = void** result (htMatches ptr), <1> = void* param1 (col data), <2> = size_t offset
+struct FAggrOp : public OpArgs<primitives::FAggr> {
+   using Base = OpArgs<primitives::FAggr>;
+   size_t elemSize = 0;
+   primitives::FAggr rawFn;
+   FAggrOp(primitives::FAggr f, void** result, void* param1, size_t offset)
+       : Base(f, result, param1, offset), rawFn(f) {}
+   FAggrOp(primitives::FAggr f, void** result, void* param1, size_t offset,
+           size_t es)
+       : Base(f, result, param1, offset), rawFn(f), elemSize(es) {}
+};
+
+// FAggrSel signature: pos_t(pos_t n, void* result[], pos_t* sel, void* param1, size_t offset)
+// args tuple:  <0> = void** result (htMatches ptr), <1> = pos_t* sel, <2> = void* param1 (col data), <3> = size_t offset
+struct FAggrSelOp : public OpArgs<primitives::FAggrSel> {
+   using Base = OpArgs<primitives::FAggrSel>;
+   primitives::FAggrSel rawFn;
+   FAggrSelOp(primitives::FAggrSel f, void** result, pos_t* sel, void* param1,
+              size_t offset)
+       : Base(f, result, sel, param1, offset), rawFn(f) {}
+};
+
 using FPartitionByKeyOp = OpArgs<primitives::FPartitionByKey>;
 using FPartitionByKeySelOp = OpArgs<primitives::FPartitionByKeySel>;
 using FPartitionByKeyRowOp = OpArgs<primitives::FPartitionByKeyRow>;

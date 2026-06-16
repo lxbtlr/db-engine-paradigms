@@ -338,8 +338,33 @@ pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
 
 #endif
 
+pos_t sel_less_equal_int32_t_col_int32_t_val_avx512_impl(pos_t n, pos_t* RES result,
+                                                   int32_t* RES param1,
+                                                   int32_t* RES param2) {
+   static_assert(sizeof(pos_t) == 4,
+                 "This implementation only supports sizeof(pos_t) == 4");
+   uint64_t found = 0;
+   size_t rest = n % 16;
+   auto ids =
+       _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+   auto con = *param2;
+   auto consts = _mm512_set1_epi32(con);
+   for (uint64_t i = 0; i < n - rest; i += 16) {
+      Vec8u in(param1 + i);
+      mask16_t le = _mm512_cmp_epi32_mask(in, consts, 2); // _MM_CMPINT_LE
+      _mm512_mask_compressstoreu_epi32(result + found, le, ids);
+      found += __builtin_popcount(le);
+      ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
+   }
+   for (uint64_t i = n - rest; i < n; ++i)
+      if (param1[i] <= con) result[found++] = i;
+   return found;
+}
+
 F3 sel_less_int32_t_col_int32_t_val_avx512 =
     (F3)&sel_less_int32_t_col_int32_t_val_avx512_impl;
+F3 sel_less_equal_int32_t_col_int32_t_val_avx512 =
+    (F3)&sel_less_equal_int32_t_col_int32_t_val_avx512_impl;
 F4 selsel_greater_equal_int32_t_col_int32_t_val_avx512 =
     (F4)&selsel_greater_equal_int32_t_col_int32_t_val_avx512_impl;
 F4 selsel_less_int64_t_col_int64_t_val_avx512 =
