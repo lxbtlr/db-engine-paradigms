@@ -24,7 +24,15 @@ OPTION(AVX512EXPERIMENTS OFF)
 OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
+OPTION(NUMA_POOLS "Enable NUMA-aware memory pools (one pool per NUMA node)" OFF)
+OPTION(NUMA_MBIND "Enable mbind() to bind memory to NUMA nodes (requires NUMA_POOLS and libnuma)" OFF)
 
+
+OPTION(STRESS_TEST "Enable Q1 stress test with 20 accumulators to probe register pressure" OFF)
+IF(STRESS_TEST)
+  ADD_DEFINITIONS(-DSTRESS_TEST)
+  message(STATUS "Q1 stress test enabled (20 accumulators)")
+ENDIF(STRESS_TEST)
 
 # Only set defaults if they aren't provided by the command line (sweep script)
 if(NOT CMAKE_CXX_FLAGS OR CMAKE_CXX_FLAGS STREQUAL "")
@@ -80,8 +88,43 @@ IF(HASH_SIZE_32)
 ELSE()
   ADD_DEFINITIONS(-DHASH_SIZE=64)
 ENDIF()
+IF(NUMA_POOLS)
+  ADD_DEFINITIONS(-DNUMA_POOLS)
+  message(STATUS "NUMA-aware memory pools enabled")
 
+  IF(NUMA_MBIND)
+    ADD_DEFINITIONS(-DNUMA_MBIND)
+    # Link against libnuma for mbind() support
+    # Try to find the library in standard locations
+    find_library(NUMA_LIBRARY NAMES numa PATHS /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu)
 
+    if(NUMA_LIBRARY)
+      message(STATUS "NUMA mbind() memory binding enabled (libnuma found: ${NUMA_LIBRARY})")
+      set(NUMA_LINK_LIBRARIES ${NUMA_LIBRARY})
+    else()
+      # Fallback: just use -lnuma and let the linker find it
+      message(STATUS "NUMA mbind() memory binding enabled (using -lnuma)")
+      set(NUMA_LINK_LIBRARIES "numa")
+    endif()
+  ELSE()
+    set(NUMA_LINK_LIBRARIES "")
+  ENDIF(NUMA_MBIND)
+ELSE()
+  set(NUMA_LINK_LIBRARIES "")
+ENDIF(NUMA_POOLS)
+
+IF(NUMA_LATENCY)
+  ADD_DEFINITIONS(-DNUMA_LATENCY)
+  # NUMA_LATENCY uses the consolidated schedule, which requires the NUMA_POOLS
+  # regionOf() mapping. Inject it if not already defined via NUMA_POOLS.
+  IF(NOT NUMA_POOLS)
+    ADD_DEFINITIONS(-DNUMA_POOLS)
+  ENDIF()
+  message(STATUS "NUMA schedule: consolidated (latency-optimised, threads packed per socket)")
+ELSE()
+  ADD_DEFINITIONS(-DNUMA_BANDWIDTH)
+  message(STATUS "NUMA schedule: fan-out (bandwidth, default)")
+ENDIF(NUMA_LATENCY)
 
 IF(AUTOVECTORIZE)
   if(CMAKE_C_COMPILER STREQUAL "clang") 
@@ -174,6 +217,11 @@ target_include_directories(common PUBLIC
     PRIVATE src)
                                                     
 target_link_libraries(common PUBLIC timers)
+
+# Link libnuma if NUMA_MBIND is enabled
+if(NUMA_LINK_LIBRARIES)
+  target_link_libraries(common ${NUMA_LINK_LIBRARIES})
+endif()
 
 
 set(HYPER_TRANSLATORS

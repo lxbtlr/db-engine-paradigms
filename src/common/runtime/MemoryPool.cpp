@@ -20,7 +20,11 @@ GlobalPool::~GlobalPool() {
 }
 
 GlobalPool::Chunk* GlobalPool::newChunk(size_t size) {
+#if defined(NUMA_POOLS) && defined(NUMA_MBIND)
+   return new (mem::malloc_huge(size + sizeof(Chunk), numaNode)) Chunk(size);
+#else
    return new (mem::malloc_huge(size + sizeof(Chunk))) Chunk(size);
+#endif
 }
 
 void* GlobalPool::allocate(size_t size) {

@@ -139,8 +139,16 @@ template <typename PAYLOAD> class DebugOperator : public UnaryOperator {
 class Scan : public Operator {
  public:
    struct Shared : public SharedState {
-      std::atomic<size_t> pos;
-      Shared() : pos(0){};
+      // One atomic counter per NUMA region, padded to a cache line each to
+      // prevent false sharing between regions.  fetch_add uses relaxed order:
+      // the counter only gates which chunk a thread claims, and the actual
+      // data access imposes the necessary ordering through the column pointer
+      // arithmetic that follows.
+      struct alignas(64) PaddedAtomic {
+         std::atomic<size_t> val{0};
+      };
+      std::array<PaddedAtomic, runtime::NUM_NUMA_REGIONS> pos;
+      Shared() = default;
    };
 
  private:
@@ -298,9 +306,12 @@ class HashGroup : public UnaryOperator {
 
    template <typename T> class GroupLookup {
 
-      /// Find entries in ht for groupHashes.
-      /// Found entries are written to htMatches, missing entries
-      /// are added to groupsNotFound
+      /// Pass 1 of lookup: for each tuple, prefetch and load the chain head
+      /// from the HT into htMatches[i]. No comparison is done here — all n
+      /// tuples are written to groupsFound as candidates.
+      void htProbe(pos_t n, decltype(ht) & ht);
+      /// Pass 2 of lookup: compare hashes in htMatches against groupHashes,
+      /// classify into groupsFound (hit) or groupsNotFound (miss).
       pos_t htLookup(pos_t n, decltype(ht) & ht);
       /// Follows chains in ht for entries in keysNEq
       pos_t htFollow(decltype(ht) & ht);
@@ -410,12 +421,35 @@ class HashGroup : public UnaryOperator {
 };
 
 template <typename T>
+void HashGroup::GroupLookup<T>::htProbe(pos_t n, runtime::Hashmap& ht) {
+   // Pass 1: scatter — load chain heads for all n tuples into htMatches.
+   // Prefetch distance of 16 keeps ~16 cache misses in flight, hiding the
+   // latency of scattered HT bucket loads before htLookup inspects them.
+   static constexpr pos_t PREFETCH_DIST = 16;
+
+   const pos_t primeEnd = std::min(n, PREFETCH_DIST);
+   for (pos_t j = 0; j < primeEnd; ++j) {
+      __builtin_prefetch(&ht.entries[self()->hashForTuple(j) & ht.mask], 0, 1);
+   }
+
+   for (pos_t i = 0; i < n; ++i) {
+      if (i + PREFETCH_DIST < n)
+         __builtin_prefetch(&ht.entries[self()->hashForTuple(i + PREFETCH_DIST) & ht.mask], 0, 1);
+      htMatches[i] = ht.find_chain(self()->hashForTuple(i));
+      groupsFound[i] = i; // all tuples are candidates until htLookup filters them
+   }
+}
+
+template <typename T>
 pos_t INTERPRET_SEPARATE
-HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
+HashGroup::GroupLookup<T>::htLookup(pos_t n, decltype(ht) & ht) {
+   // Pass 2: compare — htMatches is already populated by htProbe.
+   // Walk each chain head and classify into groupsFound (hash match) or
+   // groupsNotFound (empty bucket or no hash match in chain).
    pos_t found = 0;
-   for (size_t i = 0; i < n;) {
+   for (pos_t i = 0; i < n; ++i) {
       auto hash = self()->hashForTuple(i);
-      auto el = ht.find_chain(hash);
+      auto el = htMatches[i];
       if (el != ht.end()) {
          if (el->hash == hash) {
             htMatches[i] = el;
@@ -430,8 +464,7 @@ HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
             }
       }
       groupsNotFound->push_back(i);
-   nextChain:
-      ++i;
+   nextChain:;
    }
    return found;
 }
@@ -463,7 +496,11 @@ pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    keysNEq->clear();
    groupsNotFound->clear();
+   // Pass 1: prefetch + load all chain heads into htMatches (no comparison)
+   htProbe(n, ht);
+   // Pass 2: hash comparison + chain walk over already-loaded htMatches
    auto found = htLookup(n, ht);
+   // Pass 3: key equality check over candidates
    auto keysEqual = keyEquality.evaluate(found);
    while (keysNEq->size()) {
       found = htFollow(ht);

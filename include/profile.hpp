@@ -12,8 +12,8 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-#include <algorithm>
 #include "timer.hpp"
+#include <algorithm>
 #include <asm/unistd.h>
 #include <fstream>
 #include <linux/perf_event.h>
@@ -76,7 +76,6 @@ inline int resolve_event(const char* str, struct perf_event_attr* pe) {
    (void)str;
    (void)pe;
    return -1;
-
 }
 #endif
 
@@ -155,6 +154,8 @@ struct PerfEvents {
                  (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+         add("stores", "mem_inst_retired.all_stores");
+         add("loads", "mem_inst_retired.all_loads");
       }
       add("task-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK);
 #endif
@@ -381,7 +382,7 @@ struct PerfEvents {
    double operator[](std::string name) { return event_map[name].readCounter(); }
 
    void timeAndProfile(std::string s, uint64_t count, std::function<void()> fn,
-                       uint64_t repetitions, bool mem = false);
+                       uint64_t repetitions = 1, bool mem = false);
 };
 #endif
 
@@ -416,6 +417,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    uint64_t memStart = mem ? getCurrentRSS() : 0;
 
    //long double runtime = 0;
+   double runtime = 0;
    double min_runtime = std::numeric_limits<double>::max();
 
 #ifdef USE_MIN_MODE
@@ -443,18 +445,11 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
 #else
    // Original Average Mode: Measure all repetitions in one batch
    startAll();
-   long double start = gettime();
-   for (size_t i = 0; i < repetitions; i++){ 
-      asm volatile("" : : "r"(i) : "memory");
-      fn();
-      asm volatile("" ::: "memory");  // clobber after as well 
-   };
-   long double end = gettime();//timers::read_strict();//
+   double start = gettime();
+   for (size_t i = 0; i < repetitions; i++) fn();
+   double end = gettime();
    readAll();
-
-   long double runtime = (double) (end - start) ;
-
-   //runtime = end - start;
+   runtime = end - start;
    double effective_reps = static_cast<double>(repetitions);
 #endif
 
@@ -474,7 +469,10 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                 << "," << std::setw(printFieldWidth) << "CPUs"
                 << "," << std::setw(printFieldWidth) << "IPC"
                 << "," << std::setw(printFieldWidth) << "GHz"
-                << "," << std::setw(printFieldWidth) << "Bandwidth" << ",";
+                << "," << std::setw(printFieldWidth) << "Bandwidth" 
+                //<< "," << std::setw(printFieldWidth) << "stores"
+                //<< "," << std::setw(printFieldWidth) << "loads"
+                << ",";
       for (auto& n : ordered_names)
          std::cout << std::setw(printFieldWidth) << n << ",";
       std::cout << std::endl;
@@ -491,7 +489,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    double be = 100.0 - (fe + spec + ret);
    double ipc = (*this)["instr."] / (*this)["cycles"];
    std::cout << std::setw(printFieldWidth)
-             << (runtime  * 1e3  / (min_mode ? 1 : repetitions)) << ",";
+             << (runtime * 1e3 / (min_mode ? 1 : repetitions)) << ",";
    std::cout << std::fixed << std::setprecision(2) << std::setw(printFieldWidth)
              << fe << "%," << std::setw(printFieldWidth) << be << "%,"
              << std::setw(printFieldWidth) << spec << "%,"

@@ -23,6 +23,7 @@
 
 
 
+using namespace std;
 using namespace runtime;
 
 static void escape(void* p) { asm volatile("" : : "g"(p) : "memory"); }
@@ -113,8 +114,6 @@ int main(int argc, char* argv[]) {
 	    copy(istream_iterator<string>(iss), istream_iterator<string>(),
 			    insert_iterator<decltype(q)>(q, q.begin()));
     }
-
-
 
     tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
 
