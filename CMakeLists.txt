@@ -36,7 +36,8 @@ ENDIF(STRESS_TEST)
 
 # Only set defaults if they aren't provided by the command line (sweep script)
 if(NOT CMAKE_CXX_FLAGS OR CMAKE_CXX_FLAGS STREQUAL "")
-    set(CMAKE_CXX_FLAGS "-O3 -march=armv9-a+sve2+crypto -fPIC -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-O3 -march=armv8.2-a+simd+crypto -fPIC -fno-omit-frame-pointer")
+    #set(CMAKE_CXX_FLAGS "-O3 -march=armv9-a+sve2+crypto -fPIC -fno-omit-frame-pointer")
     #set(CMAKE_CXX_FLAGS "-O3 -march=armv9-a+sve2+crypto -mtune=neoverse-v2 -mcpu=neoverse-v2 -fPIC -fno-omit-frame-pointer")
 endif()
 
