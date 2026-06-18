@@ -39,7 +39,7 @@ for CXX_BIN in "${COMPILERS[@]}"; do
         else
             ARCH_FLAGS="-march=armv8-a+simd -mtune=native"
         fi
-    elif [[ "$HOSTNAME" == *"rpi"* ]]; then
+    elif [[ "$HOSTNAME" == *"pi"* ]]; then
         ARCH_FLAGS="-march=armv8-a+crc+simd -moutline-atomics"
     elif [[ "$ARCH" == "aarch64" ]]; then
         ARCH_FLAGS="-march=armv8.2-a"
