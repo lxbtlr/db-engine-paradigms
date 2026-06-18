@@ -12,7 +12,7 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-
+#include "timer.hpp"
 #include <algorithm>
 #include <asm/unistd.h>
 #include <fstream>
@@ -70,13 +70,12 @@ inline char* get_cpu_str() {
       }
    }
    return cpu_buffer;
-}
+}}
 
 inline int resolve_event(const char* str, struct perf_event_attr* pe) {
    (void)str;
    (void)pe;
    return -1;
-}
 }
 #endif
 
@@ -267,7 +266,7 @@ struct PerfEvents {
    };
 
    void timeAndProfile(std::string s, uint64_t count, std::function<void()> fn,
-                       uint64_t repetitions = 1, bool mem = false);
+                       uint64_t repetitions, bool mem = false);
 };
 
 #else
@@ -388,10 +387,12 @@ struct PerfEvents {
 #endif
 
 // Shared utility functions
-inline double gettime() {
+inline long double gettime() {
    struct timeval now_tv;
    gettimeofday(&now_tv, NULL);
    return ((double)now_tv.tv_sec) + ((double)now_tv.tv_usec) / 1000000.0;
+   
+   //return timers::read_strict();
 }
 
 size_t getCurrentRSS() {
@@ -415,6 +416,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    for (int i = 0; i < 3; i++) fn(); // Warmup
    uint64_t memStart = mem ? getCurrentRSS() : 0;
 
+   //long double runtime = 0;
    double runtime = 0;
    double min_runtime = std::numeric_limits<double>::max();
 
@@ -423,12 +425,12 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    // Execute and measure each repetition individually to find the minimum
    for (size_t i = 0; i < repetitions; i++) {
       startAll();
-      double start = gettime();
+      long double start = gettime();
       fn();
-      double end = gettime();
+      long double end = gettime();
       readAll(); // This also stops/disables counters internally
 
-      double current_run = end - start;
+      long double current_run = (end - start) / 1000000;
       if (current_run < min_runtime) {
          min_runtime = current_run;
          // In this mode, readAll() captured the delta for exactly one 'fn'
@@ -514,8 +516,6 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    printAll(std::cout, count * repetitions);
    //}
 
-   // ... [Original scale/printing logic omitted for brevity, identical to your
-   // top block]
 #endif
    std::cout << std::endl;
 }
