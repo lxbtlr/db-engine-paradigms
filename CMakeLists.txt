@@ -7,12 +7,12 @@ else()
 endif()
 
 if(LINUX)
-set(CMAKE_C_COMPILER clang)
-set(CMAKE_CXX_COMPILER clang++)
+set(CMAKE_C_COMPILER clang-18)
+set(CMAKE_CXX_COMPILER clang++-18)
 ADD_DEFINITIONS(-D_LIBCPP_VERSION=1) # tbb clang compatibility
 else()
-set(CMAKE_C_COMPILER clang)
-set(CMAKE_CXX_COMPILER clang++)
+set(CMAKE_C_COMPILER clang18)
+set(CMAKE_CXX_COMPILER clang++-18)
 endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,7 +36,9 @@ ENDIF(STRESS_TEST)
 
 # Only set defaults if they aren't provided by the command line (sweep script)
 if(NOT CMAKE_CXX_FLAGS OR CMAKE_CXX_FLAGS STREQUAL "")
-    set(CMAKE_CXX_FLAGS "-O3 -mtune=native -fPIC -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-O3 -march=armv8.2-a+simd+crypto -fPIC -fno-omit-frame-pointer")
+    #set(CMAKE_CXX_FLAGS "-O3 -march=armv9-a+sve2+crypto -fPIC -fno-omit-frame-pointer")
+    #set(CMAKE_CXX_FLAGS "-O3 -march=armv9-a+sve2+crypto -mtune=neoverse-v2 -mcpu=neoverse-v2 -fPIC -fno-omit-frame-pointer")
 endif()
 
 if(NOT CMAKE_C_FLAGS OR CMAKE_C_FLAGS STREQUAL "")
@@ -186,6 +188,8 @@ find_package(TBB)
 include_directories(${TBB_INCLUDE_DIRS})
 include_directories("3rdparty/simde")
 
+add_subdirectory("3rdparty/timer")
+include_directories("3rdparty/timer/src")
 
 IF(LINUX)
   #add_subdirectory(3rdparty/jevents)
@@ -212,6 +216,9 @@ target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
+                                                    
+target_link_libraries(common PUBLIC timers)
+
 # Link libnuma if NUMA_MBIND is enabled
 if(NUMA_LINK_LIBRARIES)
   target_link_libraries(common ${NUMA_LINK_LIBRARIES})
