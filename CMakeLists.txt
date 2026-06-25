@@ -20,7 +20,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 OPTION(VECTORWISE_BRANCHING "Use branching vectorwise primitives" OFF)
 OPTION(AUTOVECTORIZE "Allow the compiler to autovectorize" OFF)
 OPTION(DATADIR "Directory containing testdata" "")
-OPTION(AVX512EXPERIMENTS OFF)
+OPTION(AVX512EXPERIMENTS ON)
 OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
@@ -36,7 +36,7 @@ ENDIF(STRESS_TEST)
 
 # Only set defaults if they aren't provided by the command line (sweep script)
 if(NOT CMAKE_CXX_FLAGS OR CMAKE_CXX_FLAGS STREQUAL "")
-    set(CMAKE_CXX_FLAGS "-O3 -march=native -mtune=native -fPIC -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "-O3 -mtune=native -fPIC -fno-omit-frame-pointer")
 endif()
 
 if(NOT CMAKE_C_FLAGS OR CMAKE_C_FLAGS STREQUAL "")
@@ -248,9 +248,9 @@ target_include_directories(vectorwise PUBLIC
     PRIVATE src)
 # Set architecture if AVX512 exerperiments are requested
 if(AVX512EXPERIMENTS)
-  SET_TARGET_PROPERTIES(vectorwise PROPERTIES
-    COMPILE_FLAGS "-march=skylake-avx512"
-  )
+	#SET_TARGET_PROPERTIES(vectorwise PROPERTIES
+  	#  COMPILE_FLAGS  #"-march=skylake-avx512"
+  	#)
 endif()
 target_link_libraries(vectorwise common)
 

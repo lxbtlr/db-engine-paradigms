@@ -12,12 +12,17 @@
 namespace vectorwise {
 namespace primitives {
 
-#if !defined(simde_mm256_movm_epi32) && defined(_mm256_movm_epi32)
-    #define simde_mm256_movm_epi32 _mm256_movm_epi32
-#elif !defined(simde_mm256_movm_epi32)
-    // Fallback if neither is defined (aggressive but keeps you building)
-    #define simde_mm256_movm_epi32(mask) _mm256_set1_epi32(-(int32_t)(mask))
+#ifndef SIMDE_ENABLE_NATIVE_ALIASES
+#define SIMDE_ENABLE_NATIVE_ALIASES
 #endif
+
+
+// #if !defined(simde_mm256_movm_epi32) && defined(_mm256_movm_epi32)
+//     #define simde_mm256_movm_epi32 _mm256_movm_epi32
+// #elif !defined(simde_mm256_movm_epi32)
+//     // Fallback if neither is defined (aggressive but keeps you building)
+//     #define simde_mm256_movm_epi32(mask) _mm256_set1_epi32(-(int32_t)(mask))
+// #endif
 
 
 //------------------------------------------------------------------------------
@@ -512,18 +517,18 @@ pos_t hash4(pos_t n, hash_t* RES result, T* RES input)
    Vec8u seeds(seed);
    for (uint64_t i = 0; i < n - rest; i += 8) {
       Vec8u in(_mm512_cvtepu32_epi64(
-          _mm256_loadu_si256((const __m256i*)(input + i))));
+          simde_mm256_loadu_si256((const __m256i*)(input + i))));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       // _mm512_store_epi64(result + i, hashes);
-      _mm512_mask_storeu_epi64(result + i, ~0, hashes);
+      simde_mm512_mask_storeu_epi64(result + i, ~0, hashes);
    }
    if (rest) {
       mask16_t remaining = (1 << rest) - 1;
-      Vec8u in(_mm512_cvtepu32_epi64(
-          _mm256_maskz_loadu_epi32(remaining, input + n - rest)));
+      Vec8u in(simde_mm512_cvtepu32_epi64(
+          simde_mm256_maskz_loadu_epi32(remaining, input + n - rest)));
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
+      simde_mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
    return n;
 }
@@ -540,13 +545,13 @@ pos_t hash4_16(pos_t n, hash_t* RES result, T* RES input)
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       // _mm512_store_epi64(result + i, hashes);
-      _mm512_mask_storeu_epi64(result + i, ~0, hashes);
+      simde_mm512_mask_storeu_epi64(result + i, ~0, hashes);
    }
    if (rest) {
       mask16_t remaining = (1 << rest) - 1;
       Vec16u in(input + n - rest);
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
+      simde_mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
    return n;
 }
@@ -559,20 +564,20 @@ pos_t rehash4(pos_t n, hash_t* RES result, T* RES input)
    size_t rest = n % 8;
    for (uint64_t i = 0; i < n - rest; i += 8) {
       Vec8u seeds(result + i);
-      Vec8u in(_mm512_cvtepu32_epi64(
-          _mm256_loadu_si256((const __m256i*)(input + i))));
+      Vec8u in(simde_mm512_cvtepu32_epi64(
+          simde_mm256_loadu_si256((const __m256i*)(input + i))));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       // _mm512_store_epi64(result + i, hashes);
-      _mm512_mask_storeu_epi64(result + i, ~0, hashes);
+      simde_mm512_mask_storeu_epi64(result + i, ~0, hashes);
    }
    if (rest) {
       mask16_t remaining = (1 << rest) - 1;
       Vec8u seeds = _mm512_maskz_loadu_epi64(remaining, result + n - rest);
       Vec8u in(_mm512_cvtepu32_epi64(
-          _mm256_maskz_loadu_epi32(remaining, input + n - rest)));
+          simde_mm256_maskz_loadu_epi32(remaining, input + n - rest)));
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
+      simde_mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
    return n;
 }
@@ -589,14 +594,14 @@ pos_t rehash4_16(pos_t n, hash_t* RES result, T* RES input)
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       // _mm512_store_epi64(result + i, hashes);
-      _mm512_mask_storeu_epi64(result + i, ~0, hashes);
+      simde_mm512_mask_storeu_epi64(result + i, ~0, hashes);
    }
    if (rest) {
       mask16_t remaining = (1 << rest) - 1;
-      Vec16u seeds = _mm512_maskz_loadu_epi64(remaining, result + n - rest);
+      Vec16u seeds = simde_mm512_maskz_loadu_epi64(remaining, result + n - rest);
       Vec16u in(input + n - rest);
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
+      simde_mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
    return n;
 }
@@ -610,21 +615,21 @@ pos_t hash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
    Vec8u seeds(seed);
    mask16_t all = ~0;
    for (uint64_t i = 0; i < n - rest; i += 8) {
-      auto inSels = _mm256_loadu_si256((const __m256i*)(inSel + i));
-      Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)all), 4));
+      auto inSels = simde_mm256_loadu_si256((const __m256i*)(inSel + i));
+      Vec8u in = simde_mm512_cvtepu32_epi64(
+          simde_mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)all), 4));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
-      _mm512_mask_storeu_epi64(result + i, all, hashes);
+      simde_mm512_mask_storeu_epi64(result + i, all, hashes);
    }
    if (rest) {
       mask16_t remaining = (1 << rest) - 1;
-      auto inSels = _mm256_loadu_si256(
+      auto inSels = simde_mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
-      Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)remaining), 4));
+      Vec8u in = simde_mm512_cvtepu32_epi64(
+          simde_mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)remaining), 4));
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
+      simde_mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
    return n;
 }
@@ -639,16 +644,16 @@ pos_t hash4_16_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
    mask16_t all = ~0;
    for (uint64_t i = 0; i < n - rest; i += 16) {
       Vec16u inSels(inSel + i);
-      Vec16u in = _mm512_i32gather_epi32(inSels, input, 4);
+      Vec16u in = simde_mm512_i32gather_epi32(inSels, input, 4);
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_storeu_epi64(result + i, all, hashes);
+      simde_mm512_mask_storeu_epi64(result + i, all, hashes);
    }
    if (rest) {
       mask16_t remaining = (1 << rest) - 1;
       Vec16u inSels(inSel + n - rest);
-      Vec16u in = _mm512_mask_i32gather_epi32(inSels, all, inSels, input, 4);
+      Vec16u in = simde_mm512_mask_i32gather_epi32(inSels, all, inSels, input, 4);
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
+      simde_mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
    return n;
 }
@@ -661,22 +666,22 @@ pos_t rehash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
    size_t rest = n % 8;
    for (uint64_t i = 0; i < n - rest; i += 8) {
       Vec8u seeds(result + i);
-      auto inSels = _mm256_loadu_si256((const __m256i*)(inSel + i));
-      Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)~0), 4));
+      auto inSels = simde_mm256_loadu_si256((const __m256i*)(inSel + i));
+      Vec8u in = simde_mm512_cvtepu32_epi64(
+          simde_mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)~0), 4));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
-      _mm512_mask_storeu_epi64(result + i, ~0, hashes); // ??
+      simde_mm512_mask_storeu_epi64(result + i, ~0, hashes); // ??
    }
    if (rest) {
       mask16_t remaining = (1 << rest) - 1;
-      Vec8u seeds = _mm512_maskz_loadu_epi64(remaining, result + n - rest);
-      auto inSels = _mm256_loadu_si256(
+      Vec8u seeds = simde_mm512_maskz_loadu_epi64(remaining, result + n - rest);
+      auto inSels = simde_mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
-      Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)remaining), 4));
+      Vec8u in = simde_mm512_cvtepu32_epi64(
+          simde_mm256_mask_i32gather_epi32(inSels, input, inSels, simde_mm256_movm_epi32((mask8_t)remaining), 4));
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes); // ??
+      simde_mm512_mask_storeu_epi64(result + n - rest, remaining, hashes); // ??
    }
    return n;
 }
@@ -691,19 +696,19 @@ pos_t rehash4_16_sel(pos_t n, pos_t* RES inSel, hash_t* RES result,
    for (uint64_t i = 0; i < n - rest; i += 16) {
       Vec16u seeds(result + i);
       Vec16u inSels(inSel + i);
-      Vec16u in = _mm512_i32gather_epi32(inSels, input, 4);
+      Vec16u in = simde_mm512_i32gather_epi32(inSels, input, 4);
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
-      _mm512_mask_storeu_epi64(result + i, ~0, hashes); // ??
+      simde_mm512_mask_storeu_epi64(result + i, ~0, hashes); // ??
    }
    if (rest) {
       mask16_t remaining = (1 << rest) - 1;
-      Vec16u seeds = _mm512_maskz_loadu_epi64(remaining, result + n - rest);
+      Vec16u seeds = simde_mm512_maskz_loadu_epi64(remaining, result + n - rest);
       Vec16u inSels(inSel + n - rest);
       Vec16u in =
-          _mm512_mask_i32gather_epi32(inSels, remaining, inSels, input, 4);
+          simde_mm512_mask_i32gather_epi32(inSels, remaining, inSels, input, 4);
       auto hashes = Op().hashKey(in, seeds);
-      _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
+      simde_mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
    return n;
 }
