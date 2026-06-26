@@ -19,11 +19,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 OPTION(VECTORWISE_BRANCHING "Use branching vectorwise primitives" OFF)
 OPTION(AUTOVECTORIZE "Allow the compiler to autovectorize" OFF)
-OPTION(DATADIR "Directory containing testdata" "")
-OPTION(AVX512EXPERIMENTS ON)
-OPTION(HARDWARE_BENCHMARKS OFF)
-OPTION(INTERPRET_SEPARATE OFF)
-OPTION(HASH_SIZE_32 OFF)
+OPTION(DATADIR "Directory containing testdata" "/tank/alexb/swole/tpch/sf1")
+OPTION(AVX512EXPERIMENTS "Enable the AVX512 experiments" ON)
+OPTION(HARDWARE_BENCHMARKS "Enable the Hardware Benchmarks" OFF)
+OPTION(INTERPRET_SEPARATE "Enable the Interpret_separate option" OFF)
+OPTION(HASH_SIZE_32 "Enable the 32 Hash mode" OFF)
 OPTION(NUMA_POOLS "Enable NUMA-aware memory pools (one pool per NUMA node)" OFF)
 OPTION(NUMA_MBIND "Enable mbind() to bind memory to NUMA nodes (requires NUMA_POOLS and libnuma)" OFF)
 
@@ -256,7 +256,7 @@ target_include_directories(vectorwise PUBLIC
 # Set architecture if AVX512 exerperiments are requested
 if(AVX512EXPERIMENTS)
 	#SET_TARGET_PROPERTIES(vectorwise PROPERTIES
-  	#  COMPILE_FLAGS  #"-march=skylake-avx512"
+  	#  COMPILE_FLAGS  #"-march=native -mtune=native"
   	#)
 endif()
 target_link_libraries(vectorwise common)
@@ -365,7 +365,7 @@ endif()
 if(AVX512EXPERIMENTS)
   add_executable(simdJoin src/benchmarks/simdJoin.cpp)
   SET_TARGET_PROPERTIES(simdJoin PROPERTIES
-    COMPILE_FLAGS "-march=skylake-avx512"
+    COMPILE_FLAGS "-march=native -mtune=native"
     )
   target_include_directories(simdJoin PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -378,7 +378,7 @@ if(AVX512EXPERIMENTS)
     src/benchmarks/primitives/simdselection.cpp
     )
   SET_TARGET_PROPERTIES(run_simd PROPERTIES
-    COMPILE_FLAGS "-march=skylake-avx512"
+    COMPILE_FLAGS "-mcpu=native -mtune=native"
     )
   target_include_directories(run_simd PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -390,7 +390,7 @@ if(AVX512EXPERIMENTS)
     src/benchmarks/primitives/joinmicrobench.cpp
     )
   SET_TARGET_PROPERTIES(run_join PROPERTIES
-    COMPILE_FLAGS "-march=skylake-avx512"
+    COMPILE_FLAGS "-mcpu=native -mtune=native"
     )
   target_include_directories(run_join PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

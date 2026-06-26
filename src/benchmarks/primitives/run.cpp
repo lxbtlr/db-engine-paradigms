@@ -12,6 +12,11 @@ using namespace std;
 using vectorwise::pos_t;
 using namespace vectorwise::primitives;
 
+#ifndef SIMDE_ENABLE_NATIVE_ALIASES
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#endif
+
+
 template <typename T>
 void putRandom(vector<T>& v, size_t min = 0, size_t max = 99) {
    mt19937 mersenne_engine(1337);
