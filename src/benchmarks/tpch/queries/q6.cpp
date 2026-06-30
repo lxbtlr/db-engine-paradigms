@@ -28,7 +28,8 @@ extern "C" {
 
 using namespace runtime;
 using namespace std;
-NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
+//NOVECTORIZE 
+Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
    Relation result;
    result.insert("revenue", make_unique<algebra::Numeric>(12, 4));
 
@@ -54,20 +55,21 @@ NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
        tbb::blocked_range<size_t>(0, rel.nrTuples), types::Numeric<12, 4>(0),
        [&](const tbb::blocked_range<size_t>& r,
            const types::Numeric<12, 4>& s) {
-          start_flag();
           auto revenue = s;
           for (size_t i = r.begin(), end = r.end(); i != end; ++i) {
              auto& l_shipdate = l_shipdate_col[i];
              auto& l_quantity = l_quantity_col[i];
              auto& l_extendedprice = l_extendedprice_col[i];
              auto& l_discount = l_discount_col[i];
-
+// dude, trust me -- this works better
+//             if (((l_shipdate >= c1) & (l_shipdate < c2) ) &&  
+//                ((l_discount >= c3) & (l_discount <= c4)) && 
+//                (l_quantity < c5)) {
              if ((l_shipdate >= c1) & (l_shipdate < c2) & (l_quantity < c5) &
                  (l_discount >= c3) & (l_discount <= c4)) {
                 // --- aggregation
                 revenue += l_extendedprice * l_discount;
              }
-          stop_flag();
           }
           return revenue;
        },

@@ -157,6 +157,7 @@ struct PerfEvents {
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
          add("stores", "mem_inst_retired.all_stores");
          add("loads", "mem_inst_retired.all_loads");
+         add("mem_stall", "cycle_activity.stalls_mem_any");
       }
       add("task-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK);
 #endif
