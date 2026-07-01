@@ -571,8 +571,8 @@ pos_t HashGroup::GroupLookup<T>::htFollow(runtime::Hashmap& ht)
             groupsFound[found++] = idx;
             goto nextChain;
          }
-         groupsNotFound->push_back(i);
       }
+      groupsNotFound->push_back(idx);
    nextChain:
       ++i;
    }
