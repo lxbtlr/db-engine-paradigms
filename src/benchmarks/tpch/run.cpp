@@ -115,7 +115,7 @@ int main(int argc, char* argv[]) {
     importTPCH(tpchPath, tpch);
 
     // Now, filter the master query set
-    std::unordered_set<std::string> allQueries = {"1h", "1v", "3h", "3v", "5h", "5v", "6h", "6v" ,"18h", "18v", "9h", "9v"};
+    std::unordered_set<std::string> allQueries = {"1h", "1v", "1p", "3h", "3v", "5h", "5v", "6h", "6v" ,"18h", "18v", "9h", "9v"};
     std::unordered_set<std::string> q;
 
     if (!selectedQuery.empty() && !selectedEngine.empty()) {
@@ -123,9 +123,11 @@ int main(int argc, char* argv[]) {
         std::string target = selectedQuery + selectedEngine;
         if (allQueries.count(target)) q.insert(target);
     } else if (!selectedQuery.empty()) {
-        // Run all engines for one query, e.g., "1h" and "1v"
-        if (allQueries.count(selectedQuery + "h")) q.insert(selectedQuery + "h");
-        if (allQueries.count(selectedQuery + "v")) q.insert(selectedQuery + "v");
+        // Run all engines for one query
+        for (auto& aq : allQueries) {
+            if (aq.substr(0, selectedQuery.size()) == selectedQuery)
+                q.insert(aq);
+        }
     } else {
         // Default: Run everything
         q = allQueries;
@@ -176,6 +178,19 @@ int main(int argc, char* argv[]) {
       auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
 #endif
       dumpQ1Result("vectorwise", vResult.get());
+   }
+   if (q.count("1p")) {
+      e.timeAndProfile("q1 packed    ", nrTuples(tpch, {"lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          auto result =
+                              q1_vectorwise_packed(tpch, nrThreads, vectorSize);
+                          escape(&result);
+                       },
+                       repetitions);
+      // Correctness dump
+      auto pResult = q1_vectorwise_packed(tpch, nrThreads, vectorSize);
+      dumpQ1Result("packed", pResult.get());
    }
    if (q.count("3h"))
       e.timeAndProfile("q3 hyper     ",

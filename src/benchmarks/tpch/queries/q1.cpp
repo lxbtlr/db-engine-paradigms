@@ -230,6 +230,139 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
    return r;
 }
 
+std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryPacked() {
+   using namespace vectorwise;
+   auto result = Result();
+   previous = result.resultWriter.shared.result->participate();
+
+   auto r = make_unique<Q1>();
+   auto lineitem = Scan("lineitem");
+   Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
+                             Buffer(sel_date, sizeof(pos_t)),
+                             Column(lineitem, "l_shipdate"), Value(&r->c1)));
+   Project()
+       .addExpression(
+           Expression()
+               .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
+                      Buffer(sel_date),
+                      Buffer(result_proj_minus, sizeof(int64_t)),
+                      Value(&r->one), Column(lineitem, "l_discount"))
+               .addOp(conf.proj_multiplies_sel_int64_t_col_int64_t_col(),
+                      Buffer(sel_date), Buffer(disc_price, sizeof(int64_t)),
+                      Column(lineitem, "l_extendedprice"),
+                      Buffer(result_proj_minus, sizeof(int64_t))))
+       .addExpression(
+           Expression()
+               .addOp(conf.proj_sel_plus_int64_t_col_int64_t_val(),
+                      Buffer(sel_date),
+                      Buffer(result_proj_plus, sizeof(int64_t)),
+                      Column(lineitem, "l_tax"), Value(&r->one))
+               .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
+                      Buffer(charge, sizeof(int64_t)),
+                      Buffer(disc_price, sizeof(int64_t)),
+                      Buffer(result_proj_plus, sizeof(int64_t))))
+       // Pack the two Char<1> key columns into a dense uint16_t buffer
+       .addExpression(
+           Expression().addOp(primitives::pack_sel_q1keys,
+                              Buffer(sel_date),
+                              Buffer(packed_key, sizeof(uint16_t)),
+                              Column(lineitem, "l_returnflag"),
+                              Column(lineitem, "l_linestatus")));
+   HashGroup()
+       .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
+       // Single packed uint16_t key replaces two separate Char<1> addKey calls
+       .addKey(Buffer(packed_key),
+               primitives::hash_uint16_t_col,
+               primitives::keys_not_equal_uint16_t_col,
+               primitives::partition_by_key_uint16_t_col,
+               primitives::scatter_sel_uint16_t_col,
+               primitives::keys_not_equal_row_uint16_t_col,
+               primitives::partition_by_key_row_uint16_t_col,
+               primitives::scatter_sel_row_uint16_t_col,
+               // Gather extracts returnflag (low byte) from the packed key
+               primitives::unpack_q1key_returnflag,
+               Buffer(returnflag, sizeof(Char_1)))
+       .padToAlign(sizeof(types::Numeric<12, 4>))
+       .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_disc_price, sizeof(types::Numeric<12, 4>)))
+       .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
+       .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_sel_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_qty, sizeof(types::Numeric<12, 2>)))
+       .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_sel_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_base_price, sizeof(types::Numeric<12, 2>)))
+       .addValue(Buffer(charge, sizeof(uint64_t)),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_count_star,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(count_order, sizeof(uint64_t)));
+
+   // Manually add a second gather to unpack linestatus from the packed key.
+   // The packed key is stored in the HT entry at the same offset as returnflag
+   // (it's a uint16_t; returnflag is byte 0, linestatus is byte 1).
+   // We need the entry offset of the packed key, which is
+   // sizeof(EntryHeader) since it's the first (and only) key.
+   {
+      auto entryOffset = sizeof(runtime::Hashmap::EntryHeader);
+      auto& op = *static_cast<vectorwise::HashGroup*>(
+          operatorStack.top().get());
+      auto gather_linestatus = std::make_unique<GatherOpVal>(
+          primitives::unpack_q1key_linestatus,
+          reinterpret_cast<void**>(op.globalAggregation.htMatches),
+          entryOffset, &op.globalAggregation.ht_entry_size,
+          Buffer(linestatus, sizeof(Char_1)));
+      op.gatherGroups.ops.push_back(std::move(gather_linestatus));
+   }
+
+   result.addValue("l_returnflag", Buffer(returnflag))
+       .addValue("l_linestatus", Buffer(linestatus))
+       .addValue("sum_qty", Buffer(sum_qty))
+       .addValue("sum_base_price", Buffer(sum_base_price))
+       .addValue("sum_disc_price", Buffer(sum_disc_price))
+       .addValue("sum_charge", Buffer(sum_charge))
+       .addValue("count_order", Buffer(count_order))
+       .finalize();
+
+   r->rootOp = popOperator();
+   return r;
+}
+
+std::unique_ptr<runtime::Query> q1_vectorwise_packed(Database& db,
+                                                     size_t nrThreads,
+                                                     size_t vectorSize) {
+   using namespace vectorwise;
+   WorkerGroup workers(nrThreads);
+   vectorwise::SharedStateManager shared;
+
+   std::unique_ptr<runtime::Query> result;
+   workers.run([&]() {
+      Q1Builder builder(db, shared, vectorSize);
+      auto query = builder.getQueryPacked();
+      query->rootOp->next();
+      auto leader = barrier();
+      if (leader)
+         result = move(
+             dynamic_cast<ResultWriter*>(query->rootOp.get())->shared.result);
+   });
+
+   return result;
+}
+
 std::unique_ptr<runtime::Query> q1_vectorwise(Database& db, size_t nrThreads,
                                               size_t vectorSize) {
    using namespace vectorwise;
