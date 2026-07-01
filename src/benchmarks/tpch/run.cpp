@@ -28,6 +28,39 @@ using namespace runtime;
 
 static void escape(void* p) { asm volatile("" : : "g"(p) : "memory"); }
 
+static void dumpQ1Result(const char* label, runtime::Query* query) {
+   if (!query || !query->result) return;
+   auto& rel = *query->result;
+   auto retAttr = rel.getAttribute("l_returnflag");
+   auto statusAttr = rel.getAttribute("l_linestatus");
+   auto qtyAttr = rel.getAttribute("sum_qty");
+   auto basePriceAttr = rel.getAttribute("sum_base_price");
+   auto discPriceAttr = rel.getAttribute("sum_disc_price");
+   auto chargeAttr = rel.getAttribute("sum_charge");
+   auto countAttr = rel.getAttribute("count_order");
+
+   fprintf(stderr, "\n=== Q1 Results [%s] ===\n", label);
+   fprintf(stderr, "%-4s %-4s %20s %20s %20s %20s %15s\n",
+           "ret", "stat", "sum_qty", "sum_base_price", "sum_disc_price",
+           "sum_charge", "count_order");
+   for (auto& block : rel) {
+      auto n = block.size();
+      auto ret = reinterpret_cast<types::Char<1>*>(block.data(retAttr));
+      auto status = reinterpret_cast<types::Char<1>*>(block.data(statusAttr));
+      auto qty = reinterpret_cast<int64_t*>(block.data(qtyAttr));
+      auto basePrice = reinterpret_cast<int64_t*>(block.data(basePriceAttr));
+      auto discPrice = reinterpret_cast<int64_t*>(block.data(discPriceAttr));
+      auto charge = reinterpret_cast<int64_t*>(block.data(chargeAttr));
+      auto count = reinterpret_cast<int64_t*>(block.data(countAttr));
+      for (size_t i = 0; i < n; ++i) {
+         fprintf(stderr, "%-4c %-4c %20ld %20ld %20ld %20ld %15ld\n",
+                 ret[i].value, status[i].value,
+                 qty[i], basePrice[i], discPrice[i], charge[i], count[i]);
+      }
+   }
+   fprintf(stderr, "=== END ===\n\n");
+}
+
 size_t nrTuples(Database& db, std::vector<std::string> tables) {
    size_t sum = 0;
    for (auto& table : tables) sum += db[table].nrTuples;
@@ -111,7 +144,7 @@ int main(int argc, char* argv[]) {
 
     tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
 
-   if (q.count("1h"))
+   if (q.count("1h")) {
       e.timeAndProfile("q1 hyper     ", nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
@@ -119,7 +152,11 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
-   if (q.count("1v"))
+      // Correctness dump
+      auto hResult = q1_hyper(tpch, nrThreads);
+      dumpQ1Result("hyper", hResult.get());
+   }
+   if (q.count("1v")) {
       e.timeAndProfile("q1 vectorwise", nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
@@ -133,6 +170,14 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
+      // Correctness dump
+#ifdef VW_SPLIT_HASHGROUP
+      auto vResult = q1_vectorwise_split(tpch, nrThreads, vectorSize);
+#else
+      auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
+#endif
+      dumpQ1Result("vectorwise", vResult.get());
+   }
    if (q.count("3h"))
       e.timeAndProfile("q3 hyper     ",
                        nrTuples(tpch, {"customer", "orders", "lineitem"}),
