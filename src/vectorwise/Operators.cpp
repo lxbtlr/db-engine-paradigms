@@ -96,15 +96,28 @@ size_t Scan::next() {
    return nextBatchSize;
 #else
    // Original single-counter cooperative work-stealing scan.
+   auto step = 1;
+
    if (vecInChunk == scanChunkSize) {
+      auto prevChunk = currentChunk;
       currentChunk = shared.pos.fetch_add(1, std::memory_order_relaxed);
+      auto chunkSkip = currentChunk - prevChunk;
+      if (needsInit) {
+         step = chunkSkip * scanChunkSize;
+         needsInit = false;
+      } else {
+         chunkSkip -= 1;
+         step = chunkSkip * scanChunkSize + 1;
+      }
       vecInChunk = 0;
    }
-   auto nextBegin = currentChunk * scanChunkSize * vecSize + vecInChunk * vecSize;
+
+   auto nextBegin = lastOffset + step * vecSize;
    if (nextBegin >= nrTuples) return EndOfStream;
    auto nextBatchSize = std::min(nrTuples - nextBegin, vecSize);
    for (auto& cons : consumers)
-      *cons.first = (void*)(*(uint8_t**)cons.first + cons.second);
+      *cons.first = (void*)(*(uint8_t**)cons.first + step * cons.second);
+   lastOffset = nextBegin;
    vecInChunk++;
    return nextBatchSize;
 #endif
