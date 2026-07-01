@@ -926,29 +926,38 @@ LUTGroup::LUTGroup(Shared& s) : shared(s) {}
 size_t LUTGroup::next() {
    if (!cont.consumed) {
       // Phase 1: consume all input, aggregate into thread-local LUT
-      localAccum.resize(LUT_SIZE * nValues, 0);
+      //
+      // Transposed layout: one contiguous LUT_SIZE array per value.
+      // accum[v][key] — each value's accumulators are contiguous so
+      // the inner loop is just base_ptr[key] += val, no multiply.
+      localAccumStorage.resize(LUT_SIZE * nValues, 0);
+      localAccum.resize(nValues);
+      for (size_t v = 0; v < nValues; ++v)
+         localAccum[v] = localAccumStorage.data() + v * LUT_SIZE;
       localOccupied.resize(LUT_SIZE, false);
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         // Mark occupied keys in one pass
-         for (pos_t i = 0; i < n; ++i)
-            localOccupied[packedKeys[i]] = true;
-         // Accumulate each value
+         // Per-value accumulation — each value gets its own tight loop
+         // over the packed keys with no multiply in the index.
          for (size_t v = 0; v < nValues; ++v) {
             auto& spec = valueSpecs[v];
+            auto* acc = localAccum[v];
             if (spec.isCount) {
                for (pos_t i = 0; i < n; ++i)
-                  localAccum[packedKeys[i] * nValues + v] += 1;
+                  acc[packedKeys[i]] += 1;
             } else if (spec.hasSel) {
                auto* col = reinterpret_cast<int64_t*>(spec.colData);
                for (pos_t i = 0; i < n; ++i)
-                  localAccum[packedKeys[i] * nValues + v] += col[selVec[i]];
+                  acc[packedKeys[i]] += col[selVec[i]];
             } else {
                auto* col = reinterpret_cast<int64_t*>(spec.colData);
                for (pos_t i = 0; i < n; ++i)
-                  localAccum[packedKeys[i] * nValues + v] += col[i];
+                  acc[packedKeys[i]] += col[i];
             }
          }
+         // Mark occupied (separate pass to keep inner loops clean)
+         for (pos_t i = 0; i < n; ++i)
+            localOccupied[packedKeys[i]] = true;
       }
 
       // Merge thread-local into global
@@ -956,19 +965,24 @@ size_t LUTGroup::next() {
          std::lock_guard<std::mutex> lock(shared.mergeMutex);
          if (!shared.globalInitialized) {
             shared.nValues = nValues;
-            shared.globalAccum.resize(LUT_SIZE * nValues, 0);
+            shared.globalAccum.resize(nValues);
+            for (size_t v = 0; v < nValues; ++v)
+               shared.globalAccum[v].resize(LUT_SIZE, 0);
             shared.globalOccupied.resize(LUT_SIZE, false);
             shared.globalInitialized = true;
          }
+         for (size_t v = 0; v < nValues; ++v) {
+            auto* src = localAccum[v];
+            auto* dst = shared.globalAccum[v].data();
+            for (size_t k = 0; k < LUT_SIZE; ++k)
+               dst[k] += src[k];
+         }
          for (size_t k = 0; k < LUT_SIZE; ++k) {
-            if (localOccupied[k]) {
+            if (localOccupied[k])
                shared.globalOccupied[k] = true;
-               for (size_t v = 0; v < nValues; ++v)
-                  shared.globalAccum[k * nValues + v] +=
-                      localAccum[k * nValues + v];
-            }
          }
       }
+      localAccumStorage.clear();
       localAccum.clear();
       localOccupied.clear();
 
@@ -988,13 +1002,11 @@ size_t LUTGroup::next() {
    for (; cont.lutPos < LUT_SIZE && produced < vecSize; ++cont.lutPos) {
       if (!shared.globalOccupied[cont.lutPos]) continue;
       uint16_t key = cont.lutPos;
-      // Unpack key into returnflag (byte 0) and linestatus (byte 1)
       retOut[produced].value = static_cast<char>(key & 0xFF);
       statOut[produced].value = static_cast<char>((key >> 8) & 0xFF);
-      // Copy aggregate values
       for (size_t v = 0; v < nValues; ++v) {
          auto* dst = reinterpret_cast<int64_t*>(outValues[v]);
-         dst[produced] = shared.globalAccum[cont.lutPos * nValues + v];
+         dst[produced] = shared.globalAccum[v][cont.lutPos];
       }
       ++produced;
    }

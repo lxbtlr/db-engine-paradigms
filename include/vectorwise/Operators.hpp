@@ -419,9 +419,9 @@ class LUTGroup : public UnaryOperator {
 
    struct Shared : SharedState {
       std::mutex mergeMutex;
-      /// Global accumulators: one row per possible key value.
-      /// Layout: [nValues * int64_t] per LUT slot.
-      std::vector<int64_t> globalAccum;
+      /// Global accumulators: transposed layout — accum[valueIdx][key].
+      /// Each value gets its own contiguous LUT_SIZE array.
+      std::vector<std::vector<int64_t>> globalAccum;
       /// Bitmap: which keys are occupied globally.
       std::vector<bool> globalOccupied;
       size_t nValues = 0;
@@ -434,8 +434,9 @@ class LUTGroup : public UnaryOperator {
    /// Number of int64_t aggregate values per group
    size_t nValues = 0;
 
-   /// Thread-local accumulators
-   std::vector<int64_t> localAccum;
+   /// Thread-local accumulators: transposed layout — accum[valueIdx][key]
+   std::vector<int64_t*> localAccum; // pointers to per-value arrays
+   std::vector<int64_t> localAccumStorage; // backing storage
    std::vector<bool> localOccupied;
 
    /// Packed key buffer (input from Project)
