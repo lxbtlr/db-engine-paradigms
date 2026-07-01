@@ -1,4 +1,5 @@
 #include "vectorwise/Operations.hpp"
+#include <cstring>
 
 namespace vectorwise {
 
@@ -88,5 +89,15 @@ pos_t F3_Op::run(pos_t n) {
 }
 pos_t F4_Op::run(pos_t n) {
    return operation(n, inputSelectionV, outputSelectionV, param1, param2);
+}
+
+pos_t ConcatOp::run(pos_t n) {
+   auto* s = reinterpret_cast<pos_t*>(sel);
+   auto* src = reinterpret_cast<uint8_t*>(in);
+   auto* dst = reinterpret_cast<uint8_t*>(out);
+   for (pos_t i = 0; i < n; ++i) {
+      std::memcpy(dst + out_size * i + offset, src + in_size * s[i], in_size);
+   }
+   return n;
 }
 }

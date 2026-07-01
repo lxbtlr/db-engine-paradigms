@@ -204,6 +204,17 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
    expression->ops.push_back(move(f4));
    return *this;
 }
+QueryBuilder::ExpressionBuilder&
+QueryBuilder::ExpressionBuilder::addConcat(DS sel, DS col, DS out,
+                                           size_t offset) {
+   auto concat = make_unique<ConcatOp>(sel, col, out,
+                                       col.dataSize, out.dataSize, offset);
+   sel.registerDS(reinterpret_cast<void**>(&concat->sel));
+   col.registerDS(reinterpret_cast<void**>(&concat->in));
+   expression->ops.push_back(move(concat));
+   return *this;
+}
+
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Expression>() {
    return move(expression);

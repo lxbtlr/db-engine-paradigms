@@ -263,11 +263,13 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryPacked() {
                       Buffer(result_proj_plus, sizeof(int64_t))))
        // Pack the two Char<1> key columns into a dense uint16_t buffer
        .addExpression(
-           Expression().addOp(primitives::pack_sel_void_1_1,
-                              Buffer(sel_date),
-                              Buffer(packed_key, sizeof(uint16_t)),
-                              Column(lineitem, "l_returnflag"),
-                              Column(lineitem, "l_linestatus")));
+           Expression()
+               .addConcat(Buffer(sel_date),
+                          Column(lineitem, "l_returnflag"),
+                          Buffer(packed_key, sizeof(uint16_t)), 0)
+               .addConcat(Buffer(sel_date),
+                          Column(lineitem, "l_linestatus"),
+                          Buffer(packed_key, sizeof(uint16_t)), 1));
    // LUT-based aggregation: packed key is used as direct array index.
    // No hashing, no hash table, no chain walking.
    LUTGroup()

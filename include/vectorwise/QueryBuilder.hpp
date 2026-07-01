@@ -158,6 +158,8 @@ class QueryBuilder {
       ExpressionBuilder& addOp(primitives::F2 op, DS a, DS b);
       ExpressionBuilder& addOp(primitives::F3 op, DS a, DS b, DS c);
       ExpressionBuilder& addOp(primitives::F4 op, DS a, DS b, DS c, DS d);
+      /// Concat: copy in_size bytes from col[sel[i]] into out at offset
+      ExpressionBuilder& addConcat(DS sel, DS col, DS out, size_t offset);
       operator std::unique_ptr<vectorwise::Expression>();
       operator std::unique_ptr<vectorwise::Aggregates>();
    };
