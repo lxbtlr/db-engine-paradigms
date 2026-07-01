@@ -936,26 +936,41 @@ size_t LUTGroup::next() {
          localAccum[v] = localAccumStorage.data() + v * LUT_SIZE;
       localOccupied.resize(LUT_SIZE, false);
 
+      // Pre-resolve column pointers so the hot loop has no indirection
+      // through valueSpecs (which is a deque with pointer chasing).
+      struct ResolvedVal {
+         int64_t* acc;
+         int64_t* col;
+         bool hasSel;
+         bool isCount;
+      };
+      auto resolved = std::vector<ResolvedVal>(nValues);
+      for (size_t v = 0; v < nValues; ++v) {
+         resolved[v].acc = localAccum[v];
+         resolved[v].col = reinterpret_cast<int64_t*>(valueSpecs[v].colData);
+         resolved[v].hasSel = valueSpecs[v].hasSel;
+         resolved[v].isCount = valueSpecs[v].isCount;
+      }
+
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         // Per-value accumulation — each value gets its own tight loop
-         // over the packed keys with no multiply in the index.
+         // Separate tight loops per value — no branches in inner loop.
+         // Each loop reads packedKeys once (stays in L1) and touches
+         // only its own accumulator array (4 hot cache lines).
          for (size_t v = 0; v < nValues; ++v) {
-            auto& spec = valueSpecs[v];
-            auto* acc = localAccum[v];
-            if (spec.isCount) {
+            auto* acc = resolved[v].acc;
+            if (resolved[v].isCount) {
                for (pos_t i = 0; i < n; ++i)
                   acc[packedKeys[i]] += 1;
-            } else if (spec.hasSel) {
-               auto* col = reinterpret_cast<int64_t*>(spec.colData);
+            } else if (resolved[v].hasSel) {
+               auto* col = resolved[v].col;
                for (pos_t i = 0; i < n; ++i)
                   acc[packedKeys[i]] += col[selVec[i]];
             } else {
-               auto* col = reinterpret_cast<int64_t*>(spec.colData);
+               auto* col = resolved[v].col;
                for (pos_t i = 0; i < n; ++i)
                   acc[packedKeys[i]] += col[i];
             }
          }
-         // Mark occupied (separate pass to keep inner loops clean)
          for (pos_t i = 0; i < n; ++i)
             localOccupied[packedKeys[i]] = true;
       }
