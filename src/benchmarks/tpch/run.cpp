@@ -306,6 +306,18 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
+      auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
+      //dumpQ1Result("vectorwise", vResult.get());
+   }
+   if (q.count("3h"))
+      e.timeAndProfile(label("q3 h ", nrThreads),
+                       nrTuples(tpch, {"customer", "orders", "lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          auto result = q3_hyper(tpch, nrThreads);
+                          escape(&result);
+                       },
+                       repetitions);
    if (q.count("3v"))
       e.timeAndProfile(
           label("q3 v ", nrThreads), nrTuples(tpch, {"customer", "orders", "lineitem"}),
