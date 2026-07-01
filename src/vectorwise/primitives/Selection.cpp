@@ -12,6 +12,14 @@
   #include <simde/x86/avx512.h>
 #endif
 
+// Native ARM SVE backend for the selection kernels. SVE provides svcompact
+// (a true cross-lane compress, the analogue of AVX-512 VPCOMPRESS/COMPRESSSTORE)
+// and predicated gathers, which NEON lacks -- so on SVE-capable hardware we
+// compile native kernels instead of emulating AVX-512 through SIMDe.
+#if defined(__ARM_FEATURE_SVE)
+  #include <arm_sve.h>
+#endif
+
 
 #include <string.h>
 
@@ -87,7 +95,28 @@ F3 sel_contains_Varchar_55_col_Varchar_55_val =
     (F3)&sel_col_val<Varchar_55, Contains>;
 
 
-#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)    
+// ---------------------------------------------------------------------------
+// Backend selection for the data-parallel (simdsel) selection kernels.
+//
+// The same public function-pointer symbols (the historical *_avx512 names that
+// Primitives.hpp / the experiment harness expect) are bound to whichever native
+// kernel matches the build target. Priority:
+//
+//   1. ARM SVE              -> native SVE kernels (svcompact + gather)
+//   2. x86 AVX-512 / SIMDe  -> the original AVX-512 kernels
+//                              (native on x86, SIMDe-emulated NEON otherwise)
+//
+// SVE takes priority on ARM so the experiment measures a genuine ARM kernel
+// rather than AVX-512 semantics emulated on top of NEON.
+// ---------------------------------------------------------------------------
+#if defined(__ARM_FEATURE_SVE)
+  #define SIMDSEL_BACKEND_SVE 1
+#elif defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) || defined(SIMDE_ENABLE_NATIVE_ALIASES)
+  #define SIMDSEL_BACKEND_AVX512 1
+#endif
+
+
+#if defined(SIMDSEL_BACKEND_AVX512)
 // #define PREFETCH(E) __builtin_prefetch(E);
 #define PREFETCH(E)
 
@@ -348,6 +377,118 @@ F4 selsel_greater_equal_int64_t_col_int64_t_val_avx512 =
     (F4)&selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl;
 F4 selsel_less_equal_int64_t_col_int64_t_val_avx512 =
     (F4)&selsel_less_equal_int64_t_col_int64_t_val_avx512_impl;
+
+
+#elif defined(SIMDSEL_BACKEND_SVE)
+// ---------------------------------------------------------------------------
+// ARM SVE selection kernels.
+//
+// Mapping from the paper's AVX-512 COMPRESSSTORE design onto SVE:
+//   svcmp*_s{32,64}        -> predicate           (analogue of an AVX-512 mask)
+//   svcompact_{u32,u64}    -> pack active lanes    (analogue of VPCOMPRESS)
+//   svld1_gather_*         -> gather               (selection-vector inputs)
+//   svcntp_b{32,64}        -> popcount of the predicate
+//
+// SVE is vector-length agnostic, so the loop is driven by svwhilelt, which
+// yields a partial predicate on the final iteration. That removes the scalar
+// remainder loop the AVX-512 kernels carry. After svcompact the matching
+// elements occupy the low lanes; we store the first popcount of them.
+// ---------------------------------------------------------------------------
+
+pos_t sel_less_int32_t_col_int32_t_val_sve_impl(pos_t n, pos_t* RES result,
+                                                int32_t* RES param1,
+                                                int32_t* RES param2) {
+   static_assert(sizeof(pos_t) == 4,
+                 "This implementation only supports sizeof(pos_t) == 4");
+   uint64_t found = 0;
+   const int32_t con = *param2;
+   const svint32_t consts = svdup_s32(con);
+   const uint64_t vl = svcntw();
+   for (uint64_t i = 0; i < n; i += vl) {
+      svbool_t pg = svwhilelt_b32_u64(i, (uint64_t)n);
+      svint32_t in = svld1_s32(pg, param1 + i);
+      svbool_t lt = svcmplt_s32(pg, in, consts);
+      svuint32_t ids = svindex_u32((uint32_t)i, 1);
+      svuint32_t packed = svcompact_u32(lt, ids);
+      uint64_t cnt = svcntp_b32(pg, lt);
+      svbool_t store_pg = svwhilelt_b32_u64((uint64_t)0, cnt);
+      svst1_u32(store_pg, result + found, packed);
+      found += cnt;
+   }
+   return found;
+}
+
+pos_t selsel_greater_equal_int32_t_col_int32_t_val_sve_impl(
+    pos_t n, pos_t* RES inSel, pos_t* RES result, int32_t* RES param1,
+    int32_t* RES param2) {
+   static_assert(sizeof(pos_t) == 4,
+                 "This implementation only supports sizeof(pos_t) == 4");
+   uint64_t found = 0;
+   const int32_t con = *param2;
+   const svint32_t consts = svdup_s32(con);
+   const uint64_t vl = svcntw();
+   for (uint64_t i = 0; i < n; i += vl) {
+      svbool_t pg = svwhilelt_b32_u64(i, (uint64_t)n);
+      svuint32_t idxs = svld1_u32(pg, inSel + i);
+      svint32_t in = svld1_gather_u32index_s32(pg, param1, idxs);
+      svbool_t ge = svcmpge_s32(pg, in, consts);
+      svuint32_t packed = svcompact_u32(ge, idxs);
+      uint64_t cnt = svcntp_b32(pg, ge);
+      svbool_t store_pg = svwhilelt_b32_u64((uint64_t)0, cnt);
+      svst1_u32(store_pg, result + found, packed);
+      found += cnt;
+   }
+   return found;
+}
+
+// The three int64 selection-vector kernels differ only in the comparison.
+// Indices (pos_t) stay 32-bit: we widen them to 64-bit lanes for the gather
+// (svld1uw_u64), compact in 64-bit lanes, then truncate back to 32-bit on the
+// store (svst1w_u64).
+#define MK_SELSEL_INT64_SVE(NAME, SVCMP)                                       \
+   pos_t NAME(pos_t n, pos_t* RES inSel, pos_t* RES result,                    \
+              int64_t* RES param1, int64_t* RES param2) {                      \
+      static_assert(sizeof(pos_t) == 4,                                        \
+                    "This implementation only supports sizeof(pos_t) == 4");   \
+      uint64_t found = 0;                                                      \
+      const int64_t con = *param2;                                            \
+      const svint64_t consts = svdup_s64(con);                                \
+      const uint64_t vl = svcntd();                                           \
+      for (uint64_t i = 0; i < n; i += vl) {                                  \
+         svbool_t pg = svwhilelt_b64_u64(i, (uint64_t)n);                     \
+         svuint64_t idxs = svld1uw_u64(pg, inSel + i);                        \
+         svint64_t in = svld1_gather_u64index_s64(pg, param1, idxs);          \
+         svbool_t m = SVCMP(pg, in, consts);                                  \
+         svuint64_t packed = svcompact_u64(m, idxs);                          \
+         uint64_t cnt = svcntp_b64(pg, m);                                    \
+         svbool_t store_pg = svwhilelt_b64_u64((uint64_t)0, cnt);             \
+         svst1w_u64(store_pg, result + found, packed);                        \
+         found += cnt;                                                        \
+      }                                                                       \
+      return found;                                                           \
+   }
+
+MK_SELSEL_INT64_SVE(selsel_less_int64_t_col_int64_t_val_sve_impl, svcmplt_s64)
+MK_SELSEL_INT64_SVE(selsel_greater_equal_int64_t_col_int64_t_val_sve_impl,
+                    svcmpge_s64)
+MK_SELSEL_INT64_SVE(selsel_less_equal_int64_t_col_int64_t_val_sve_impl,
+                    svcmple_s64)
+
+#undef MK_SELSEL_INT64_SVE
+
+// Public symbols keep their historical *_avx512 names so Primitives.hpp and the
+// experiment harness need no changes; they are bound to the SVE kernels here.
+F3 sel_less_int32_t_col_int32_t_val_avx512 =
+    (F3)&sel_less_int32_t_col_int32_t_val_sve_impl;
+F4 selsel_greater_equal_int32_t_col_int32_t_val_avx512 =
+    (F4)&selsel_greater_equal_int32_t_col_int32_t_val_sve_impl;
+F4 selsel_less_int64_t_col_int64_t_val_avx512 =
+    (F4)&selsel_less_int64_t_col_int64_t_val_sve_impl;
+F4 selsel_greater_equal_int64_t_col_int64_t_val_avx512 =
+    (F4)&selsel_greater_equal_int64_t_col_int64_t_val_sve_impl;
+F4 selsel_less_equal_int64_t_col_int64_t_val_avx512 =
+    (F4)&selsel_less_equal_int64_t_col_int64_t_val_sve_impl;
+
 #endif
 }
 } // namespace vectorwise

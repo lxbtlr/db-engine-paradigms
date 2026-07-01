@@ -10,6 +10,18 @@
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
 #include <x86intrin.h>
 #else
+// On AArch64, prefer a *native* SVE kernel when the target supports it.
+// arm_sve.h is only valid when the compiler is building for SVE
+// (-march=...+sve / -march=armv9-a), hence the feature guard.
+#if defined(__ARM_FEATURE_SVE)
+#include <arm_sve.h>
+#endif
+// SIMDe is still pulled in as a fallback so that NEON-only cores (e.g.
+// Graviton2, Apple M-series) keep a working AVX-512-emulated path. Note:
+// because this defines SIMDE_ENABLE_NATIVE_ALIASES, the existing
+// AVX-512 kernel guards below would also match on ARM. The SIMD kernels
+// therefore test __ARM_FEATURE_SVE *first* so that on SVE hardware we run
+// the hand-written SVE kernel and never the SIMDe-over-NEON emulation.
 #define SIMDE_ENABLE_NATIVE_ALIASES
 #include <simde/x86/avx512.h> // Or whichever level the project requires
 #endif
@@ -241,7 +253,108 @@ pos_t Hashjoin::joinAllSIMD() {
 
    if (followup == followupWrite) {
 
-#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) ||               \
+#if defined(__ARM_FEATURE_SVE)
+      // -------------------------------------------------------------------
+      // Native AArch64 SVE kernel.
+      //
+      // Maps the AVX-512 primitives 1:1:
+      //   k-mask              -> svbool_t predicate
+      //   masked gather       -> svld1[uw]_gather_u64base_*
+      //   masked compare      -> svcmpeq/svcmpne (predicated)
+      //   compress-store      -> svcompact + predicated svst1 over popcount
+      //   popcount(mask)      -> svcntp_b64
+      //
+      // Everything runs at 64-bit lane granularity (pointers are 64-bit).
+      // svld1uw zero-extends the 32-bit hash field into 64-bit lanes, so the
+      // HASH_SIZE==32 and ==64 cases collapse into one body (only the source
+      // load width differs) instead of the dual path AVX needs.
+      //
+      // The whilelt predicate folds the tail in, so `rest` is 0 and the scalar
+      // tail loop below performs no iterations on this path.
+      // -------------------------------------------------------------------
+      size_t rest = 0;
+      const svbool_t pall = svptrue_b64();
+      const uint64_t htEnd = (uint64_t)(uintptr_t)shared.ht.end();
+      const size_t numProbes = cont.numProbes;
+
+      for (size_t i = 0; i < numProbes; i += svcntd()) {
+         // active lanes for this chunk (handles the tail without a scalar loop)
+         svbool_t pg = svwhilelt_b64_u64((uint64_t)i, (uint64_t)numProbes);
+
+         // probe positions for this chunk: i, i+1, i+2, ...
+         svuint64_t ids = svindex_u64((uint64_t)i, 1);
+
+         // load probe hashes (zero-extend the 32-bit case into 64-bit lanes)
+#if HASH_SIZE == 32
+         svuint64_t hashes =
+             svld1uw_u64(pg, (const uint32_t*)(probeHashes + i));
+#else
+         svuint64_t hashes =
+             svld1_u64(pg, (const uint64_t*)(probeHashes + i));
+#endif
+
+         // find chain heads. entries.mask is the bloom-filter hit predicate;
+         // entries.vec holds the tag-stripped chain-head pointers.
+         auto entries = shared.ht.find_chain_tagged(pg, hashes);
+
+         // gather each candidate entry's stored hash into 64-bit lanes
+#if HASH_SIZE == 32
+         svuint64_t entryHashes = svld1uw_gather_u64base_offset_u64(
+             entries.mask, entries.vec,
+             offsetof(decltype(shared.ht)::EntryHeader, hash));
+#else
+         svuint64_t entryHashes = svld1_gather_u64base_offset_u64(
+             entries.mask, entries.vec,
+             offsetof(decltype(shared.ht)::EntryHeader, hash));
+#endif
+
+         {
+            // Check if hashes match (only over bloom-hit lanes)
+            svbool_t hashesEq = svcmpeq_u64(entries.mask, entryHashes, hashes);
+            uint64_t nMatch = svcntp_b64(pall, hashesEq);
+            svbool_t pMatch = svwhilelt_b64_u64((uint64_t)0, nMatch);
+            // write pointers (compress-store)
+            svst1_u64(pMatch, (uint64_t*)(buildMatches + found),
+                      svcompact_u64(hashesEq, entries.vec));
+            static_assert(sizeof(pos_t) == 4,
+                          "SIMD join assumes sizeof(pos_t) is 4"); // change the
+                                                                   // types for
+                                                                   // probeSels
+                                                                   // if this
+                                                                   // fails
+            // write selection (truncating 64->32 store)
+            svst1w_u64(pMatch, (uint32_t*)(probeMatches + found),
+                       svcompact_u64(hashesEq, ids));
+            found += nMatch;
+         }
+
+         {
+            // write continuations
+            static_assert(offsetof(decltype(shared.ht)::EntryHeader, next) == 0,
+                          "Hash is expected to be in first position");
+            svuint64_t nextPtrs =
+                svld1_gather_u64base_u64(entries.mask, entries.vec);
+            svbool_t hasNext =
+                svcmpne_u64(entries.mask, nextPtrs, svdup_n_u64(htEnd));
+            uint64_t nNext = svcntp_b64(pall, hasNext);
+            if (nNext) {
+               svbool_t pNext = svwhilelt_b64_u64((uint64_t)0, nNext);
+               // write pointers
+               svst1_u64(pNext, (uint64_t*)(followupEntries + followupWrite),
+                         svcompact_u64(hasNext, nextPtrs));
+               static_assert(
+                   sizeof(pos_t) == 4,
+                   "SIMD join assumes sizeof(pos_t) is 4"); // change the types
+                                                            // for probeSels if
+                                                            // this fails
+               // write selection
+               svst1w_u64(pNext, (uint32_t*)(followupIds + followupWrite),
+                          svcompact_u64(hasNext, ids));
+               followupWrite += nNext;
+            }
+         }
+      }
+#elif defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) ||             \
     defined(SIMDE_ENABLE_NATIVE_ALIASES)
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;
@@ -534,7 +647,99 @@ pos_t Hashjoin::joinSelSIMD() {
 
    if (followup == followupWrite) {
 
-#if defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) ||               \
+#if defined(__ARM_FEATURE_SVE)
+      // -------------------------------------------------------------------
+      // Native AArch64 SVE kernel (selection-vector variant).
+      //
+      // Same structure as joinAllSIMD's SVE path, with one difference that
+      // mirrors the AVX joinSelSIMD kernel:
+      //   * the *output* selection written to probeMatches is probeSel[i]
+      //     (loaded contiguously from probeSel), and
+      //   * the *continuation* selection written to followupIds is the raw
+      //     position i (svindex), because the followup drain re-reads
+      //     probeHashes[i] / probeSel[i] later using that position.
+      // -------------------------------------------------------------------
+      size_t rest = 0;
+      const svbool_t pall = svptrue_b64();
+      const uint64_t htEnd = (uint64_t)(uintptr_t)shared.ht.end();
+      const size_t numProbes = cont.numProbes;
+
+      for (size_t i = 0; i < numProbes; i += svcntd()) {
+         svbool_t pg = svwhilelt_b64_u64((uint64_t)i, (uint64_t)numProbes);
+
+         // raw probe positions i, i+1, ... (used for the followup buffer)
+         svuint64_t ids = svindex_u64((uint64_t)i, 1);
+         // actual output selection indices probeSel[i], zero-extended
+         svuint64_t probeSels =
+             svld1uw_u64(pg, (const uint32_t*)(probeSel + i));
+
+#if HASH_SIZE == 32
+         svuint64_t hashes =
+             svld1uw_u64(pg, (const uint32_t*)(probeHashes + i));
+#else
+         svuint64_t hashes =
+             svld1_u64(pg, (const uint64_t*)(probeHashes + i));
+#endif
+
+         auto entries = shared.ht.find_chain_tagged(pg, hashes);
+
+#if HASH_SIZE == 32
+         svuint64_t entryHashes = svld1uw_gather_u64base_offset_u64(
+             entries.mask, entries.vec,
+             offsetof(decltype(shared.ht)::EntryHeader, hash));
+#else
+         svuint64_t entryHashes = svld1_gather_u64base_offset_u64(
+             entries.mask, entries.vec,
+             offsetof(decltype(shared.ht)::EntryHeader, hash));
+#endif
+
+         {
+            // Check if hashes match
+            svbool_t hashesEq = svcmpeq_u64(entries.mask, entryHashes, hashes);
+            uint64_t nMatch = svcntp_b64(pall, hashesEq);
+            svbool_t pMatch = svwhilelt_b64_u64((uint64_t)0, nMatch);
+            // write pointers
+            svst1_u64(pMatch, (uint64_t*)(buildMatches + found),
+                      svcompact_u64(hashesEq, entries.vec));
+            static_assert(sizeof(pos_t) == 4,
+                          "SIMD join assumes sizeof(pos_t) is 4"); // change the
+                                                                   // types for
+                                                                   // probeSels
+                                                                   // if this
+                                                                   // fails
+            // write selection (probeSel[i], truncating 64->32 store)
+            svst1w_u64(pMatch, (uint32_t*)(probeMatches + found),
+                       svcompact_u64(hashesEq, probeSels));
+            found += nMatch;
+         }
+
+         {
+            // write continuations
+            static_assert(offsetof(decltype(shared.ht)::EntryHeader, next) == 0,
+                          "Hash is expected to be in first position");
+            svuint64_t nextPtrs =
+                svld1_gather_u64base_u64(entries.mask, entries.vec);
+            svbool_t hasNext =
+                svcmpne_u64(entries.mask, nextPtrs, svdup_n_u64(htEnd));
+            uint64_t nNext = svcntp_b64(pall, hasNext);
+            if (nNext) {
+               svbool_t pNext = svwhilelt_b64_u64((uint64_t)0, nNext);
+               // write pointers
+               svst1_u64(pNext, (uint64_t*)(followupEntries + followupWrite),
+                         svcompact_u64(hasNext, nextPtrs));
+               static_assert(
+                   sizeof(pos_t) == 4,
+                   "SIMD join assumes sizeof(pos_t) is 4"); // change the types
+                                                            // for probeSels if
+                                                            // this fails
+               // write selection (raw position i, not probeSel[i])
+               svst1w_u64(pNext, (uint32_t*)(followupIds + followupWrite),
+                          svcompact_u64(hasNext, ids));
+               followupWrite += nNext;
+            }
+         }
+      }
+#elif defined(__AVX512F__) || defined(SIMDE_X86_AVX512F_NATIVE) ||             \
     defined(SIMDE_ENABLE_NATIVE_ALIASES)
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;

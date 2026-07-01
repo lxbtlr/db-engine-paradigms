@@ -11,8 +11,53 @@
 #include <deque>
 #include <memory>
 #include <vector>
+#if defined(__ARM_FEATURE_SVE)
+#include <arm_sve.h>
+#endif
 
 namespace runtime {
+
+// =====================================================================
+// AArch64 SVE support for the tagged hash-table probe
+// ---------------------------------------------------------------------
+// The SIMD join kernels (Hashjoin::join*SIMD in Operators.cpp) need a
+// data-parallel find_chain_tagged. On x86 that is the Vec8u/Vec8uM
+// overload below; on AArch64 with SVE we provide a native overload taking
+// an active-lane predicate and a vector of (zero-extended) hashes. Two
+// helpers are added, both guarded by __ARM_FEATURE_SVE:
+//
+//   SveEntries find_chain_tagged(svbool_t pg, svuint64_t hashes)
+//   svuint64_t tag(svbool_t pg, svuint64_t hashes)
+//
+// SveEntries is the SVE analogue of Vec8uM:
+//   vec  = chain-head pointers with their tag bits stripped (== ptr())
+//   mask = predicate of lanes whose Bloom tag matched (== Vec8uM::mask)
+//
+// tag() is a line-for-line translation of the scalar tag(hash_t): it takes
+// the top 4 bits of the hash to select one of 16 Bloom buckets and sets the
+// corresponding bit in the top 16 bits of the 64-bit slot, i.e.
+//     1 << (tagPos + (sizeof(ptr_t)*8 - 16)),  tagPos = hash >> (bits-4)
+// The shift is written symbolically as sizeof(hash_t)*8 - 4 (28 for a 32-bit
+// hash, 60 for 64-bit). Because the kernel zero-extends a 32-bit hash into a
+// 64-bit lane, shifting by 28 still lifts its top 4 bits into place, so a
+// single body is correct for both HASH_SIZE settings. The shift already
+// yields a 0..15 value, so no extra masking is needed (matching the scalar).
+//
+// find_chain_tagged mirrors the Vec8u overload exactly:
+//   pos         = hashes & mask
+//   candidates  = entries[pos]            -- svld1_gather_u64index scales the
+//                                            index by 8, matching the AVX
+//                                            scale=8 over the 8-byte slots
+//   filterMatch = candidates & tag(hashes)
+//   matches     = filterMatch != 0        -- empty slots are all-zero and so
+//                                            fail the Bloom test for free;
+//                                            there is deliberately no end()
+//                                            sentinel compare here
+//   candidates &= maskPointer             -- strip tag bits, == ptr()
+//
+// The gather is predicated by pg so that tail lanes (handled in the kernel
+// via svwhilelt) never touch out-of-range directory memory.
+// =====================================================================
 
 class Hashmap {
 
@@ -28,6 +73,13 @@ class Hashmap {
       EntryHeader(EntryHeader* n, hash_t h) : next(n), hash(h) {}
       // payload data follows this header
    };
+#if defined(__ARM_FEATURE_SVE)
+   /// SVE analogue of Vec8uM (see top-of-file notes)
+   struct SveEntries {
+      svuint64_t vec;  // chain-head pointers, tag bits cleared
+      svbool_t mask;   // lanes whose Bloom tag matched
+   };
+#endif
    /// Returns the first entry of the chain for the given hash
    inline EntryHeader* find_chain(hash_t hash);
    /// Returns the first entry of the chain for the given hash
@@ -35,6 +87,9 @@ class Hashmap {
    /// contained
    inline EntryHeader* find_chain_tagged(hash_t hash);
    inline Vec8uM find_chain_tagged(Vec8u hashes);
+#if defined(__ARM_FEATURE_SVE)
+   inline SveEntries find_chain_tagged(svbool_t pg, svuint64_t hashes);
+#endif
    /// Insert entry into chain for the given hash
    template <bool concurrentInsert = true>
    inline void insert(EntryHeader* entry, hash_t hash);
@@ -69,6 +124,9 @@ class Hashmap {
    inline Hashmap::EntryHeader* ptr(Hashmap::EntryHeader* p);
    inline ptr_t tag(hash_t p);
    inline Vec8u tag(Vec8u p);
+#if defined(__ARM_FEATURE_SVE)
+   inline svuint64_t tag(svbool_t pg, svuint64_t hashes);
+#endif
    inline Hashmap::EntryHeader* update(Hashmap::EntryHeader* old,
                                        Hashmap::EntryHeader* p, hash_t hash);
 };
@@ -91,6 +149,14 @@ inline Vec8u Hashmap::tag(Vec8u hashes) {
    auto tagPos = hashes >> (sizeof(hash_t) * 8 - 4);
    return Vec8u(1) << (tagPos + Vec8u(sizeof(ptr_t) * 8 - 16));
 }
+
+#if defined(__ARM_FEATURE_SVE)
+inline svuint64_t Hashmap::tag(svbool_t pg, svuint64_t hashes) {
+   svuint64_t tagPos = svlsr_n_u64_x(pg, hashes, sizeof(hash_t) * 8 - 4);
+   svuint64_t shift = svadd_n_u64_x(pg, tagPos, sizeof(ptr_t) * 8 - 16);
+   return svlsl_u64_x(pg, svdup_n_u64(1), shift);
+}
+#endif
 
 inline Hashmap::EntryHeader* Hashmap::ptr(Hashmap::EntryHeader* p) {
    return (EntryHeader*)((ptr_t)p & maskPointer);
@@ -149,6 +215,19 @@ inline Vec8uM Hashmap::find_chain_tagged(Vec8u hashes) {
    candidates = candidates & Vec8u(maskPointer);
    return {candidates, matches};
 }
+
+#if defined(__ARM_FEATURE_SVE)
+inline Hashmap::SveEntries Hashmap::find_chain_tagged(svbool_t pg,
+                                                      svuint64_t hashes) {
+   svuint64_t pos = svand_n_u64_x(pg, hashes, mask);
+   svuint64_t candidates = svld1_gather_u64index_u64(
+       pg, reinterpret_cast<const uint64_t*>(entries), pos);
+   svuint64_t filterMatch = svand_u64_x(pg, candidates, tag(pg, hashes));
+   svbool_t matches = svcmpne_n_u64(pg, filterMatch, 0);
+   candidates = svand_n_u64_x(pg, candidates, maskPointer);
+   return {candidates, matches};
+}
+#endif
 
 template <bool concurrentInsert>
 void inline Hashmap::insert_tagged(EntryHeader* entry, hash_t hash) {
