@@ -9,6 +9,7 @@
 #include "vectorwise/Primitives.hpp"
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <tuple>
@@ -407,6 +408,62 @@ class HashGroup : public UnaryOperator {
 
  private:
    void clearHashtable();
+};
+
+/// LUT-based group-by for small, dense keyspaces (e.g. Q1's packed uint16_t).
+/// Replaces HashGroup when the key can be used as a direct array index.
+/// No hashing, no hash table, no chain walking — O(1) group lookup per tuple.
+class LUTGroup : public UnaryOperator {
+ public:
+   static constexpr size_t LUT_SIZE = 65536; // max entries for uint16_t key
+
+   struct Shared : SharedState {
+      std::mutex mergeMutex;
+      /// Global accumulators: one row per possible key value.
+      /// Layout: [nValues * int64_t] per LUT slot.
+      std::vector<int64_t> globalAccum;
+      /// Bitmap: which keys are occupied globally.
+      std::vector<bool> globalOccupied;
+      size_t nValues = 0;
+      bool globalInitialized = false;
+      std::atomic<size_t> producerClaimed{0};
+      Shared() {}
+   } & shared;
+
+   size_t vecSize;
+   /// Number of int64_t aggregate values per group
+   size_t nValues = 0;
+
+   /// Thread-local accumulators
+   std::vector<int64_t> localAccum;
+   std::vector<bool> localOccupied;
+
+   /// Packed key buffer (input from Project)
+   uint16_t* packedKeys = nullptr;
+   /// Selection vector (maps packed keys to column positions for sel-based values)
+   pos_t* selVec = nullptr;
+
+   struct ValueSpec {
+      void* colData;       // column data pointer (or buffer pointer)
+      bool hasSel;         // whether this value uses a selection vector
+      bool isCount;        // true = increment by 1, ignore colData
+   };
+   std::deque<ValueSpec> valueSpecs;
+
+   /// Output buffers for result gathering
+   /// First two are for unpacked key columns (returnflag, linestatus)
+   void* outReturnflag = nullptr;
+   void* outLinestatus = nullptr;
+   /// Then one per aggregate value
+   std::vector<void*> outValues;
+
+   struct Continuation {
+      bool consumed = false;
+      size_t lutPos = 0;  // current position in LUT scan
+   } cont;
+
+   LUTGroup(Shared& s);
+   virtual size_t next() override;
 };
 
 template <typename T>

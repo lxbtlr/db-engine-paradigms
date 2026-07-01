@@ -917,4 +917,89 @@ size_t HashGroup::next() {
    }
    return EndOfStream;
 }
+
+// ---------------------------------------------------------------------------
+// LUTGroup: direct-index aggregation for small dense keyspaces
+// ---------------------------------------------------------------------------
+LUTGroup::LUTGroup(Shared& s) : shared(s) {}
+
+size_t LUTGroup::next() {
+   if (!cont.consumed) {
+      // Phase 1: consume all input, aggregate into thread-local LUT
+      localAccum.resize(LUT_SIZE * nValues, 0);
+      localOccupied.resize(LUT_SIZE, false);
+
+      for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
+         // Mark occupied keys in one pass
+         for (pos_t i = 0; i < n; ++i)
+            localOccupied[packedKeys[i]] = true;
+         // Accumulate each value
+         for (size_t v = 0; v < nValues; ++v) {
+            auto& spec = valueSpecs[v];
+            if (spec.isCount) {
+               for (pos_t i = 0; i < n; ++i)
+                  localAccum[packedKeys[i] * nValues + v] += 1;
+            } else if (spec.hasSel) {
+               auto* col = reinterpret_cast<int64_t*>(spec.colData);
+               for (pos_t i = 0; i < n; ++i)
+                  localAccum[packedKeys[i] * nValues + v] += col[selVec[i]];
+            } else {
+               auto* col = reinterpret_cast<int64_t*>(spec.colData);
+               for (pos_t i = 0; i < n; ++i)
+                  localAccum[packedKeys[i] * nValues + v] += col[i];
+            }
+         }
+      }
+
+      // Merge thread-local into global
+      {
+         std::lock_guard<std::mutex> lock(shared.mergeMutex);
+         if (!shared.globalInitialized) {
+            shared.nValues = nValues;
+            shared.globalAccum.resize(LUT_SIZE * nValues, 0);
+            shared.globalOccupied.resize(LUT_SIZE, false);
+            shared.globalInitialized = true;
+         }
+         for (size_t k = 0; k < LUT_SIZE; ++k) {
+            if (localOccupied[k]) {
+               shared.globalOccupied[k] = true;
+               for (size_t v = 0; v < nValues; ++v)
+                  shared.globalAccum[k * nValues + v] +=
+                      localAccum[k * nValues + v];
+            }
+         }
+      }
+      localAccum.clear();
+      localOccupied.clear();
+
+      runtime::barrier();
+      cont.consumed = true;
+      cont.lutPos = 0;
+      // Only one thread produces output
+      if (shared.producerClaimed.fetch_add(1) != 0)
+         return EndOfStream;
+   }
+
+   // Phase 2: produce result vectors from global LUT
+   auto* retOut = reinterpret_cast<types::Char<1>*>(outReturnflag);
+   auto* statOut = reinterpret_cast<types::Char<1>*>(outLinestatus);
+
+   pos_t produced = 0;
+   for (; cont.lutPos < LUT_SIZE && produced < vecSize; ++cont.lutPos) {
+      if (!shared.globalOccupied[cont.lutPos]) continue;
+      uint16_t key = cont.lutPos;
+      // Unpack key into returnflag (byte 0) and linestatus (byte 1)
+      retOut[produced].value = static_cast<char>(key & 0xFF);
+      statOut[produced].value = static_cast<char>((key >> 8) & 0xFF);
+      // Copy aggregate values
+      for (size_t v = 0; v < nValues; ++v) {
+         auto* dst = reinterpret_cast<int64_t*>(outValues[v]);
+         dst[produced] = shared.globalAccum[cont.lutPos * nValues + v];
+      }
+      ++produced;
+   }
+   if (produced == 0) return EndOfStream;
+   return produced;
+}
+
 } // namespace vectorwise

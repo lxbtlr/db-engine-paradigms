@@ -1,6 +1,9 @@
-// Packed-key primitives for Q1's (l_returnflag, l_linestatus) composite key.
-// Packs two Char<1> columns into a single uint16_t, enabling a single hash,
-// compare, partition, scatter, and gather call instead of one per column.
+// Packed-key primitives: concatenate two arbitrary-sized key columns into a
+// single contiguous buffer, enabling a single hash/compare/scatter/gather
+// per tuple instead of one per column.
+//
+// The pack primitive is templated on (SIZE_A, SIZE_B) so it works with any
+// combination of key widths. The output buffer element size is SIZE_A+SIZE_B.
 
 #include "common/runtime/Hash.hpp"
 #include "vectorwise/Operations.hpp"
@@ -14,39 +17,34 @@ namespace vectorwise {
 namespace primitives {
 
 // ---------------------------------------------------------------------------
-// Pack: two Char<1> columns -> uint16_t buffer (via selection vector)
-// Signature: F4 (n, sel, outKeys, returnflag_col, linestatus_col)
+// Pack: two void* columns -> contiguous output buffer (via selection vector)
+// Signature: F4 (n, sel, out, col_a, col_b)
+// Template params SIZE_A, SIZE_B are the byte widths of each source column.
+// Output element is SIZE_A + SIZE_B bytes.
 // ---------------------------------------------------------------------------
-static pos_t pack_sel_q1keys_(pos_t n, pos_t* RES sel,
-                               uint16_t* RES out,
-                               Char<1>* RES col_a,
-                               Char<1>* RES col_b) {
+template <size_t SIZE_A, size_t SIZE_B>
+static pos_t pack_sel_(pos_t n, pos_t* RES sel,
+                       void* RES out,
+                       void* RES col_a,
+                       void* RES col_b) {
+   constexpr size_t OUT_SIZE = SIZE_A + SIZE_B;
+   auto* dst = reinterpret_cast<uint8_t*>(out);
+   auto* src_a = reinterpret_cast<uint8_t*>(col_a);
+   auto* src_b = reinterpret_cast<uint8_t*>(col_b);
    for (uint64_t i = 0; i < n; ++i) {
       auto idx = sel[i];
-      uint16_t k;
-      std::memcpy(reinterpret_cast<char*>(&k),     &col_a[idx].value, 1);
-      std::memcpy(reinterpret_cast<char*>(&k) + 1, &col_b[idx].value, 1);
-      out[i] = k;
+      std::memcpy(dst + i * OUT_SIZE,            src_a + idx * SIZE_A, SIZE_A);
+      std::memcpy(dst + i * OUT_SIZE + SIZE_A,   src_b + idx * SIZE_B, SIZE_B);
    }
    return n;
 }
-F4 pack_sel_q1keys = (F4)&pack_sel_q1keys_;
+
+// Instantiate for Q1: Char<1> + Char<1> = 2 bytes
+F4 pack_sel_void_1_1 = (F4)&pack_sel_<1, 1>;
 
 // ---------------------------------------------------------------------------
-// Hash: uint16_t packed key -> groupHashes (with selection vector)
-// Signature: F3 (n, sel, groupHashes, packedKeys)
-// Uses hash_sel template, but since we produce a dense packed key buffer
-// (not column-indexed), we use a direct hash without selection.
-// Actually: groupHash is wired as F3(n, sel, groupHashes, col).
-// For the packed key, col IS the dense buffer (indexed 0..n-1), but sel
-// is needed because the hash_sel template does result[i] = hash(input[sel[i]]).
-// We want result[i] = hash(input[i]) since pack already applied sel.
-// So we use the non-sel F2 variant instead via the no-sel addKey overload,
-// OR we use hash_sel with an identity selection. Simpler: just use a direct
-// hash primitive.
+// Hash: uint16_t packed key
 // ---------------------------------------------------------------------------
-
-// F2: hash_uint16_t_col(n, groupHashes, packedKeys)
 #if HASH_SIZE == 32
 #define DEFAULT_HASH runtime::MurMurHash3
 #else
@@ -92,13 +90,7 @@ FGatherVal gather_val_uint16_t_col = (FGatherVal)&gather_val<uint16_t>;
 
 // ---------------------------------------------------------------------------
 // Unpack: gather a uint16_t from the HT entry and split back into two
-// Char<1> output buffers. This replaces two separate gather_val_Char_1_col
-// calls with a single pass.
-//
-// Signature matches FGatherVal:
-//   (pos_t n, void** input, size_t offset, size_t* struct_size, void* out)
-// But we need TWO outputs. We'll call this twice with different output
-// buffers, using two different unpack primitives (high byte, low byte).
+// Char<1> output buffers.
 // ---------------------------------------------------------------------------
 static pos_t unpack_q1key_returnflag_(pos_t n, uint16_t** RES input,
                                        size_t offset, size_t* struct_size,

@@ -263,71 +263,26 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryPacked() {
                       Buffer(result_proj_plus, sizeof(int64_t))))
        // Pack the two Char<1> key columns into a dense uint16_t buffer
        .addExpression(
-           Expression().addOp(primitives::pack_sel_q1keys,
+           Expression().addOp(primitives::pack_sel_void_1_1,
                               Buffer(sel_date),
                               Buffer(packed_key, sizeof(uint16_t)),
                               Column(lineitem, "l_returnflag"),
                               Column(lineitem, "l_linestatus")));
-   HashGroup()
-       .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
-       // Single packed uint16_t key replaces two separate Char<1> addKey calls
-       .addKey(Buffer(packed_key),
-               primitives::hash_uint16_t_col,
-               primitives::keys_not_equal_uint16_t_col,
-               primitives::partition_by_key_uint16_t_col,
-               primitives::scatter_sel_uint16_t_col,
-               primitives::keys_not_equal_row_uint16_t_col,
-               primitives::partition_by_key_row_uint16_t_col,
-               primitives::scatter_sel_row_uint16_t_col,
-               // Gather extracts returnflag (low byte) from the packed key
-               primitives::unpack_q1key_returnflag,
-               Buffer(returnflag, sizeof(Char_1)))
-       .padToAlign(sizeof(types::Numeric<12, 4>))
-       .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_disc_price, sizeof(types::Numeric<12, 4>)))
-       .addValue(Buffer(charge), primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
-       .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
-                 primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_qty, sizeof(types::Numeric<12, 2>)))
-       .addValue(Column(lineitem, "l_extendedprice"), Buffer(sel_date),
-                 primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_sel_plus_int64_t_col,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(sum_base_price, sizeof(types::Numeric<12, 2>)))
-       .addValue(Buffer(charge, sizeof(uint64_t)),
-                 primitives::aggr_init_plus_int64_t_col,
-                 primitives::aggr_count_star,
-                 primitives::aggr_row_plus_int64_t_col,
-                 primitives::gather_val_int64_t_col,
-                 Buffer(count_order, sizeof(uint64_t)));
-
-   // Manually add a second gather to unpack linestatus from the packed key.
-   // The packed key is stored in the HT entry at the same offset as returnflag
-   // (it's a uint16_t; returnflag is byte 0, linestatus is byte 1).
-   // We need the entry offset of the packed key, which is
-   // sizeof(EntryHeader) since it's the first (and only) key.
-   {
-      auto entryOffset = sizeof(runtime::Hashmap::EntryHeader);
-      auto& op = *static_cast<vectorwise::HashGroup*>(
-          operatorStack.top().get());
-      auto gather_linestatus = std::make_unique<GatherOpVal>(
-          primitives::unpack_q1key_linestatus,
-          reinterpret_cast<void**>(op.globalAggregation.htMatches),
-          entryOffset, &op.globalAggregation.ht_entry_size,
-          Buffer(linestatus, sizeof(Char_1)));
-      op.gatherGroups.ops.push_back(std::move(gather_linestatus));
-   }
+   // LUT-based aggregation: packed key is used as direct array index.
+   // No hashing, no hash table, no chain walking.
+   LUTGroup()
+       .setKeyAndSel(Buffer(packed_key), Buffer(sel_date))
+       .addValue(Buffer(disc_price),
+                 Buffer(sum_disc_price, sizeof(int64_t)))
+       .addValue(Buffer(charge),
+                 Buffer(sum_charge, sizeof(int64_t)))
+       .addValueSel(Column(lineitem, "l_quantity"),
+                    Buffer(sum_qty, sizeof(int64_t)))
+       .addValueSel(Column(lineitem, "l_extendedprice"),
+                    Buffer(sum_base_price, sizeof(int64_t)))
+       .addCount(Buffer(count_order, sizeof(uint64_t)))
+       .setKeyOutputs(Buffer(returnflag, sizeof(Char_1)),
+                      Buffer(linestatus, sizeof(Char_1)));
 
    result.addValue("l_returnflag", Buffer(returnflag))
        .addValue("l_linestatus", Buffer(linestatus))

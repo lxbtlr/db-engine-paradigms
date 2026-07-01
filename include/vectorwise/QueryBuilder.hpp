@@ -132,6 +132,25 @@ class QueryBuilder {
       ~HashGroupBuilder();
    };
 
+   struct LUTGroupBuilder {
+      QueryBuilder& base;
+      LUTGroup* group;
+
+      LUTGroupBuilder(QueryBuilder& base);
+
+      using B = LUTGroupBuilder;
+      /// Set the packed key buffer and selection vector
+      B& setKeyAndSel(DS packedKeyBuf, DS selBuf);
+      /// Add a dense value buffer (already filtered, indexed 0..n-1)
+      B& addValue(DS col, DS out);
+      /// Add a column value that requires selection vector indirection
+      B& addValueSel(DS col, DS out);
+      /// Add a count aggregate (increments by 1 per tuple)
+      B& addCount(DS out);
+      /// Set output buffers for the two unpacked key columns
+      B& setKeyOutputs(DS outReturnflag, DS outLinestatus);
+   };
+
    struct ExpressionBuilder {
       std::unique_ptr<Expression> expression;
       using DS = DataStorage;
@@ -165,6 +184,7 @@ class QueryBuilder {
    HashJoin(DS probeMatches,
             pos_t (Hashjoin::*join)() = &Hashjoin::joinAllParallel);
    HashGroupBuilder HashGroup();
+   LUTGroupBuilder LUTGroup();
 
    ~QueryBuilder();
 

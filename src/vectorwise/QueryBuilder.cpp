@@ -802,4 +802,79 @@ QueryBuilder::HashGroupBuilder::padToAlign(size_t align) {
        padding(group->globalAggregation.ht_entry_size, align);
    return *this;
 }
+// ---------------------------------------------------------------------------
+// LUTGroupBuilder
+// ---------------------------------------------------------------------------
+QueryBuilder::LUTGroupBuilder::LUTGroupBuilder(QueryBuilder& b) : base(b) {}
+
+QueryBuilder::LUTGroupBuilder QueryBuilder::LUTGroup() {
+   LUTGroupBuilder b(*this);
+   auto nr = nextOpNr();
+   auto& s = operatorState.get<class LUTGroup::Shared>(nr);
+   auto gr = make_unique<class LUTGroup>(s);
+   b.group = gr.get();
+   gr->vecSize = vecs.getVecSize();
+   gr->child = popOperator();
+   pushOperator(move(gr));
+   return b;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::setKeyAndSel(DS packedKeyBuf, DS selBuf) {
+   group->packedKeys = reinterpret_cast<uint16_t*>(packedKeyBuf.data);
+   packedKeyBuf.registerDS(reinterpret_cast<void**>(&group->packedKeys));
+   group->selVec = reinterpret_cast<pos_t*>(selBuf.data);
+   selBuf.registerDS(reinterpret_cast<void**>(&group->selVec));
+   return *this;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::addValue(DS col, DS out) {
+   LUTGroup::ValueSpec spec;
+   spec.colData = col.data;
+   spec.hasSel = false;
+   spec.isCount = false;
+   group->valueSpecs.push_back(spec);
+   // Register so column pointers are updated by Scan
+   auto idx = group->valueSpecs.size() - 1;
+   col.registerDS(&group->valueSpecs[idx].colData);
+   group->outValues.push_back(out.data);
+   group->nValues++;
+   return *this;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::addValueSel(DS col, DS out) {
+   LUTGroup::ValueSpec spec;
+   spec.colData = col.data;
+   spec.hasSel = true;
+   spec.isCount = false;
+   group->valueSpecs.push_back(spec);
+   auto idx = group->valueSpecs.size() - 1;
+   col.registerDS(&group->valueSpecs[idx].colData);
+   group->outValues.push_back(out.data);
+   group->nValues++;
+   return *this;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::addCount(DS out) {
+   LUTGroup::ValueSpec spec;
+   spec.colData = nullptr;
+   spec.hasSel = false;
+   spec.isCount = true;
+   group->valueSpecs.push_back(spec);
+   group->outValues.push_back(out.data);
+   group->nValues++;
+   return *this;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::setKeyOutputs(DS outReturnflag,
+                                              DS outLinestatus) {
+   group->outReturnflag = outReturnflag.data;
+   group->outLinestatus = outLinestatus.data;
+   return *this;
+}
+
 } // namespace vectorwise

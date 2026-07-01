@@ -1296,7 +1296,7 @@ extern F4 selsel_less_equal_int64_t_col_int64_t_val_avx512;
 // ---------------------------------------------------------------------------
 // Packed-key primitives for Q1 (returnflag + linestatus -> uint16_t)
 // ---------------------------------------------------------------------------
-extern F4 pack_sel_q1keys;
+extern F4 pack_sel_void_1_1;
 extern F2 hash_uint16_t_col;
 extern F3 hash_sel_uint16_t_col;
 extern NEQCheck keys_not_equal_uint16_t_col;
