@@ -415,7 +415,7 @@ class HashGroup : public UnaryOperator {
 /// No hashing, no hash table, no chain walking — O(1) group lookup per tuple.
 class LUTGroup : public UnaryOperator {
  public:
-   static constexpr size_t LUT_SIZE = 65536; // max entries for uint16_t key
+   static constexpr size_t LUT_SIZE = 256; // max entries for uint8_t packed key
 
    struct Shared : SharedState {
       std::mutex mergeMutex;
@@ -427,6 +427,9 @@ class LUTGroup : public UnaryOperator {
       size_t nValues = 0;
       bool globalInitialized = false;
       std::atomic<size_t> producerClaimed{0};
+      /// Reverse lookup: packed key -> original Char<1> bytes
+      uint8_t keyA[256];  // returnflag
+      uint8_t keyB[256];  // linestatus
       Shared() {}
    } & shared;
 
@@ -439,8 +442,12 @@ class LUTGroup : public UnaryOperator {
    std::vector<int64_t> localStorage; // nValues * LUT_SIZE contiguous
    std::vector<bool> localOccupied;
 
+   /// Original key columns (for unpacking packed key back to Char<1>)
+   void* keyColA = nullptr; // returnflag column pointer (updated by Scan)
+   void* keyColB = nullptr; // linestatus column pointer (updated by Scan)
+
    /// Packed key buffer (input from Project)
-   uint16_t* packedKeys = nullptr;
+   uint8_t* packedKeys = nullptr;
    /// Selection vector (maps packed keys to column positions for sel-based values)
    pos_t* selVec = nullptr;
 

@@ -821,10 +821,19 @@ QueryBuilder::LUTGroupBuilder QueryBuilder::LUTGroup() {
 
 QueryBuilder::LUTGroupBuilder&
 QueryBuilder::LUTGroupBuilder::setKeyAndSel(DS packedKeyBuf, DS selBuf) {
-   group->packedKeys = reinterpret_cast<uint16_t*>(packedKeyBuf.data);
+   group->packedKeys = reinterpret_cast<uint8_t*>(packedKeyBuf.data);
    packedKeyBuf.registerDS(reinterpret_cast<void**>(&group->packedKeys));
    group->selVec = reinterpret_cast<pos_t*>(selBuf.data);
    selBuf.registerDS(reinterpret_cast<void**>(&group->selVec));
+   return *this;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::setKeyCols(DS colA, DS colB) {
+   group->keyColA = colA.data;
+   colA.registerDS(&group->keyColA);
+   group->keyColB = colB.data;
+   colB.registerDS(&group->keyColB);
    return *this;
 }
 

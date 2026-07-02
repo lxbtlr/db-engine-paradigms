@@ -261,17 +261,20 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryPacked() {
                       Buffer(charge, sizeof(int64_t)),
                       Buffer(disc_price, sizeof(int64_t)),
                       Buffer(result_proj_plus, sizeof(int64_t))))
-       // Pack the two Char<1> key columns into a dense uint16_t buffer
+       // Pack the two Char<1> key columns into a uint8_t via nibble packing:
+       // out = (returnflag & 0xF) | ((linestatus & 0xF) << 4)
        .addExpression(
-           Expression().addOp(primitives::pack_sel_void_1_1,
+           Expression().addOp(primitives::pack_sel_nibble,
                               Buffer(sel_date),
-                              Buffer(packed_key, sizeof(uint16_t)),
+                              Buffer(packed_key, sizeof(uint8_t)),
                               Column(lineitem, "l_returnflag"),
                               Column(lineitem, "l_linestatus")));
    // LUT-based aggregation: packed key is used as direct array index.
-   // No hashing, no hash table, no chain walking.
+   // 256-entry LUT (uint8_t key) — fits in 2KB per value (L1-resident).
    LUTGroup()
        .setKeyAndSel(Buffer(packed_key), Buffer(sel_date))
+       .setKeyCols(Column(lineitem, "l_returnflag"),
+                   Column(lineitem, "l_linestatus"))
        .addValue(Buffer(disc_price),
                  Buffer(sum_disc_price, sizeof(int64_t)))
        .addValue(Buffer(charge),

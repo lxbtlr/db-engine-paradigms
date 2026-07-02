@@ -938,9 +938,22 @@ size_t LUTGroup::next() {
       // Separate loop per value — keeps each loop branch-free so the compiler
       // can auto-vectorize. Transposed layout (localAccum[v][key]) eliminates
       // the key*nValues multiply from the interleaved layout.
+      // Reverse lookup: packed key -> original Char<1> bytes.
+      // Populated on first encounter of each key.
+      uint8_t localKeyA[LUT_SIZE];
+      uint8_t localKeyB[LUT_SIZE];
+
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         for (pos_t i = 0; i < n; ++i)
-            localOccupied[packedKeys[i]] = true;
+         auto* colA = reinterpret_cast<uint8_t*>(keyColA);
+         auto* colB = reinterpret_cast<uint8_t*>(keyColB);
+         for (pos_t i = 0; i < n; ++i) {
+            auto key = packedKeys[i];
+            if (!localOccupied[key]) {
+               localOccupied[key] = true;
+               localKeyA[key] = colA[selVec[i]];
+               localKeyB[key] = colB[selVec[i]];
+            }
+         }
 
          for (size_t v = 0; v < nValues; ++v) {
             auto& spec = valueSpecs[v];
@@ -975,7 +988,11 @@ size_t LUTGroup::next() {
          }
          for (size_t k = 0; k < LUT_SIZE; ++k) {
             if (localOccupied[k]) {
-               shared.globalOccupied[k] = true;
+               if (!shared.globalOccupied[k]) {
+                  shared.globalOccupied[k] = true;
+                  shared.keyA[k] = localKeyA[k];
+                  shared.keyB[k] = localKeyB[k];
+               }
                for (size_t v = 0; v < nValues; ++v)
                   shared.globalAccum[v][k] += localAccum[v][k];
             }
@@ -1000,9 +1017,8 @@ size_t LUTGroup::next() {
    pos_t produced = 0;
    for (; cont.lutPos < LUT_SIZE && produced < vecSize; ++cont.lutPos) {
       if (!shared.globalOccupied[cont.lutPos]) continue;
-      uint16_t key = cont.lutPos;
-      retOut[produced].value = static_cast<char>(key & 0xFF);
-      statOut[produced].value = static_cast<char>((key >> 8) & 0xFF);
+      retOut[produced].value = static_cast<char>(shared.keyA[cont.lutPos]);
+      statOut[produced].value = static_cast<char>(shared.keyB[cont.lutPos]);
       for (size_t v = 0; v < nValues; ++v) {
          auto* dst = reinterpret_cast<int64_t*>(outValues[v]);
          dst[produced] = shared.globalAccum[v][cont.lutPos];

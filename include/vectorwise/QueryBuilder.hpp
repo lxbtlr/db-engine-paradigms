@@ -141,6 +141,8 @@ class QueryBuilder {
       using B = LUTGroupBuilder;
       /// Set the packed key buffer and selection vector
       B& setKeyAndSel(DS packedKeyBuf, DS selBuf);
+      /// Set original key column pointers (for reverse lookup during unpack)
+      B& setKeyCols(DS colA, DS colB);
       /// Add a dense value buffer (already filtered, indexed 0..n-1)
       B& addValue(DS col, DS out);
       /// Add a column value that requires selection vector indirection

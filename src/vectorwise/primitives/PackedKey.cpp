@@ -39,8 +39,26 @@ static pos_t pack_sel_(pos_t n, pos_t* RES sel,
    return n;
 }
 
-// Instantiate for Q1: Char<1> + Char<1> = 2 bytes
+// Instantiate for Q1: Char<1> + Char<1> = 2 bytes (uint16_t output)
 F4 pack_sel_void_1_1 = (F4)&pack_sel_<1, 1>;
+
+// ---------------------------------------------------------------------------
+// Pack two Char<1> columns into a single uint8_t using low nibbles:
+//   out[i] = (col_a[sel[i]] & 0xF) | ((col_b[sel[i]] & 0xF) << 4)
+// Produces a uint8_t key < 256, collision-free for any ASCII inputs
+// whose low nibbles are distinct per column.
+// ---------------------------------------------------------------------------
+static pos_t pack_sel_nibble_(pos_t n, pos_t* RES sel,
+                               uint8_t* RES out,
+                               uint8_t* RES col_a,
+                               uint8_t* RES col_b) {
+   for (uint64_t i = 0; i < n; ++i) {
+      auto idx = sel[i];
+      out[i] = (col_a[idx] & 0xF) | ((col_b[idx] & 0xF) << 4);
+   }
+   return n;
+}
+F4 pack_sel_nibble = (F4)&pack_sel_nibble_;
 
 // ---------------------------------------------------------------------------
 // Hash: uint16_t packed key
