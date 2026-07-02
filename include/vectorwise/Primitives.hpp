@@ -9,6 +9,9 @@
 #include <unordered_map>
 // #include "/home/kersten/tools/iaca-lin64/iacaMarks.h"
 
+#define VW_PREFETCH(addr) __builtin_prefetch(addr, 0, 3) // read, L1 hint
+#define VW_PREFETCH_LEAD 16
+
 namespace vectorwise {
 namespace primitives {
 
@@ -171,7 +174,13 @@ pos_t proj_sel_col_val(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
 /// project with input selection vector and column and constant
 {
    const auto constant = *param2;
-   for (uint64_t i = 0; i < n; ++i) {
+   uint64_t i = 0;
+   for (; i + VW_PREFETCH_LEAD < n; ++i) {
+      VW_PREFETCH(&param1[inSel[i + VW_PREFETCH_LEAD]]);
+      const auto idx = inSel[i];
+      result[i] = Op<T>()(param1[idx], constant);
+   }
+   for (; i < n; ++i) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[idx], constant);
    }
@@ -184,7 +193,13 @@ pos_t proj_sel_val_col(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
 /// project with input selection vector and constant and column
 {
    const auto constant = *param1;
-   for (uint64_t i = 0; i < n; ++i) {
+   uint64_t i = 0;
+   for (; i + VW_PREFETCH_LEAD < n; ++i) {
+      VW_PREFETCH(&param2[inSel[i + VW_PREFETCH_LEAD]]);
+      const auto idx = inSel[i];
+      result[i] = Op<T>()(constant, param2[idx]);
+   }
+   for (; i < n; ++i) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(constant, param2[idx]);
    }
@@ -196,7 +211,15 @@ pos_t proj_sel_both_col_col(pos_t n, pos_t* RES inSel, T* RES result,
                             T* RES param1, T* RES param2)
 /// project with input selection vector for both of two columns
 {
-   for (uint64_t i = 0; i < n; ++i) {
+   uint64_t i = 0;
+   for (; i + VW_PREFETCH_LEAD < n; ++i) {
+      const auto futureIdx = inSel[i + VW_PREFETCH_LEAD];
+      VW_PREFETCH(&param1[futureIdx]);
+      VW_PREFETCH(&param2[futureIdx]);
+      const auto idx = inSel[i];
+      result[i] = Op<T>()(param1[idx], param2[idx]);
+   }
+   for (; i < n; ++i) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[idx], param2[idx]);
    }
@@ -290,9 +313,11 @@ pos_t aggr_col(pos_t n, T* RES entries[], T* RES param1, size_t offset)
 /// aggregate into multiple aggregators given by result
 {
    auto p1 = param1;
-   for (auto e = entries, end = e + n; e < end; ++e, ++p1) {
-      auto aggregate = addBytes(*e, offset);
-      *aggregate = Op<T>()(*p1, *aggregate);
+   for (size_t i = 0; i < n; ++i) {
+      if (i + VW_PREFETCH_LEAD < (size_t)n)
+         VW_PREFETCH(entries[i + VW_PREFETCH_LEAD]);
+      auto aggregate = addBytes(entries[i], offset);
+      *aggregate = Op<T>()(p1[i], *aggregate);
    }
    return n;
 }
@@ -303,10 +328,13 @@ pos_t aggr_sel_col(pos_t n, T* RES entries[], pos_t* selParam1, T* RES param1,
 /// aggregate into multiple aggregators given by result, param1 has selection
 /// vector
 {
-   auto s = selParam1;
-   for (auto e = entries, end = e + n; e < end; ++e, ++s) {
-      auto aggregate = addBytes(*e, offset);
-      *aggregate = Op<T>()(param1[*s], *aggregate);
+   for (size_t i = 0; i < n; ++i) {
+      if (i + VW_PREFETCH_LEAD < (size_t)n) {
+         VW_PREFETCH(entries[i + VW_PREFETCH_LEAD]);
+         VW_PREFETCH(&param1[selParam1[i + VW_PREFETCH_LEAD]]);
+      }
+      auto aggregate = addBytes(entries[i], offset);
+      *aggregate = Op<T>()(param1[selParam1[i]], *aggregate);
    }
    return n;
 }
@@ -444,12 +472,16 @@ template <typename T, typename Op>
 pos_t hash_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
 /// compute hash for input column
 {
-   for (uint64_t i = 0; i < n; ++i) {
-      // IACA_START
+   uint64_t i = 0;
+   for (; i + VW_PREFETCH_LEAD < n; ++i) {
+      VW_PREFETCH(&input[inSel[i + VW_PREFETCH_LEAD]]);
       const auto idx = inSel[i];
       result[i] = Op()(input[idx], seed);
    }
-   // IACA_END
+   for (; i < n; ++i) {
+      const auto idx = inSel[i];
+      result[i] = Op()(input[idx], seed);
+   }
    return n;
 }
 

@@ -64,8 +64,7 @@ F3 sel_contains_Varchar_55_col_Varchar_55_val =
 
 #ifdef __AVX512F__
 
-// #define PREFETCH(E) __builtin_prefetch(E);
-#define PREFETCH(E)
+#define PREFETCH(E) __builtin_prefetch(E, 0, 3)
 
 pos_t sel_less_int32_t_col_int32_t_val_avx512_impl(pos_t n, pos_t* RES result,
                                                    int32_t* RES param1,

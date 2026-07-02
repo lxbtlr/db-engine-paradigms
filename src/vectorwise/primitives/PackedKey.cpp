@@ -30,7 +30,17 @@ static pos_t pack_sel_(pos_t n, pos_t* RES sel,
    auto* dst = reinterpret_cast<uint16_t*>(out);
    auto* src_a = reinterpret_cast<uint8_t*>(col_a);
    auto* src_b = reinterpret_cast<uint8_t*>(col_b);
-   for (uint64_t i = 0; i < n; ++i) {
+   constexpr size_t LEAD = 16;
+   uint64_t i = 0;
+   for (; i + LEAD < n; ++i) {
+      auto futureIdx = sel[i + LEAD];
+      __builtin_prefetch(&src_a[futureIdx], 0, 3);
+      __builtin_prefetch(&src_b[futureIdx], 0, 3);
+      auto idx = sel[i];
+      dst[i] = static_cast<uint16_t>(src_a[idx]) |
+               (static_cast<uint16_t>(src_b[idx]) << 8);
+   }
+   for (; i < n; ++i) {
       auto idx = sel[i];
       dst[i] = static_cast<uint16_t>(src_a[idx]) |
                (static_cast<uint16_t>(src_b[idx]) << 8);
@@ -49,7 +59,16 @@ static pos_t pack_sel_nibble_(pos_t n, pos_t* RES sel,
                                uint8_t* RES out,
                                uint8_t* RES col_a,
                                uint8_t* RES col_b) {
-   for (uint64_t i = 0; i < n; ++i) {
+   constexpr size_t LEAD = 16;
+   uint64_t i = 0;
+   for (; i + LEAD < n; ++i) {
+      auto futureIdx = sel[i + LEAD];
+      __builtin_prefetch(&col_a[futureIdx], 0, 3);
+      __builtin_prefetch(&col_b[futureIdx], 0, 3);
+      auto idx = sel[i];
+      out[i] = (col_a[idx] & 0xF) | ((col_b[idx] & 0xF) << 4);
+   }
+   for (; i < n; ++i) {
       auto idx = sel[i];
       out[i] = (col_a[idx] & 0xF) | ((col_b[idx] & 0xF) << 4);
    }

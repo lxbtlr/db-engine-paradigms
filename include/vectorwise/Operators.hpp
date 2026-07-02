@@ -478,7 +478,12 @@ template <typename T>
 pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
    pos_t found = 0;
+   constexpr size_t LEAD = 8;
    for (size_t i = 0; i < n;) {
+      if (i + LEAD < n) {
+         auto futureHash = self()->hashForTuple(i + LEAD);
+         __builtin_prefetch(&ht.entries[futureHash & ht.mask], 0, 3);
+      }
       auto hash = self()->hashForTuple(i);
       auto el = ht.find_chain(hash);
       if (el != ht.end()) {
