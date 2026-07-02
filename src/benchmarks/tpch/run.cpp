@@ -125,7 +125,10 @@ int main(int argc, char* argv[]) {
     } else if (!selectedQuery.empty()) {
         // Run all engines for one query
         for (auto& aq : allQueries) {
-            if (aq.substr(0, selectedQuery.size()) == selectedQuery)
+            // Extract numeric prefix from query id (e.g. "18h" -> "18")
+            size_t numLen = 0;
+            while (numLen < aq.size() && std::isdigit(aq[numLen])) numLen++;
+            if (aq.substr(0, numLen) == selectedQuery)
                 q.insert(aq);
         }
     } else {
