@@ -926,27 +926,34 @@ LUTGroup::LUTGroup(Shared& s) : shared(s) {}
 size_t LUTGroup::next() {
    if (!cont.consumed) {
       // Phase 1: consume all input, aggregate into thread-local LUT
-      localAccum.resize(LUT_SIZE * nValues, 0);
+      // Transposed layout: one int64_t[LUT_SIZE] array per value.
+      // This eliminates the key*nValues multiply and keeps each value's
+      // accumulators contiguous for cache-friendly access.
+      localStorage.resize(nValues * LUT_SIZE, 0);
+      localAccum.resize(nValues);
+      for (size_t v = 0; v < nValues; ++v)
+         localAccum[v] = localStorage.data() + v * LUT_SIZE;
       localOccupied.resize(LUT_SIZE, false);
 
+      // Fused inner loop: one pass over tuples, all values accumulated per tuple.
+      // Snapshot column pointers per vector (Scan updates them between calls).
+      int64_t* cols[8]; // Q1 has 5 values; 8 is plenty
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         // Mark occupied keys in one pass
-         for (pos_t i = 0; i < n; ++i)
-            localOccupied[packedKeys[i]] = true;
-         // Accumulate each value
-         for (size_t v = 0; v < nValues; ++v) {
-            auto& spec = valueSpecs[v];
-            if (spec.isCount) {
-               for (pos_t i = 0; i < n; ++i)
-                  localAccum[packedKeys[i] * nValues + v] += 1;
-            } else if (spec.hasSel) {
-               auto* col = reinterpret_cast<int64_t*>(spec.colData);
-               for (pos_t i = 0; i < n; ++i)
-                  localAccum[packedKeys[i] * nValues + v] += col[selVec[i]];
-            } else {
-               auto* col = reinterpret_cast<int64_t*>(spec.colData);
-               for (pos_t i = 0; i < n; ++i)
-                  localAccum[packedKeys[i] * nValues + v] += col[i];
+         for (size_t v = 0; v < nValues; ++v)
+            cols[v] = reinterpret_cast<int64_t*>(valueSpecs[v].colData);
+
+         for (pos_t i = 0; i < n; ++i) {
+            auto key = packedKeys[i];
+            localOccupied[key] = true;
+            auto si = selVec[i];
+            for (size_t v = 0; v < nValues; ++v) {
+               auto& spec = valueSpecs[v];
+               if (spec.isCount)
+                  localAccum[v][key] += 1;
+               else if (spec.hasSel)
+                  localAccum[v][key] += cols[v][si];
+               else
+                  localAccum[v][key] += cols[v][i];
             }
          }
       }
@@ -956,7 +963,11 @@ size_t LUTGroup::next() {
          std::lock_guard<std::mutex> lock(shared.mergeMutex);
          if (!shared.globalInitialized) {
             shared.nValues = nValues;
-            shared.globalAccum.resize(LUT_SIZE * nValues, 0);
+            shared.globalStorage.resize(nValues * LUT_SIZE, 0);
+            shared.globalAccum.resize(nValues);
+            for (size_t v = 0; v < nValues; ++v)
+               shared.globalAccum[v] =
+                   shared.globalStorage.data() + v * LUT_SIZE;
             shared.globalOccupied.resize(LUT_SIZE, false);
             shared.globalInitialized = true;
          }
@@ -964,11 +975,11 @@ size_t LUTGroup::next() {
             if (localOccupied[k]) {
                shared.globalOccupied[k] = true;
                for (size_t v = 0; v < nValues; ++v)
-                  shared.globalAccum[k * nValues + v] +=
-                      localAccum[k * nValues + v];
+                  shared.globalAccum[v][k] += localAccum[v][k];
             }
          }
       }
+      localStorage.clear();
       localAccum.clear();
       localOccupied.clear();
 
@@ -988,13 +999,11 @@ size_t LUTGroup::next() {
    for (; cont.lutPos < LUT_SIZE && produced < vecSize; ++cont.lutPos) {
       if (!shared.globalOccupied[cont.lutPos]) continue;
       uint16_t key = cont.lutPos;
-      // Unpack key into returnflag (byte 0) and linestatus (byte 1)
       retOut[produced].value = static_cast<char>(key & 0xFF);
       statOut[produced].value = static_cast<char>((key >> 8) & 0xFF);
-      // Copy aggregate values
       for (size_t v = 0; v < nValues; ++v) {
          auto* dst = reinterpret_cast<int64_t*>(outValues[v]);
-         dst[produced] = shared.globalAccum[cont.lutPos * nValues + v];
+         dst[produced] = shared.globalAccum[v][cont.lutPos];
       }
       ++produced;
    }
