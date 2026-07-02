@@ -17,30 +17,27 @@ namespace vectorwise {
 namespace primitives {
 
 // ---------------------------------------------------------------------------
-// Pack: two void* columns -> contiguous output buffer (via selection vector)
+// Pack: two void* columns -> contiguous void* output buffer (via selection vector)
 // Signature: F4 (n, sel, out, col_a, col_b)
-// Template params SIZE_A, SIZE_B are the byte widths of each source column.
-// Output element is SIZE_A + SIZE_B bytes.
+// Concatenates one byte from each source into a uint16_t output.
+// The caller casts the output buffer to the appropriate type based on
+// the known input sizes (e.g. Char<1> + Char<1> → uint16_t*).
 // ---------------------------------------------------------------------------
-template <size_t SIZE_A, size_t SIZE_B>
 static pos_t pack_sel_(pos_t n, pos_t* RES sel,
                        void* RES out,
                        void* RES col_a,
                        void* RES col_b) {
-   constexpr size_t OUT_SIZE = SIZE_A + SIZE_B;
-   auto* dst = reinterpret_cast<uint8_t*>(out);
+   auto* dst = reinterpret_cast<uint16_t*>(out);
    auto* src_a = reinterpret_cast<uint8_t*>(col_a);
    auto* src_b = reinterpret_cast<uint8_t*>(col_b);
    for (uint64_t i = 0; i < n; ++i) {
       auto idx = sel[i];
-      std::memcpy(dst + i * OUT_SIZE,            src_a + idx * SIZE_A, SIZE_A);
-      std::memcpy(dst + i * OUT_SIZE + SIZE_A,   src_b + idx * SIZE_B, SIZE_B);
+      dst[i] = static_cast<uint16_t>(src_a[idx]) |
+               (static_cast<uint16_t>(src_b[idx]) << 8);
    }
    return n;
 }
-
-// Instantiate for Q1: Char<1> + Char<1> = 2 bytes (uint16_t output)
-F4 pack_sel_void_1_1 = (F4)&pack_sel_<1, 1>;
+F4 pack_sel = (F4)&pack_sel_;
 
 // ---------------------------------------------------------------------------
 // Pack two Char<1> columns into a single uint8_t using low nibbles:

@@ -161,31 +161,29 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
                       Buffer(charge, sizeof(int64_t)),
                       Buffer(disc_price, sizeof(int64_t)),
-                      Buffer(result_proj_plus, sizeof(int64_t))));
+                      Buffer(result_proj_plus, sizeof(int64_t))))
+       // Pack two Char<1> keys into a single uint16_t so HashGroup uses one
+       // addKey instead of two — eliminates rehash, second key-equality check,
+       // second partitioning, and multi-round htFollow for composite keys.
+       .addExpression(
+           Expression().addOp(primitives::pack_sel,
+                              Buffer(sel_date),
+                              Buffer(packed_key, sizeof(uint16_t)),
+                              Column(lineitem, "l_returnflag"),
+                              Column(lineitem, "l_linestatus")));
    HashGroup()
        .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
-       .addKey(Column(lineitem, "l_returnflag"), Buffer(sel_date),
-               primitives::hash_sel_Char_1_col,
-               primitives::keys_not_equal_sel_Char_1_col,
-               primitives::partition_by_key_sel_Char_1_col,
-               Buffer(sel_date_grouped, sizeof(pos_t)),
-               primitives::scatter_sel_Char_1_col,
-               primitives::keys_not_equal_row_Char_1_col,
-               primitives::partition_by_key_row_Char_1_col,
-               primitives::scatter_sel_row_Char_1_col,
-               primitives::gather_val_Char_1_col,
+       // Single packed uint16_t key — one hash, one equality check, no multi-round
+       .addKey(Buffer(packed_key),
+               primitives::hash_uint16_t_col,
+               primitives::keys_not_equal_uint16_t_col,
+               primitives::partition_by_key_uint16_t_col,
+               primitives::scatter_sel_uint16_t_col,
+               primitives::keys_not_equal_row_uint16_t_col,
+               primitives::partition_by_key_row_uint16_t_col,
+               primitives::scatter_sel_row_uint16_t_col,
+               primitives::unpack_q1key_returnflag,
                Buffer(returnflag, sizeof(Char_1)))
-       .addKey(Column(lineitem, "l_linestatus"), Buffer(sel_date),
-               primitives::rehash_sel_Char_1_col,
-               primitives::keys_not_equal_sel_Char_1_col,
-               primitives::partition_by_key_sel_Char_1_col,
-               Buffer(sel_date_grouped, sizeof(pos_t)),
-               primitives::scatter_sel_Char_1_col,
-               primitives::keys_not_equal_row_Char_1_col,
-               primitives::partition_by_key_row_Char_1_col,
-               primitives::scatter_sel_row_Char_1_col,
-               primitives::gather_val_Char_1_col,
-               Buffer(linestatus, sizeof(Char_1)))
        .padToAlign(sizeof(types::Numeric<12, 4>))
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_plus_int64_t_col,
@@ -216,6 +214,19 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                  primitives::gather_val_int64_t_col,
                  Buffer(count_order, sizeof(uint64_t)));
 
+   // Add a second gather to unpack linestatus (byte 1 of the packed uint16_t key)
+   {
+      auto entryOffset = sizeof(runtime::Hashmap::EntryHeader);
+      auto& op = *static_cast<vectorwise::HashGroup*>(
+          operatorStack.top().get());
+      auto gather_linestatus = std::make_unique<GatherOpVal>(
+          primitives::unpack_q1key_linestatus,
+          reinterpret_cast<void**>(op.globalAggregation.htMatches),
+          entryOffset, &op.globalAggregation.ht_entry_size,
+          Buffer(linestatus, sizeof(Char_1)));
+      op.gatherGroups.ops.push_back(std::move(gather_linestatus));
+   }
+
    result.addValue("l_returnflag", Buffer(returnflag))
        .addValue("l_linestatus", Buffer(linestatus))
        .addValue("sum_qty", Buffer(sum_qty))
@@ -225,7 +236,6 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
        .addValue("count_order", Buffer(count_order))
        .finalize();
 
-   // TODO: add averages
    r->rootOp = popOperator();
    return r;
 }
