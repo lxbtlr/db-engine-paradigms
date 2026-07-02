@@ -935,25 +935,27 @@ size_t LUTGroup::next() {
          localAccum[v] = localStorage.data() + v * LUT_SIZE;
       localOccupied.resize(LUT_SIZE, false);
 
-      // Fused inner loop: one pass over tuples, all values accumulated per tuple.
-      // Snapshot column pointers per vector (Scan updates them between calls).
-      int64_t* cols[8]; // Q1 has 5 values; 8 is plenty
+      // Separate loop per value — keeps each loop branch-free so the compiler
+      // can auto-vectorize. Transposed layout (localAccum[v][key]) eliminates
+      // the key*nValues multiply from the interleaved layout.
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         for (size_t v = 0; v < nValues; ++v)
-            cols[v] = reinterpret_cast<int64_t*>(valueSpecs[v].colData);
+         for (pos_t i = 0; i < n; ++i)
+            localOccupied[packedKeys[i]] = true;
 
-         for (pos_t i = 0; i < n; ++i) {
-            auto key = packedKeys[i];
-            localOccupied[key] = true;
-            auto si = selVec[i];
-            for (size_t v = 0; v < nValues; ++v) {
-               auto& spec = valueSpecs[v];
-               if (spec.isCount)
-                  localAccum[v][key] += 1;
-               else if (spec.hasSel)
-                  localAccum[v][key] += cols[v][si];
-               else
-                  localAccum[v][key] += cols[v][i];
+         for (size_t v = 0; v < nValues; ++v) {
+            auto& spec = valueSpecs[v];
+            auto* accum = localAccum[v];
+            if (spec.isCount) {
+               for (pos_t i = 0; i < n; ++i)
+                  accum[packedKeys[i]] += 1;
+            } else if (spec.hasSel) {
+               auto* col = reinterpret_cast<int64_t*>(spec.colData);
+               for (pos_t i = 0; i < n; ++i)
+                  accum[packedKeys[i]] += col[selVec[i]];
+            } else {
+               auto* col = reinterpret_cast<int64_t*>(spec.colData);
+               for (pos_t i = 0; i < n; ++i)
+                  accum[packedKeys[i]] += col[i];
             }
          }
       }
