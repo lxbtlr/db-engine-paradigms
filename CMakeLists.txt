@@ -188,8 +188,8 @@ find_package(TBB)
 include_directories(${TBB_INCLUDE_DIRS})
 include_directories("3rdparty/simde")
 
-add_subdirectory("3rdparty/timer")
-include_directories("3rdparty/timer/src")
+# add_subdirectory("3rdparty/timer")
+# include_directories("3rdparty/timer/src")
 
 IF(LINUX)
   #add_subdirectory(3rdparty/jevents)
@@ -217,7 +217,7 @@ target_include_directories(common PUBLIC
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
                                                     
-target_link_libraries(common PUBLIC timers)
+target_link_libraries(common PUBLIC)
 
 # Link libnuma if NUMA_MBIND is enabled
 if(NUMA_LINK_LIBRARIES)
