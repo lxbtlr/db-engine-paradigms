@@ -393,6 +393,12 @@ F4 selsel_less_equal_int64_t_col_int64_t_val_avx512 =
 // yields a partial predicate on the final iteration. That removes the scalar
 // remainder loop the AVX-512 kernels carry. After svcompact the matching
 // elements occupy the low lanes; we store the first popcount of them.
+//
+// NOTE: the SVE unsigned load/store intrinsics (svld1_u32, svld1uw_u64,
+// svst1_u32, svst1w_u64) take (const) uint32_t*. pos_t is 32-bit but its
+// signedness is not guaranteed by the static_assert, so result/inSel are cast
+// to uint32_t* explicitly -- otherwise a signed pos_t fails to compile (GCC
+// rejects the int*->unsigned int* conversion without -fpermissive).
 // ---------------------------------------------------------------------------
 
 pos_t sel_less_int32_t_col_int32_t_val_sve_impl(pos_t n, pos_t* RES result,
@@ -412,7 +418,7 @@ pos_t sel_less_int32_t_col_int32_t_val_sve_impl(pos_t n, pos_t* RES result,
       svuint32_t packed = svcompact_u32(lt, ids);
       uint64_t cnt = svcntp_b32(pg, lt);
       svbool_t store_pg = svwhilelt_b32_u64((uint64_t)0, cnt);
-      svst1_u32(store_pg, result + found, packed);
+      svst1_u32(store_pg, (uint32_t*)(result + found), packed);
       found += cnt;
    }
    return found;
@@ -429,13 +435,13 @@ pos_t selsel_greater_equal_int32_t_col_int32_t_val_sve_impl(
    const uint64_t vl = svcntw();
    for (uint64_t i = 0; i < n; i += vl) {
       svbool_t pg = svwhilelt_b32_u64(i, (uint64_t)n);
-      svuint32_t idxs = svld1_u32(pg, inSel + i);
+      svuint32_t idxs = svld1_u32(pg, (const uint32_t*)(inSel + i));
       svint32_t in = svld1_gather_u32index_s32(pg, param1, idxs);
       svbool_t ge = svcmpge_s32(pg, in, consts);
       svuint32_t packed = svcompact_u32(ge, idxs);
       uint64_t cnt = svcntp_b32(pg, ge);
       svbool_t store_pg = svwhilelt_b32_u64((uint64_t)0, cnt);
-      svst1_u32(store_pg, result + found, packed);
+      svst1_u32(store_pg, (uint32_t*)(result + found), packed);
       found += cnt;
    }
    return found;
@@ -456,13 +462,13 @@ pos_t selsel_greater_equal_int32_t_col_int32_t_val_sve_impl(
       const uint64_t vl = svcntd();                                           \
       for (uint64_t i = 0; i < n; i += vl) {                                  \
          svbool_t pg = svwhilelt_b64_u64(i, (uint64_t)n);                     \
-         svuint64_t idxs = svld1uw_u64(pg, inSel + i);                        \
+         svuint64_t idxs = svld1uw_u64(pg, (const uint32_t*)(inSel + i));     \
          svint64_t in = svld1_gather_u64index_s64(pg, param1, idxs);          \
          svbool_t m = SVCMP(pg, in, consts);                                  \
          svuint64_t packed = svcompact_u64(m, idxs);                          \
          uint64_t cnt = svcntp_b64(pg, m);                                    \
          svbool_t store_pg = svwhilelt_b64_u64((uint64_t)0, cnt);             \
-         svst1w_u64(store_pg, result + found, packed);                        \
+         svst1w_u64(store_pg, (uint32_t*)(result + found), packed);           \
          found += cnt;                                                        \
       }                                                                       \
       return found;                                                           \
