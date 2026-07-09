@@ -663,13 +663,13 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    // col.registerDS registers the pointer with the Scan so it gets
    // updated to the current chunk's base on each Scan::next().
    if (fusedKeyCount == 0) {
-      local.keyCol0 = col.data;
-      col.registerDS(&local.keyCol0);
+      local.keyCol0 = reinterpret_cast<const char*>(col.data);
+      col.registerDS(reinterpret_cast<void**>(&local.keyCol0));
       local.keyOffset0 = entryOffset;
       local.keySel = sel;
    } else if (fusedKeyCount == 1) {
-      local.keyCol1 = col.data;
-      col.registerDS(&local.keyCol1);
+      local.keyCol1 = reinterpret_cast<const char*>(col.data);
+      col.registerDS(reinterpret_cast<void**>(&local.keyCol1));
    }
    ++fusedKeyCount;
 #endif

@@ -340,14 +340,8 @@ class HashGroup : public UnaryOperator {
       void* rowData;
 
 #ifdef FUSED_GROUP_LOOKUP
-      /// Key column pointers for the fused lookup path.
-      /// For Q1: two Char<1> columns (l_returnflag, l_linestatus).
-      void* keyCol0 = nullptr;
-      void* keyCol1 = nullptr;
       /// Offset of the first key within the HT entry (after EntryHeader).
       size_t keyOffset0 = 0;
-      /// Selection vector for key columns (nullptr = no selection).
-      pos_t* keySel = nullptr;
 #endif
 
       /// ------ group creation
@@ -381,6 +375,27 @@ class HashGroup : public UnaryOperator {
    class ColumnGroupLookup : public GroupLookup<ColumnGroupLookup> {
     public:
       hash_t hashForTuple(size_t i) { return groupHashes[i]; }
+
+#ifdef FUSED_GROUP_LOOKUP
+      /// Key column pointers for the fused lookup path.
+      /// For Q1: two Char<1> columns (l_returnflag, l_linestatus), accessed
+      /// through a selection vector (keySel) that maps vector position to
+      /// base-column index.
+      const char* keyCol0 = nullptr;
+      const char* keyCol1 = nullptr;
+      pos_t* keySel = nullptr;
+
+      /// Returns the composite 2-byte key for tuple i, applying the
+      /// selection vector the same way hashForTuple returns the hash.
+      uint16_t keyForTuple(size_t i) {
+         pos_t srcIdx = keySel ? keySel[i] : i;
+         uint16_t k;
+         reinterpret_cast<char*>(&k)[0] = keyCol0[srcIdx];
+         reinterpret_cast<char*>(&k)[1] = keyCol1[srcIdx];
+         return k;
+      }
+#endif
+
       ColumnGroupLookup(HashGroup& p) : GroupLookup<ColumnGroupLookup>(p){};
    };
 
@@ -392,6 +407,11 @@ class HashGroup : public UnaryOperator {
       hash_t hashForTuple(size_t i) {
          return *addBytes(reinterpret_cast<hash_t*>(rowData), rowSize * i);
       }
+#ifdef FUSED_GROUP_LOOKUP
+      // Stub — fused path is never taken for RowGroupLookup (keyOffset0 == 0),
+      // but the template instantiation requires the method to exist.
+      uint16_t keyForTuple(size_t /*i*/) { __builtin_unreachable(); }
+#endif
       RowGroupLookup(HashGroup& p) : GroupLookup<RowGroupLookup>(p){};
    };
 
@@ -479,28 +499,20 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    // Data-dependency variant hook: to chain operators and defeat register
    // residency, replace the inner loop body with a sequence of dependent
    // loads that force each step to wait on the previous result.
-   if (keyCol0 && keyCol1) {
-      auto* col0 = reinterpret_cast<types::Char<1>*>(keyCol0);
-      auto* col1 = reinterpret_cast<types::Char<1>*>(keyCol1);
+   if (keyOffset0) {
       const size_t koff = keyOffset0;
 
       pos_t found = 0;
       for (pos_t i = 0; i < n; ++i) {
          auto hash = self()->hashForTuple(i);
+         auto probeKey = self()->keyForTuple(i);
 
-         // Build the composite key for this tuple (2 bytes).
-         // keySel maps from vector position to base-column index.
-         pos_t srcIdx = keySel ? keySel[i] : i;
-         char probeKey[2];
-         probeKey[0] = col0[srcIdx].value;
-         probeKey[1] = col1[srcIdx].value;
-
-         // Walk the chain — one pass, checking hash + full key.
-         auto* el = ht.find_chain(hash);
-         for (; el != ht.end(); el = el->next) {
+         // Walk the chain — one pass, checking hash + full 2-byte key.
+         for (auto* el = ht.find_chain(hash); el != ht.end(); el = el->next) {
             if (el->hash == hash) {
-               auto* entryKey = reinterpret_cast<const char*>(el) + koff;
-               if (memcmp(entryKey, probeKey, 2) == 0) {
+               auto entryKey = *reinterpret_cast<const uint16_t*>(
+                   reinterpret_cast<const char*>(el) + koff);
+               if (entryKey == probeKey) {
                   htMatches[i] = el;
                   groupsFound[found++] = i;
                   goto matched;
