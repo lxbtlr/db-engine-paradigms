@@ -6,6 +6,7 @@
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/PartitionedDeque.hpp"
 #include "common/runtime/Query.hpp"
+#include "common/runtime/Types.hpp"
 #include "vectorwise/Primitives.hpp"
 #include <atomic>
 #include <cstdint>
@@ -306,15 +307,10 @@ class HashGroup : public UnaryOperator {
 
    template <typename T> class GroupLookup {
 
-      /// Pass 1 of lookup: for each tuple, prefetch and load the chain head
-      /// from the HT into htMatches[i]. No comparison is done here — all n
-      /// tuples are written to groupsFound as candidates.
+      /// Pass 1: load chain heads into htMatches. No comparison.
       void htProbe(pos_t n, decltype(ht) & ht);
-      /// Pass 2 of lookup: compare hashes in htMatches against groupHashes,
-      /// classify into groupsFound (hit) or groupsNotFound (miss).
+      /// Pass 2: compare hashes, classify into groupsFound / groupsNotFound.
       pos_t htLookup(pos_t n, decltype(ht) & ht);
-      /// Follows chains in ht for entries in keysNEq
-      pos_t htFollow(decltype(ht) & ht);
 
       HashGroup& parent;
 
@@ -342,6 +338,17 @@ class HashGroup : public UnaryOperator {
       SizeBuffer<pos_t>* groupsNotFound;
       /// Pointer to current row format input
       void* rowData;
+
+#ifdef FUSED_GROUP_LOOKUP
+      /// Key column pointers for the fused lookup path.
+      /// For Q1: two Char<1> columns (l_returnflag, l_linestatus).
+      void* keyCol0 = nullptr;
+      void* keyCol1 = nullptr;
+      /// Offset of the first key within the HT entry (after EntryHeader).
+      size_t keyOffset0 = 0;
+      /// Selection vector for key columns (nullptr = no selection).
+      pos_t* keySel = nullptr;
+#endif
 
       /// ------ group creation
       /// Creates missing groups. Returns number of groups created.
@@ -422,50 +429,27 @@ class HashGroup : public UnaryOperator {
 
 template <typename T>
 void HashGroup::GroupLookup<T>::htProbe(pos_t n, runtime::Hashmap& ht) {
-   // Pass 1: scatter — load chain heads for all n tuples into htMatches.
-   // Prefetch distance of 16 keeps ~16 cache misses in flight, hiding the
-   // latency of scattered HT bucket loads before htLookup inspects them.
-   static constexpr pos_t PREFETCH_DIST = 16;
-
-   const pos_t primeEnd = std::min(n, PREFETCH_DIST);
-   /*for (pos_t j = 0; j < primeEnd; ++j) {
-      __builtin_prefetch(&ht.entries[self()->hashForTuple(j) & ht.mask], 0, 1);
-   }*/
-
    for (pos_t i = 0; i < n; ++i) {
-      //if (i + PREFETCH_DIST < n)
-         //__builtin_prefetch(&ht.entries[self()->hashForTuple(i + PREFETCH_DIST) & ht.mask], 0, 1);
       htMatches[i] = ht.find_chain(self()->hashForTuple(i));
-      groupsFound[i] = i; // all tuples are candidates until htLookup filters them
+      groupsFound[i] = i;
    }
 }
 
 template <typename T>
 pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::htLookup(pos_t n, decltype(ht) & ht) {
-   // NOTE: now that we have the chains, lets walk them
-   // FIXME: seems like this should be reduced into HTProbe, make sure the keys are available here
-   
-   // Pass 2: compare — htMatches is already populated by htProbe.
-   // Walk each chain head and classify into groupsFound (hash match) or
-   // groupsNotFound (empty bucket or no hash match in chain).
    pos_t found = 0;
    for (pos_t i = 0; i < n; ++i) {
       auto hash = self()->hashForTuple(i);
-      // TODO: instead of ht matches 
-      // htMatches[i] = ht.find_chain(self()->hashForTuple(i));
       auto el = htMatches[i];
       if (el != ht.end()) {
-
-         if (el->hash == hash && el->key == keys) {
-         //if (el->hash == hash) {
+         if (el->hash == hash) {
             htMatches[i] = el;
             groupsFound[found++] = i;
             goto nextChain;
          }
          for (el = el->next; el != ht.end(); el = el->next)
-            if (el->hash == hash && el->key == keys) {
-            //if (el->hash == hash) {
+            if (el->hash == hash) {
                htMatches[i] = el;
                groupsFound[found++] = i;
                goto nextChain;
@@ -478,56 +462,62 @@ HashGroup::GroupLookup<T>::htLookup(pos_t n, decltype(ht) & ht) {
 }
 
 template <typename T>
-pos_t HashGroup::GroupLookup<T>::htFollow(runtime::Hashmap& ht)
-/// follows chains in keysNEq
-{
-   pos_t found = 0;
-   
-   for (size_t i = 0, end = keysNEq->size(); i < end;) {
-      auto idx = keysNEq->operator[](i);
-      for (auto e = htMatches[idx]->next; e != ht.end(); e = e->next) {
-         auto hash = self()->hashForTuple(idx);
-         //if (e->hash == hash && e->key == keys[idx]) {
-         if (e->hash == hash ) {
-            htMatches[idx] = e;
-            groupsFound[found++] = idx;
-            goto nextChain;
-         }
-         groupsNotFound->push_back(i);
-      }
-   nextChain:
-      ++i;
-   }
-   return found;
-}
-
-template <typename T>
 pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
-  // FIXME: This performs 3 scans over the HT -- this is insane and taxes us 3x
-
-  // TODO: Type specialize this for Char<2> -- leave generic implementation
    keysNEq->clear();
    groupsNotFound->clear();
-   // Pass 1: prefetch + load all chain heads into htMatches (no comparison)
-   //
-   // DEBUG: lets remove you htProbe(n, ht);
-   //
-   // Pass 2: hash comparison + chain walk over already-loaded htMatches
-   // UPDATE: this now does both the probe and the lookup in the same loop
-   auto found = htLookup(n, ht); // TODO: in specialized version, open this up into this method
 
-   // Pass 3: key equality check over candidates
-   // FIXME: This should be memcmp -- using the loop seems bad
+#ifdef FUSED_GROUP_LOOKUP
+   // Fused single-loop group lookup modeled on Hashmapx::findOne.
+   // For each tuple, walks the chain once checking both hash AND composite key
+   // (two Char<1> columns, contiguous in the entry) via memcmp. Collapses
+   // htProbe + htLookup + keyEquality + htFollow into one pass.
    //
-   /*auto keysEqual = keyEquality.evaluate(found);
-   while (keysNEq->size()) {
-      found = htFollow(ht);
-      if (!found) break;
-      keysNEq->clear();
-      keysEqual += keyEquality.evaluate(found);
-   }*/
-   // TODO: n
+   // Only active for ColumnGroupLookup (local preaggregation) where keyCol0/1
+   // are set. RowGroupLookup (global aggregation) falls through to multi-pass.
+   //
+   // Data-dependency variant hook: to chain operators and defeat register
+   // residency, replace the inner loop body with a sequence of dependent
+   // loads that force each step to wait on the previous result.
+   if (keyCol0 && keyCol1) {
+      auto* col0 = reinterpret_cast<types::Char<1>*>(keyCol0);
+      auto* col1 = reinterpret_cast<types::Char<1>*>(keyCol1);
+      const size_t koff = keyOffset0;
+
+      pos_t found = 0;
+      for (pos_t i = 0; i < n; ++i) {
+         auto hash = self()->hashForTuple(i);
+
+         // Build the composite key for this tuple (2 bytes).
+         // keySel maps from vector position to base-column index.
+         pos_t srcIdx = keySel ? keySel[i] : i;
+         char probeKey[2];
+         probeKey[0] = col0[srcIdx].value;
+         probeKey[1] = col1[srcIdx].value;
+
+         // Walk the chain — one pass, checking hash + full key.
+         auto* el = ht.find_chain(hash);
+         for (; el != ht.end(); el = el->next) {
+            if (el->hash == hash) {
+               auto* entryKey = reinterpret_cast<const char*>(el) + koff;
+               if (memcmp(entryKey, probeKey, 2) == 0) {
+                  htMatches[i] = el;
+                  groupsFound[found++] = i;
+                  goto matched;
+               }
+            }
+         }
+         groupsNotFound->push_back(i);
+      matched:;
+      }
+      return found;
+   }
+#endif // FUSED_GROUP_LOOKUP
+
+   // Multi-pass fallback: probe → hash-compare → key equality.
+   htProbe(n, ht);
+   auto found = htLookup(n, ht);
+   auto keysEqual = keyEquality.evaluate(found);
    return keysEqual;
 }
 

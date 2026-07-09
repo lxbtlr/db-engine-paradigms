@@ -95,6 +95,9 @@ class QueryBuilder {
       } localLookup, globalLookup;
 
       HashGroupBuilder(QueryBuilder& base);
+#ifdef FUSED_GROUP_LOOKUP
+      size_t fusedKeyCount;
+#endif
 
       using B = HashGroupBuilder;
       B& addKey(DS col, primitives::F2 hash,

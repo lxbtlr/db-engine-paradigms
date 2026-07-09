@@ -254,15 +254,15 @@ template <unsigned maxLen> class Char {
    /// Comparison
    bool operator>=(const Char& other) const;
 
-   // Concat
-   Char operator+(const Char& other) const;
-    // FIXME: Concat should look like below and not above: this should be two input chars and return a new third
-  // static Char build(Char* value) {
-  //    Char result;
-  //    memcpy(result.value, value, maxLen);
-  //    result.len = strnlen(result.value, maxLen);
-  //    return result;
-  // }
+   /// Concat two Char values into a wider Char (memcpy-based).
+   template <unsigned otherLen>
+   Char<maxLen + otherLen> concat(const Char<otherLen>& other) const {
+      Char<maxLen + otherLen> result;
+      result.len = len + other.len;
+      memcpy(result.value, value, maxLen);
+      memcpy(result.value + maxLen, other.value, otherLen);
+      return result;
+   }
 
    /// Build
    static Char build(const char* value) {
@@ -387,6 +387,25 @@ template <> class Char<1> {
    bool operator>(const Char& other) const { return value > other.value; }
    /// Comparison
    bool operator>=(const Char& other) const { return value >= other.value; }
+
+   /// Concat two Char values into a wider Char (memcpy-based).
+   template <unsigned otherLen>
+   Char<1 + otherLen> concat(const Char<otherLen>& other) const {
+      Char<1 + otherLen> result;
+      result.len = 1 + other.length();
+      result.value[0] = value;
+      memcpy(result.value + 1, other.begin(), otherLen);
+      return result;
+   }
+
+   /// Concat two Char<1> values into Char<2>.
+   Char<2> concat(const Char<1>& other) const {
+      Char<2> result;
+      result.len = 2;
+      result.value[0] = value;
+      result.value[1] = other.value;
+      return result;
+   }
 
    /// Build
    static Char build(const char* value) {

@@ -436,7 +436,11 @@ QueryBuilder::HashJoinBuilder::pushProbeSelVector(DS sel, DS target) {
    return *this;
 }
 
-QueryBuilder::HashGroupBuilder::HashGroupBuilder(QueryBuilder& b) : base(b) {}
+QueryBuilder::HashGroupBuilder::HashGroupBuilder(QueryBuilder& b) : base(b)
+#ifdef FUSED_GROUP_LOOKUP
+   , fusedKeyCount(0)
+#endif
+{}
 
 QueryBuilder::HashGroupBuilder QueryBuilder::HashGroup() {
    HashGroupBuilder b(*this);
@@ -653,6 +657,22 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    sel.registerDS(&neqCheck->probeSel);
    col.registerDS(&neqCheck->probeKey);
    local.keyEquality += move(neqCheck);
+
+#ifdef FUSED_GROUP_LOOKUP
+   // Register key column pointers for the fused lookup path.
+   // col.registerDS registers the pointer with the Scan so it gets
+   // updated to the current chunk's base on each Scan::next().
+   if (fusedKeyCount == 0) {
+      local.keyCol0 = col.data;
+      col.registerDS(&local.keyCol0);
+      local.keyOffset0 = entryOffset;
+      local.keySel = sel;
+   } else if (fusedKeyCount == 1) {
+      local.keyCol1 = col.data;
+      col.registerDS(&local.keyCol1);
+   }
+   ++fusedKeyCount;
+#endif
 
    auto neqCheckGlobal = make_unique<NEQCheckRowOp>(
        eqG, global.groupsFound, reinterpret_cast<void**>(global.htMatches),
