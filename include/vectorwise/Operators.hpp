@@ -380,9 +380,9 @@ class HashGroup : public UnaryOperator {
       /// Key column pointers for the fused lookup path.
       /// For Q1: two Char<1> columns (l_returnflag, l_linestatus), accessed
       /// through a selection vector (keySel) that maps vector position to
-      /// base-column index.
-      const char* keyCol0 = nullptr;
-      const char* keyCol1 = nullptr;
+      /// base-column index. Non-const because the Scan updates them per chunk.
+      char* keyCol0 = nullptr;
+      char* keyCol1 = nullptr;
       pos_t* keySel = nullptr;
 
       /// Returns the composite 2-byte key for tuple i, applying the
