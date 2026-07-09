@@ -104,6 +104,7 @@ inline Hashmap::EntryHeader* Hashmap::update(Hashmap::EntryHeader* old,
 }
 
 inline Hashmap::EntryHeader* Hashmap::find_chain(hash_t hash) {
+  // NOTE: this is how simple hyper & VW is for finding the hash
    auto pos = hash & mask;
    return entries[pos].load(std::memory_order_relaxed);
 }
@@ -334,6 +335,7 @@ Hashmapx<K, V, H, useTags>::findOneEntry(const K& key, hash_t h) {
 
 template <typename K, typename V, typename H, bool useTags>
 inline V* Hashmapx<K, V, H, useTags>::findOne(const K& key) {
+  // NOTE: this is how 98% of time in the hyper hash is spent
    auto h = hash(key, seed);
    Entry* entry;
    if (useTags)
@@ -342,6 +344,7 @@ inline V* Hashmapx<K, V, H, useTags>::findOne(const K& key) {
       entry = reinterpret_cast<Entry*>(find_chain(h));
    if (entry == end()) return nullptr;
    for (; entry != end(); entry = reinterpret_cast<Entry*>(entry->h.next))
+     // if h is an integer then checking the hash does not make sense, leaving bc we dont care rn
       if (entry->h.hash == h && entry->k == key) return &entry->v;
    return nullptr;
 }

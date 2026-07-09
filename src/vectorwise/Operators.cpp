@@ -876,11 +876,14 @@ size_t HashGroup::next() {
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
          // 1. Hash: compute group key hashes for the entire morsel
-         groupHash.evaluate(n);
+         groupHash.evaluate(n); // Already fixed
          // 2. Lookup: find existing groups / classify misses.
          //    htLookup pipelines prefetches internally (prefetch i+D, process i)
          //    to hide HT bucket load latency without a separate pass.
-         preAggregation.findGroups(n, ht);
+
+         preAggregation.findGroups(n, ht); // FIXME: This is wild
+         
+         // 
          // 3. Create: allocate and insert entries for unseen groups
          auto groupsCreated = preAggregation.createMissingGroups(ht, false);
          // 4. Aggregate: update accumulators for all matched groups

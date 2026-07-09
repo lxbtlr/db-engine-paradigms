@@ -254,6 +254,16 @@ template <unsigned maxLen> class Char {
    /// Comparison
    bool operator>=(const Char& other) const;
 
+   // Concat
+   Char operator+(const Char& other) const;
+    // FIXME: Concat should look like below and not above: this should be two input chars and return a new third
+  // static Char build(Char* value) {
+  //    Char result;
+  //    memcpy(result.value, value, maxLen);
+  //    result.len = strnlen(result.value, maxLen);
+  //    return result;
+  // }
+
    /// Build
    static Char build(const char* value) {
       Char result;
