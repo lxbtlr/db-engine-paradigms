@@ -1,4 +1,4 @@
-#ifdef __SSE4_2__Types
+#ifdef __SSE4_2__
 #include <nmmintrin.h>
 #endif
 #include "common/runtime/Types.hpp"
