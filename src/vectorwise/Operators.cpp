@@ -890,9 +890,9 @@ size_t HashGroup::next() {
       }
       flushAndClear(); // flush remaining entries into spillStorage
 
-      std::cerr << "[findGroups] fused=" << preAggregation.fusedCalls
-                << " fallback=" << preAggregation.fallbackCalls
-                << " (thread " << runtime::this_worker->worker_id << ")\n";
+      // std::cerr << "[findGroups] fused=" << preAggregation.fusedCalls
+      //           << " fallback=" << preAggregation.fallbackCalls
+      //           << " (thread " << runtime::this_worker->worker_id << ")\n";
 
       barrier();       // Wait until all workers have finished phase 1
 
@@ -953,9 +953,9 @@ size_t HashGroup::next() {
          cont.partition = shared.partition.fetch_add(1);
       }
    }
-   std::cerr << "[findGroups-global] fused=" << globalAggregation.fusedCalls
-             << " fallback=" << globalAggregation.fallbackCalls
-             << " (thread " << runtime::this_worker->worker_id << ")\n";
+   // std::cerr << "[findGroups-global] fused=" << globalAggregation.fusedCalls
+   //           << " fallback=" << globalAggregation.fallbackCalls
+   //           << " (thread " << runtime::this_worker->worker_id << ")\n";
    return EndOfStream;
 }
 } // namespace vectorwise
