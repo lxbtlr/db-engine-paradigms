@@ -380,8 +380,13 @@ class HashGroup : public UnaryOperator {
    class ColumnGroupLookup : public GroupLookup<ColumnGroupLookup> {
     public:
 #ifdef FUSED_GROUP_LOOKUP
-      types::Char<1>* keyCol0 = nullptr;
-      types::Char<1>* keyCol1 = nullptr;
+      /// Key column pointers and per-column sizes for the fused lookup path.
+      /// Supports arbitrary numbers of key columns of any width.
+      static constexpr size_t MAX_FUSED_KEYS = 4;
+      char* keyCols[MAX_FUSED_KEYS] = {};
+      size_t keyColSizes[MAX_FUSED_KEYS] = {};
+      size_t numKeyCols = 0;
+      size_t totalKeyLen = 0;
       pos_t* keySel = nullptr;
 #endif
       hash_t hashForTuple(size_t i) { return groupHashes[i]; }
@@ -475,30 +480,39 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
 #ifdef FUSED_GROUP_LOOKUP
    // Fused single-loop group lookup: probe + htLookup + keyEquality in one
    // pass. Hash is already computed by the vectorized hash_sel + rehash_sel
-   // passes and lives in groupHashes[]. We build the composite 2-byte key
-   // via Char<1>::concat and compare against the HT entry.
+   // passes and lives in groupHashes[]. We assemble the composite key from
+   // the individual key columns into a stack buffer and memcmp against the
+   // HT entry (where keys are packed contiguously starting at keyOffset0).
    //
-   // Only active for ColumnGroupLookup (local preaggregation) where keyCol0/1
+   // Only active for ColumnGroupLookup (local preaggregation) where keyCols
    // are set. RowGroupLookup (global aggregation) falls through to multi-pass.
    if constexpr (std::is_same_v<T, ColumnGroupLookup>) {
    if (keyOffset0) {
       ++fusedCalls;
-      const size_t koff = keyOffset0;
-      auto* col0 = self()->keyCol0;
-      auto* col1 = self()->keyCol1;
-      auto* sel  = self()->keySel;
+      const size_t koff     = keyOffset0;
+      const size_t nKeys    = self()->numKeyCols;
+      const size_t keyLen   = self()->totalKeyLen;
+      auto* const* cols     = self()->keyCols;
+      const auto*  colSizes = self()->keyColSizes;
+      auto* sel             = self()->keySel;
 
       pos_t found = 0;
       for (pos_t i = 0; i < n; ++i) {
          auto hash = groupHashes[i];
          pos_t srcIdx = sel ? sel[i] : i;
-         auto probeKey = col0[srcIdx].concat(col1[srcIdx]); // Char<2>
+
+         // Assemble composite probe key from individual columns.
+         char probeKey[ColumnGroupLookup::MAX_FUSED_KEYS * 8];
+         char* dst = probeKey;
+         for (size_t k = 0; k < nKeys; ++k) {
+            memcpy(dst, cols[k] + srcIdx * colSizes[k], colSizes[k]);
+            dst += colSizes[k];
+         }
 
          for (auto* el = ht.find_chain(hash); el != ht.end(); el = el->next) {
             if (el->hash == hash) {
-               auto entryKey = *reinterpret_cast<const types::Char<2>*>(
-                   reinterpret_cast<const char*>(el) + koff);
-               if (entryKey == probeKey) {
+               if (memcmp(reinterpret_cast<const char*>(el) + koff,
+                          probeKey, keyLen) == 0) {
                   htMatches[i] = el;
                   groupsFound[found++] = i;
                   goto matched;

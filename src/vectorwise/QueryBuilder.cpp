@@ -663,13 +663,15 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    // col.registerDS registers the pointer with the Scan so it gets
    // updated to the current chunk's base on each Scan::next().
    if (fusedKeyCount == 0) {
-      local.keyCol0 = reinterpret_cast<types::Char<1>*>(col.data);
-      col.registerDS(reinterpret_cast<void**>(&local.keyCol0));
       local.keyOffset0 = entryOffset;
       local.keySel = sel;
-   } else if (fusedKeyCount == 1) {
-      local.keyCol1 = reinterpret_cast<types::Char<1>*>(col.data);
-      col.registerDS(reinterpret_cast<void**>(&local.keyCol1));
+   }
+   if (fusedKeyCount < decltype(local)::MAX_FUSED_KEYS) {
+      local.keyCols[fusedKeyCount] = reinterpret_cast<char*>(col.data);
+      col.registerDS(reinterpret_cast<void**>(&local.keyCols[fusedKeyCount]));
+      local.keyColSizes[fusedKeyCount] = col.dataSize;
+      local.totalKeyLen += col.dataSize;
+      local.numKeyCols = fusedKeyCount + 1;
    }
    ++fusedKeyCount;
 #endif
