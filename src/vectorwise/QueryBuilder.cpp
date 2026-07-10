@@ -533,6 +533,13 @@ QueryBuilder::HashGroupBuilder::~HashGroupBuilder() {
    global.partitionEndsOut = globalLookup.partitionEndsIn;
    global.partitionedRows = globalLookup.unpartitionedRows;
 
+#ifdef FUSED_GROUP_LOOKUP
+   // Allocate the contiguous key buffer now that totalKeyLen is known.
+   if (local.totalKeyLen > 0)
+      local.fusedKeyBuf = static_cast<char*>(
+          base.vecs.get(local.totalKeyLen));
+#endif
+
    // round up ht_entry_size to next 8 aligned value
    local.ht_entry_size += padding(local.ht_entry_size, 8);
    global.ht_entry_size += padding(local.ht_entry_size, 8);
