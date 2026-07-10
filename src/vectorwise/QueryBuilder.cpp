@@ -666,7 +666,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
       local.keyOffset0 = entryOffset;
       local.keySel = sel;
    }
-   if (fusedKeyCount < decltype(local)::MAX_FUSED_KEYS) {
+   if (fusedKeyCount < std::remove_reference_t<decltype(local)>::MAX_FUSED_KEYS) {
       local.keyCols[fusedKeyCount] = reinterpret_cast<char*>(col.data);
       col.registerDS(reinterpret_cast<void**>(&local.keyCols[fusedKeyCount]));
       local.keyColSizes[fusedKeyCount] = col.dataSize;
