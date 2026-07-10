@@ -379,43 +379,12 @@ class HashGroup : public UnaryOperator {
    /// vectors
    class ColumnGroupLookup : public GroupLookup<ColumnGroupLookup> {
     public:
-#ifndef FUSED_GROUP_LOOKUP
-      hash_t hashForTuple(size_t i) { return groupHashes[i]; }
-#else
-      /// Key column pointers for the fused lookup path.
-      /// For Q1: two Char<1> columns (l_returnflag, l_linestatus), accessed
-      /// through a selection vector (keySel) that maps vector position to
-      /// base-column index. Non-const because the Scan updates them per chunk.
-      char* keyCol0 = nullptr;
-      char* keyCol1 = nullptr;
+#ifdef FUSED_GROUP_LOOKUP
+      types::Char<1>* keyCol0 = nullptr;
+      types::Char<1>* keyCol1 = nullptr;
       pos_t* keySel = nullptr;
-
-      /// Computes the hash inline from key columns, eliminating the
-      /// separate groupHash.evaluate(n) passes (hash_sel + rehash_sel).
-      /// Mirrors the two-pass hash: hash(key0, seed) then hash(key1, result).
-      hash_t hashForTuple(size_t i) {
-         static constexpr hash_t hashSeed = vectorwise::primitives::seed;
-         pos_t srcIdx = keySel ? keySel[i] : i;
-#if HASH_SIZE == 32
-         runtime::MurMurHash3 hasher;
-#else
-         runtime::MurMurHash hasher;
 #endif
-         hash_t h = hasher.hashKey((uint8_t)keyCol0[srcIdx], hashSeed);
-         h = hasher.hashKey((uint8_t)keyCol1[srcIdx], h);
-         return h;
-      }
-
-      /// Returns the composite 2-byte key for tuple i, applying the
-      /// selection vector the same way hashForTuple accesses key columns.
-      uint16_t keyForTuple(size_t i) {
-         pos_t srcIdx = keySel ? keySel[i] : i;
-         uint16_t k;
-         reinterpret_cast<char*>(&k)[0] = keyCol0[srcIdx];
-         reinterpret_cast<char*>(&k)[1] = keyCol1[srcIdx];
-         return k;
-      }
-#endif
+      hash_t hashForTuple(size_t i) { return groupHashes[i]; }
 
       ColumnGroupLookup(HashGroup& p) : GroupLookup<ColumnGroupLookup>(p){};
    };
@@ -428,11 +397,6 @@ class HashGroup : public UnaryOperator {
       hash_t hashForTuple(size_t i) {
          return *addBytes(reinterpret_cast<hash_t*>(rowData), rowSize * i);
       }
-#ifdef FUSED_GROUP_LOOKUP
-      // Stub — fused path is never taken for RowGroupLookup (keyOffset0 == 0),
-      // but the template instantiation requires the method to exist.
-      uint16_t keyForTuple(size_t /*i*/) { __builtin_unreachable(); }
-#endif
       RowGroupLookup(HashGroup& p) : GroupLookup<RowGroupLookup>(p){};
    };
 
@@ -509,32 +473,29 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    groupsNotFound->clear();
 
 #ifdef FUSED_GROUP_LOOKUP
-   // Fused single-loop group lookup modeled on Hashmapx::findOne.
-   // For each tuple, walks the chain once checking both hash AND composite key
-   // (two Char<1> columns, contiguous in the entry) via memcmp. Collapses
-   // htProbe + htLookup + keyEquality + htFollow into one pass.
+   // Fused single-loop group lookup: probe + htLookup + keyEquality in one
+   // pass. Hash is already computed by the vectorized hash_sel + rehash_sel
+   // passes and lives in groupHashes[]. We build the composite 2-byte key
+   // via Char<1>::concat and compare against the HT entry.
    //
    // Only active for ColumnGroupLookup (local preaggregation) where keyCol0/1
    // are set. RowGroupLookup (global aggregation) falls through to multi-pass.
-   //
-   // Data-dependency variant hook: to chain operators and defeat register
-   // residency, replace the inner loop body with a sequence of dependent
-   // loads that force each step to wait on the previous result.
    if (keyOffset0) {
       ++fusedCalls;
       const size_t koff = keyOffset0;
+      auto* col0 = static_cast<ColumnGroupLookup*>(this)->keyCol0;
+      auto* col1 = static_cast<ColumnGroupLookup*>(this)->keyCol1;
+      auto* sel  = static_cast<ColumnGroupLookup*>(this)->keySel;
 
       pos_t found = 0;
       for (pos_t i = 0; i < n; ++i) {
-         auto hash = self()->hashForTuple(i);
-         auto probeKey = self()->keyForTuple(i);
-         // Store hash for createMissingGroups (scatter + partition use it).
-         groupHashes[i] = hash;
+         auto hash = groupHashes[i];
+         pos_t srcIdx = sel ? sel[i] : i;
+         auto probeKey = col0[srcIdx].concat(col1[srcIdx]); // Char<2>
 
-         // Walk the chain — one pass, checking hash + full 2-byte key.
          for (auto* el = ht.find_chain(hash); el != ht.end(); el = el->next) {
             if (el->hash == hash) {
-               auto entryKey = *reinterpret_cast<const uint16_t*>(
+               auto entryKey = *reinterpret_cast<const types::Char<2>*>(
                    reinterpret_cast<const char*>(el) + koff);
                if (entryKey == probeKey) {
                   htMatches[i] = el;

@@ -875,10 +875,8 @@ size_t HashGroup::next() {
       };
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-#ifndef FUSED_GROUP_LOOKUP
          // 1. Hash: compute group key hashes for the entire morsel
          groupHash.evaluate(n);
-#endif
          // 2. Lookup: find existing groups / classify misses.
          preAggregation.findGroups(n, ht);
          
