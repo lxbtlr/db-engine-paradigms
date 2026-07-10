@@ -480,10 +480,12 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
 #ifdef FUSED_GROUP_LOOKUP
    // Fused single-loop group lookup: probe + htLookup + keyEquality in one
    // pass. Hash is already computed by the vectorized hash_sel + rehash_sel
-   // passes and lives in groupHashes[]. We compare key columns directly
-   // against the HT entry (where keys are packed contiguously starting at
-   // keyOffset0), avoiding memcmp/memcpy calls that the compiler cannot
-   // inline when the length is a runtime value.
+   // passes and lives in groupHashes[].
+   //
+   // We pack the composite probe key into a uint64_t once per tuple (before
+   // entering the chain walk), then compare it against the HT entry with a
+   // single scalar comparison. This avoids per-column memory loads, switch
+   // dispatch, and indirect jumps inside the hot chain-walk loop.
    //
    // Only active for ColumnGroupLookup (local preaggregation) where keyCols
    // are set. RowGroupLookup (global aggregation) falls through to multi-pass.
@@ -492,56 +494,80 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
       ++fusedCalls;
       const size_t koff     = keyOffset0;
       const size_t nKeys    = self()->numKeyCols;
+      const size_t keyLen   = self()->totalKeyLen;
       auto* const* cols     = self()->keyCols;
       const auto*  colSizes = self()->keyColSizes;
       auto* sel             = self()->keySel;
 
       pos_t found = 0;
-      for (pos_t i = 0; i < n; ++i) {
-         auto hash = groupHashes[i];
-         pos_t srcIdx = sel ? sel[i] : i;
+      if (keyLen <= 8) {
+         // Fast path: composite key fits in a uint64_t — single cmp in chain.
+         for (pos_t i = 0; i < n; ++i) {
+            auto hash = groupHashes[i];
+            pos_t srcIdx = sel ? sel[i] : i;
 
-         for (auto* el = ht.find_chain(hash); el != ht.end(); el = el->next) {
-            if (el->hash == hash) {
-               // Compare each key column against its slot in the HT entry.
-               const char* entryPtr = reinterpret_cast<const char*>(el) + koff;
-               size_t k = 0;
-               for (; k < nKeys; ++k) {
-                  const size_t sz = colSizes[k];
-                  bool eq;
-                  // Compiler can inline fixed-size comparisons when sz is
-                  // small (1, 2, 4, 8) via constant propagation from the
-                  // loop unroll. For the general case, fall back to a byte
-                  // loop that stays entirely in registers.
-                  if (sz == 1)
-                     eq = *entryPtr == cols[k][srcIdx];
-                  else if (sz == 2)
-                     eq = *reinterpret_cast<const uint16_t*>(entryPtr) ==
-                          *reinterpret_cast<const uint16_t*>(cols[k] + srcIdx * 2);
-                  else if (sz == 4)
-                     eq = *reinterpret_cast<const uint32_t*>(entryPtr) ==
-                          *reinterpret_cast<const uint32_t*>(cols[k] + srcIdx * 4);
-                  else if (sz == 8)
-                     eq = *reinterpret_cast<const uint64_t*>(entryPtr) ==
-                          *reinterpret_cast<const uint64_t*>(cols[k] + srcIdx * 8);
-                  else {
-                     eq = true;
-                     const char* colPtr = cols[k] + srcIdx * sz;
-                     for (size_t b = 0; b < sz; ++b)
-                        if (entryPtr[b] != colPtr[b]) { eq = false; break; }
+            // Pack probe key into a uint64_t.
+            uint64_t probeKey = 0;
+            size_t off = 0;
+            for (size_t k = 0; k < nKeys; ++k) {
+               const size_t sz = colSizes[k];
+               // Use memcpy to avoid aliasing issues; the compiler will
+               // optimise this into register operations for small sz.
+               uint64_t tmp = 0;
+               __builtin_memcpy(&tmp, cols[k] + srcIdx * sz, sz);
+               probeKey |= tmp << (off * 8);
+               off += sz;
+            }
+
+            for (auto* el = ht.find_chain(hash); el != ht.end();
+                 el = el->next) {
+               if (el->hash == hash) {
+                  uint64_t entryKey = 0;
+                  __builtin_memcpy(&entryKey,
+                                   reinterpret_cast<const char*>(el) + koff,
+                                   keyLen);
+                  if (entryKey == probeKey) {
+                     htMatches[i] = el;
+                     groupsFound[found++] = i;
+                     goto matched_fast;
                   }
-                  if (!eq) break;
-                  entryPtr += sz;
-               }
-               if (k == nKeys) {
-                  htMatches[i] = el;
-                  groupsFound[found++] = i;
-                  goto matched;
                }
             }
+            groupsNotFound->push_back(i);
+         matched_fast:;
          }
-         groupsNotFound->push_back(i);
-      matched:;
+      } else {
+         // Slow path: key wider than 8 bytes — assemble on stack, byte compare.
+         for (pos_t i = 0; i < n; ++i) {
+            auto hash = groupHashes[i];
+            pos_t srcIdx = sel ? sel[i] : i;
+
+            char probeKey[ColumnGroupLookup::MAX_FUSED_KEYS * 8];
+            size_t off = 0;
+            for (size_t k = 0; k < nKeys; ++k) {
+               __builtin_memcpy(probeKey + off,
+                                cols[k] + srcIdx * colSizes[k], colSizes[k]);
+               off += colSizes[k];
+            }
+
+            for (auto* el = ht.find_chain(hash); el != ht.end();
+                 el = el->next) {
+               if (el->hash == hash) {
+                  const char* ep =
+                      reinterpret_cast<const char*>(el) + koff;
+                  size_t b = 0;
+                  for (; b < keyLen; ++b)
+                     if (ep[b] != probeKey[b]) break;
+                  if (b == keyLen) {
+                     htMatches[i] = el;
+                     groupsFound[found++] = i;
+                     goto matched_slow;
+                  }
+               }
+            }
+            groupsNotFound->push_back(i);
+         matched_slow:;
+         }
       }
       return found;
    }
