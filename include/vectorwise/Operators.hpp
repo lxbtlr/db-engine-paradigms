@@ -3,6 +3,7 @@
 #include "common/Compat.hpp"
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Database.hpp"
+#include "common/runtime/Hash.hpp"
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/PartitionedDeque.hpp"
 #include "common/runtime/Query.hpp"
@@ -374,9 +375,9 @@ class HashGroup : public UnaryOperator {
    /// vectors
    class ColumnGroupLookup : public GroupLookup<ColumnGroupLookup> {
     public:
+#ifndef FUSED_GROUP_LOOKUP
       hash_t hashForTuple(size_t i) { return groupHashes[i]; }
-
-#ifdef FUSED_GROUP_LOOKUP
+#else
       /// Key column pointers for the fused lookup path.
       /// For Q1: two Char<1> columns (l_returnflag, l_linestatus), accessed
       /// through a selection vector (keySel) that maps vector position to
@@ -385,8 +386,24 @@ class HashGroup : public UnaryOperator {
       char* keyCol1 = nullptr;
       pos_t* keySel = nullptr;
 
+      /// Computes the hash inline from key columns, eliminating the
+      /// separate groupHash.evaluate(n) passes (hash_sel + rehash_sel).
+      /// Mirrors the two-pass hash: hash(key0, seed) then hash(key1, result).
+      hash_t hashForTuple(size_t i) {
+         static constexpr hash_t hashSeed = vectorwise::primitives::seed;
+         pos_t srcIdx = keySel ? keySel[i] : i;
+#if HASH_SIZE == 32
+         runtime::MurMurHash3 hasher;
+#else
+         runtime::MurMurHash hasher;
+#endif
+         hash_t h = hasher.hashKey((uint8_t)keyCol0[srcIdx], hashSeed);
+         h = hasher.hashKey((uint8_t)keyCol1[srcIdx], h);
+         return h;
+      }
+
       /// Returns the composite 2-byte key for tuple i, applying the
-      /// selection vector the same way hashForTuple returns the hash.
+      /// selection vector the same way hashForTuple accesses key columns.
       uint16_t keyForTuple(size_t i) {
          pos_t srcIdx = keySel ? keySel[i] : i;
          uint16_t k;
@@ -506,6 +523,8 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
       for (pos_t i = 0; i < n; ++i) {
          auto hash = self()->hashForTuple(i);
          auto probeKey = self()->keyForTuple(i);
+         // Store hash for createMissingGroups (scatter + partition use it).
+         groupHashes[i] = hash;
 
          // Walk the chain — one pass, checking hash + full 2-byte key.
          for (auto* el = ht.find_chain(hash); el != ht.end(); el = el->next) {
