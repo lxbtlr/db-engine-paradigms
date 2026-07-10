@@ -388,9 +388,6 @@ class HashGroup : public UnaryOperator {
       size_t numKeyCols = 0;
       size_t totalKeyLen = 0;
       pos_t* keySel = nullptr;
-      /// Pre-allocated buffer for packed composite keys (vecSize * totalKeyLen
-      /// bytes). Filled once per morsel before the fused chain-walk loop.
-      char* fusedKeyBuf = nullptr;
 #endif
       hash_t hashForTuple(size_t i) { return groupHashes[i]; }
 
@@ -481,48 +478,42 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    groupsNotFound->clear();
 
 #ifdef FUSED_GROUP_LOOKUP
-   // Fused group lookup in two passes:
-   //   Pass 1 — gather: pack composite keys from individual columns into a
-   //            contiguous buffer (fusedKeyBuf), one entry per tuple, so the
-   //            chain-walk loop touches only sequential memory.
-   //   Pass 2 — probe+lookup+keyEq: walk chains comparing hash then the
-   //            packed key word. keyLen dispatch is outside the tuple loop
-   //            so the hot inner loop is: load hash, cmp, load key, cmp.
+   // Fused probe + htLookup + keyEquality in one chain-walk loop.
+   // Hash is pre-computed in groupHashes[].
+   //
+   // The probe key is packed from individual column bytes into a register-
+   // width integer once per tuple (before entering the chain). The entry
+   // key is loaded as a single fixed-width read. keyLen dispatch is outside
+   // the tuple loop so the hot path is: load hash, cmp, load key, cmp.
    //
    // Only active for ColumnGroupLookup (local preaggregation).
    if constexpr (std::is_same_v<T, ColumnGroupLookup>) {
    if (keyOffset0) {
       ++fusedCalls;
-      const size_t koff   = keyOffset0;
-      const size_t keyLen = self()->totalKeyLen;
-      const size_t nKeys  = self()->numKeyCols;
-      auto* const* cols   = self()->keyCols;
-      const auto* cSz     = self()->keyColSizes;
-      auto* sel           = self()->keySel;
-      char* keyBuf        = self()->fusedKeyBuf;
+      const size_t koff  = keyOffset0;
+      const size_t nKeys = self()->numKeyCols;
+      auto* const* cols  = self()->keyCols;
+      const auto*  cSz   = self()->keyColSizes;
+      auto*        sel   = self()->keySel;
 
-      // --- Pass 1: gather key columns into contiguous keyBuf.
-      for (pos_t i = 0; i < n; ++i) {
-         pos_t srcIdx = sel ? sel[i] : i;
-         char* dst = keyBuf + i * keyLen;
-         size_t off = 0;
-         for (size_t k = 0; k < nKeys; ++k) {
-            for (size_t b = 0; b < cSz[k]; ++b)
-               dst[off++] = cols[k][srcIdx * cSz[k] + b];
-         }
-      }
-
-      // --- Pass 2: chain-walk with fixed-width key comparison.
-      auto findLoop = [&]<typename KeyT>() __attribute__((always_inline)) {
+      // Pack composite probe key from column bytes into a uint16_t.
+      // Specialized for exactly 2 keys of 1 byte each (Q1 fast path).
+      // For other layouts, falls through to multi-pass below.
+      if (nKeys == 2 && cSz[0] == 1 && cSz[1] == 1) {
+         const char* col0 = cols[0];
+         const char* col1 = cols[1];
          pos_t found = 0;
          for (pos_t i = 0; i < n; ++i) {
             auto hash = groupHashes[i];
-            auto probeKey = *reinterpret_cast<const KeyT*>(keyBuf + i * keyLen);
+            pos_t srcIdx = sel ? sel[i] : i;
+            uint16_t probeKey =
+                static_cast<uint8_t>(col0[srcIdx]) |
+                (static_cast<uint16_t>(static_cast<uint8_t>(col1[srcIdx])) << 8);
 
             for (auto* el = ht.find_chain(hash); el != ht.end();
                  el = el->next) {
                if (el->hash == hash &&
-                   *reinterpret_cast<const KeyT*>(
+                   *reinterpret_cast<const uint16_t*>(
                        reinterpret_cast<const char*>(el) + koff) == probeKey) {
                   htMatches[i] = el;
                   groupsFound[found++] = i;
@@ -533,14 +524,7 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
          fused_matched:;
          }
          return found;
-      };
-
-      pos_t result;
-      if      (keyLen == 1) result = findLoop.template operator()<uint8_t>();
-      else if (keyLen == 2) result = findLoop.template operator()<uint16_t>();
-      else if (keyLen == 4) result = findLoop.template operator()<uint32_t>();
-      else                  result = findLoop.template operator()<uint64_t>();
-      return result;
+      }
    }
    } // if constexpr ColumnGroupLookup
 #endif // FUSED_GROUP_LOOKUP
