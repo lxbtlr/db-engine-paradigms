@@ -340,6 +340,10 @@ class HashGroup : public UnaryOperator {
       /// Pointer to current row format input
       void* rowData;
 
+      /// Instrumentation counters for fused vs fallback path.
+      size_t fusedCalls = 0;
+      size_t fallbackCalls = 0;
+
 #ifdef FUSED_GROUP_LOOKUP
       /// Offset of the first key within the HT entry (after EntryHeader).
       size_t keyOffset0 = 0;
@@ -517,6 +521,7 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    // residency, replace the inner loop body with a sequence of dependent
    // loads that force each step to wait on the previous result.
    if (keyOffset0) {
+      ++fusedCalls;
       const size_t koff = keyOffset0;
 
       pos_t found = 0;
@@ -545,6 +550,7 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    }
 #endif // FUSED_GROUP_LOOKUP
 
+   ++fallbackCalls;
    // Multi-pass fallback: probe → hash-compare → key equality.
    htProbe(n, ht);
    auto found = htLookup(n, ht);
