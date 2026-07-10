@@ -480,9 +480,10 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
 #ifdef FUSED_GROUP_LOOKUP
    // Fused single-loop group lookup: probe + htLookup + keyEquality in one
    // pass. Hash is already computed by the vectorized hash_sel + rehash_sel
-   // passes and lives in groupHashes[]. We assemble the composite key from
-   // the individual key columns into a stack buffer and memcmp against the
-   // HT entry (where keys are packed contiguously starting at keyOffset0).
+   // passes and lives in groupHashes[]. We compare key columns directly
+   // against the HT entry (where keys are packed contiguously starting at
+   // keyOffset0), avoiding memcmp/memcpy calls that the compiler cannot
+   // inline when the length is a runtime value.
    //
    // Only active for ColumnGroupLookup (local preaggregation) where keyCols
    // are set. RowGroupLookup (global aggregation) falls through to multi-pass.
@@ -491,7 +492,6 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
       ++fusedCalls;
       const size_t koff     = keyOffset0;
       const size_t nKeys    = self()->numKeyCols;
-      const size_t keyLen   = self()->totalKeyLen;
       auto* const* cols     = self()->keyCols;
       const auto*  colSizes = self()->keyColSizes;
       auto* sel             = self()->keySel;
@@ -501,18 +501,39 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
          auto hash = groupHashes[i];
          pos_t srcIdx = sel ? sel[i] : i;
 
-         // Assemble composite probe key from individual columns.
-         char probeKey[ColumnGroupLookup::MAX_FUSED_KEYS * 8];
-         char* dst = probeKey;
-         for (size_t k = 0; k < nKeys; ++k) {
-            memcpy(dst, cols[k] + srcIdx * colSizes[k], colSizes[k]);
-            dst += colSizes[k];
-         }
-
          for (auto* el = ht.find_chain(hash); el != ht.end(); el = el->next) {
             if (el->hash == hash) {
-               if (memcmp(reinterpret_cast<const char*>(el) + koff,
-                          probeKey, keyLen) == 0) {
+               // Compare each key column against its slot in the HT entry.
+               const char* entryPtr = reinterpret_cast<const char*>(el) + koff;
+               size_t k = 0;
+               for (; k < nKeys; ++k) {
+                  const size_t sz = colSizes[k];
+                  bool eq;
+                  // Compiler can inline fixed-size comparisons when sz is
+                  // small (1, 2, 4, 8) via constant propagation from the
+                  // loop unroll. For the general case, fall back to a byte
+                  // loop that stays entirely in registers.
+                  if (sz == 1)
+                     eq = *entryPtr == cols[k][srcIdx];
+                  else if (sz == 2)
+                     eq = *reinterpret_cast<const uint16_t*>(entryPtr) ==
+                          *reinterpret_cast<const uint16_t*>(cols[k] + srcIdx * 2);
+                  else if (sz == 4)
+                     eq = *reinterpret_cast<const uint32_t*>(entryPtr) ==
+                          *reinterpret_cast<const uint32_t*>(cols[k] + srcIdx * 4);
+                  else if (sz == 8)
+                     eq = *reinterpret_cast<const uint64_t*>(entryPtr) ==
+                          *reinterpret_cast<const uint64_t*>(cols[k] + srcIdx * 8);
+                  else {
+                     eq = true;
+                     const char* colPtr = cols[k] + srcIdx * sz;
+                     for (size_t b = 0; b < sz; ++b)
+                        if (entryPtr[b] != colPtr[b]) { eq = false; break; }
+                  }
+                  if (!eq) break;
+                  entryPtr += sz;
+               }
+               if (k == nKeys) {
                   htMatches[i] = el;
                   groupsFound[found++] = i;
                   goto matched;
