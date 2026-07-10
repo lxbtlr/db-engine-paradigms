@@ -480,12 +480,13 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    //
    // Only active for ColumnGroupLookup (local preaggregation) where keyCol0/1
    // are set. RowGroupLookup (global aggregation) falls through to multi-pass.
+   if constexpr (std::is_same_v<T, ColumnGroupLookup>) {
    if (keyOffset0) {
       ++fusedCalls;
       const size_t koff = keyOffset0;
-      auto* col0 = static_cast<ColumnGroupLookup*>(this)->keyCol0;
-      auto* col1 = static_cast<ColumnGroupLookup*>(this)->keyCol1;
-      auto* sel  = static_cast<ColumnGroupLookup*>(this)->keySel;
+      auto* col0 = self()->keyCol0;
+      auto* col1 = self()->keyCol1;
+      auto* sel  = self()->keySel;
 
       pos_t found = 0;
       for (pos_t i = 0; i < n; ++i) {
@@ -509,6 +510,7 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
       }
       return found;
    }
+   } // if constexpr ColumnGroupLookup
 #endif // FUSED_GROUP_LOOKUP
 
    ++fallbackCalls;
