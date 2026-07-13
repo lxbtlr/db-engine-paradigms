@@ -496,25 +496,12 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
       const auto*  cSz   = self()->keyColSizes;
       auto*        sel   = self()->keySel;
 
-      // Fused hash + probe + key-equality for 2 × Char<1> keys.
-      // Replaces separate hash_sel, rehash_sel, htProbe, htLookup, keyEquality.
+      // Pack composite probe key from column bytes into a uint16_t.
+      // Specialized for exactly 2 keys of 1 byte each (Q1 fast path).
+      // For other layouts, falls through to multi-pass below.
       if (nKeys == 2 && cSz[0] == 1 && cSz[1] == 1) {
          const char* col0 = cols[0];
          const char* col1 = cols[1];
-#if HASH_SIZE == 32
-         using HashOp = runtime::MurMurHash3;
-#else
-         using HashOp = runtime::MurMurHash;
-#endif
-         // Pass 0: fused hash computation (replaces hash_sel + rehash_sel).
-         for (pos_t i = 0; i < n; ++i) {
-            pos_t srcIdx = sel ? sel[i] : i;
-            hash_t h = HashOp()(static_cast<uint8_t>(col0[srcIdx]),
-                                primitives::seed);
-            h = HashOp()(static_cast<uint8_t>(col1[srcIdx]), h);
-            groupHashes[i] = h;
-         }
-         // Pass 1: chain-walk with fused key comparison.
          pos_t found = 0;
          for (pos_t i = 0; i < n; ++i) {
             auto hash = groupHashes[i];
