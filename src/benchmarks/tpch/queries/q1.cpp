@@ -281,6 +281,6 @@ std::unique_ptr<runtime::Query> q1_vectorwise(Database& db, size_t nrThreads,
          result = move(
              dynamic_cast<ResultWriter*>(query->rootOp.get())->shared.result);
    });
-   dumpQ1Result("vectorwise", result.get());
+   //dumpQ1Result("vectorwise", result.get());
    return result;
 }

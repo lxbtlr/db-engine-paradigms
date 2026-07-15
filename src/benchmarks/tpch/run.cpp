@@ -175,7 +175,7 @@ int main(int argc, char* argv[]) {
 #else
       auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
 #endif
-      dumpQ1Result("vectorwise", vResult.get());
+// dumpQ1Result("vectorwise", vResult.get());
    }
    if (q.count("3h"))
       e.timeAndProfile("q3 hyper     ",
