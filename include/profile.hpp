@@ -442,11 +442,11 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    double effective_reps = 1.0;
 #else
    // Original Average Mode: Measure all repetitions in one batch
-   startAll();
+   //startAll();
    double start = gettime();
    for (size_t i = 0; i < repetitions; i++) fn();
    double end = gettime();
-   readAll();
+   //readAll();
    runtime = end - start;
    double effective_reps = static_cast<double>(repetitions);
 #endif
