@@ -496,25 +496,28 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
       const auto*  cSz   = self()->keyColSizes;
       auto*        sel   = self()->keySel;
 
-      // Pack composite probe key from column bytes into a uint16_t.
       // Specialized for exactly 2 keys of 1 byte each (Q1 fast path).
-      // For other layouts, falls through to multi-pass below.
+      // Pre-pack the two column bytes into a contiguous uint16_t buffer
+      // so the inner chain-walk loop is a single 2-byte compare.
       if (nKeys == 2 && cSz[0] == 1 && cSz[1] == 1) {
          const char* col0 = cols[0];
          const char* col1 = cols[1];
+         uint16_t packedKeys[n];
+         for (pos_t i = 0; i < n; ++i) {
+            pos_t srcIdx = sel ? sel[i] : i;
+            packedKeys[i] =
+                static_cast<uint8_t>(col0[srcIdx]) |
+                (static_cast<uint16_t>(static_cast<uint8_t>(col1[srcIdx])) << 8);
+         }
+
          pos_t found = 0;
          for (pos_t i = 0; i < n; ++i) {
             auto hash = groupHashes[i];
-            pos_t srcIdx = sel ? sel[i] : i;
-            uint16_t probeKey =
-                static_cast<uint8_t>(col0[srcIdx]) |
-                (static_cast<uint16_t>(static_cast<uint8_t>(col1[srcIdx])) << 8);
-
             for (auto* el = ht.find_chain(hash); el != ht.end();
                  el = el->next) {
                if (el->hash == hash &&
                    *reinterpret_cast<const uint16_t*>(
-                       reinterpret_cast<const char*>(el) + koff) == probeKey) {
+                       reinterpret_cast<const char*>(el) + koff) == packedKeys[i]) {
                   htMatches[i] = el;
                   groupsFound[found++] = i;
                   goto fused_matched;
