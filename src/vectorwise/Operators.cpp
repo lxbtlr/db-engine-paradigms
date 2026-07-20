@@ -875,9 +875,16 @@ size_t HashGroup::next() {
       };
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         // 1. Hash: compute group key hashes for the entire morsel
+#ifdef FUSED_GROUP_LOOKUP
+         // The fused path computes hashes inline from materialized
+         // key buffers, eliminating hash_sel/rehash_sel. Only compute
+         // hashes separately when the fused path can't handle this
+         // key layout.
+         if (!preAggregation.fusedPathActive())
+            groupHash.evaluate(n);
+#else
          groupHash.evaluate(n);
-         // 2. Lookup: find existing groups / classify misses.
+#endif
          preAggregation.findGroups(n, ht);
          
          // 
