@@ -497,33 +497,33 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
       auto*        sel   = self()->keySel;
 
       // Specialized for exactly 2 keys of 1 byte each (Q1 fast path).
-      // Pre-pack the two column bytes into a contiguous uint16_t buffer
-      // using two column-wide passes (strided byte stores) instead of
-      // per-row packing.
+      // Two flat key buffers filled via memcpy (no sel) or gather (with sel).
+      // The chain-walk compares two separate bytes instead of one uint16_t,
+      // avoiding any interleaving cost.
       if (nKeys == 2 && cSz[0] == 1 && cSz[1] == 1) {
          const char* col0 = cols[0];
          const char* col1 = cols[1];
-         uint16_t packedKeys[n];
-         auto* dst = reinterpret_cast<char*>(packedKeys);
-         // Pass 1: scatter col0 bytes into even positions
-         for (pos_t i = 0; i < n; ++i) {
-            pos_t srcIdx = sel ? sel[i] : i;
-            dst[i * 2] = col0[srcIdx];
-         }
-         // Pass 2: scatter col1 bytes into odd positions
-         for (pos_t i = 0; i < n; ++i) {
-            pos_t srcIdx = sel ? sel[i] : i;
-            dst[i * 2 + 1] = col1[srcIdx];
+         char pk0[n], pk1[n];
+         if (!sel) {
+            memcpy(pk0, col0, n);
+            memcpy(pk1, col1, n);
+         } else {
+            for (pos_t i = 0; i < n; ++i) {
+               pk0[i] = col0[sel[i]];
+               pk1[i] = col1[sel[i]];
+            }
          }
 
+         const auto* entryBase = reinterpret_cast<const char*>(nullptr);
          pos_t found = 0;
          for (pos_t i = 0; i < n; ++i) {
             auto hash = groupHashes[i];
             for (auto* el = ht.find_chain(hash); el != ht.end();
                  el = el->next) {
+               entryBase = reinterpret_cast<const char*>(el);
                if (el->hash == hash &&
-                   *reinterpret_cast<const uint16_t*>(
-                       reinterpret_cast<const char*>(el) + koff) == packedKeys[i]) {
+                   entryBase[koff]     == pk0[i] &&
+                   entryBase[koff + 1] == pk1[i]) {
                   htMatches[i] = el;
                   groupsFound[found++] = i;
                   goto fused_matched;
