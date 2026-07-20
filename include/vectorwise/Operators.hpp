@@ -514,13 +514,12 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
             }
          }
 
-         const auto* entryBase = reinterpret_cast<const char*>(nullptr);
          pos_t found = 0;
          for (pos_t i = 0; i < n; ++i) {
             auto hash = groupHashes[i];
             for (auto* el = ht.find_chain(hash); el != ht.end();
                  el = el->next) {
-               entryBase = reinterpret_cast<const char*>(el);
+               auto* entryBase = reinterpret_cast<const char*>(el);
                if (el->hash == hash &&
                    entryBase[koff]     == pk0[i] &&
                    entryBase[koff + 1] == pk1[i]) {
