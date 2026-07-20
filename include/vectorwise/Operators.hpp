@@ -498,16 +498,22 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
 
       // Specialized for exactly 2 keys of 1 byte each (Q1 fast path).
       // Pre-pack the two column bytes into a contiguous uint16_t buffer
-      // so the inner chain-walk loop is a single 2-byte compare.
+      // using two column-wide passes (strided byte stores) instead of
+      // per-row packing.
       if (nKeys == 2 && cSz[0] == 1 && cSz[1] == 1) {
          const char* col0 = cols[0];
          const char* col1 = cols[1];
          uint16_t packedKeys[n];
+         auto* dst = reinterpret_cast<char*>(packedKeys);
+         // Pass 1: scatter col0 bytes into even positions
          for (pos_t i = 0; i < n; ++i) {
             pos_t srcIdx = sel ? sel[i] : i;
-            packedKeys[i] =
-                static_cast<uint8_t>(col0[srcIdx]) |
-                (static_cast<uint16_t>(static_cast<uint8_t>(col1[srcIdx])) << 8);
+            dst[i * 2] = col0[srcIdx];
+         }
+         // Pass 2: scatter col1 bytes into odd positions
+         for (pos_t i = 0; i < n; ++i) {
+            pos_t srcIdx = sel ? sel[i] : i;
+            dst[i * 2 + 1] = col1[srcIdx];
          }
 
          pos_t found = 0;
