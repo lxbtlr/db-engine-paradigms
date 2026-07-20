@@ -347,6 +347,17 @@ class HashGroup : public UnaryOperator {
 #ifdef FUSED_GROUP_LOOKUP
       /// Offset of the first key within the HT entry (after EntryHeader).
       size_t keyOffset0 = 0;
+
+      /// Returns true if the fused path will handle hashing internally.
+      bool fusedPathActive() const {
+         if constexpr (std::is_same_v<T, ColumnGroupLookup>) {
+            return keyOffset0 &&
+                   self()->numKeyCols == 2 &&
+                   self()->keyColSizes[0] == 1 &&
+                   self()->keyColSizes[1] == 1;
+         }
+         return false;
+      }
 #endif
 
       /// ------ group creation
@@ -478,13 +489,10 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    groupsNotFound->clear();
 
 #ifdef FUSED_GROUP_LOOKUP
-   // Fused probe + htLookup + keyEquality in one chain-walk loop.
-   // Hash is pre-computed in groupHashes[].
-   //
-   // The probe key is packed from individual column bytes into a register-
-   // width integer once per tuple (before entering the chain). The entry
-   // key is loaded as a single fixed-width read. keyLen dispatch is outside
-   // the tuple loop so the hot path is: load hash, cmp, load key, cmp.
+   // Fused hash + probe + keyEquality in one pass.
+   // Materializes key columns into flat buffers, computes hashes from
+   // those buffers (eliminating the separate hash_sel/rehash_sel passes),
+   // then walks the HT chain with inline hash + key comparison.
    //
    // Only active for ColumnGroupLookup (local preaggregation).
    if constexpr (std::is_same_v<T, ColumnGroupLookup>) {
@@ -497,9 +505,6 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
       auto*        sel   = self()->keySel;
 
       // Specialized for exactly 2 keys of 1 byte each (Q1 fast path).
-      // Two flat key buffers filled via memcpy (no sel) or gather (with sel).
-      // The chain-walk compares two separate bytes instead of one uint16_t,
-      // avoiding any interleaving cost.
       if (nKeys == 2 && cSz[0] == 1 && cSz[1] == 1) {
          const char* col0 = cols[0];
          const char* col1 = cols[1];
@@ -512,6 +517,15 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
                pk0[i] = col0[sel[i]];
                pk1[i] = col1[sel[i]];
             }
+         }
+
+         // Compute hashes from the materialized key buffers.
+         // Replaces the separate hash_sel + rehash_sel primitives.
+         const hash_t hashSeed = vectorwise::primitives::seed;
+         runtime::MurMurHash hasher;
+         for (pos_t i = 0; i < n; ++i) {
+            hash_t h = hasher.hashKey((uint8_t)pk0[i], hashSeed);
+            groupHashes[i] = hasher.hashKey((uint8_t)pk1[i], h);
          }
 
          pos_t found = 0;
