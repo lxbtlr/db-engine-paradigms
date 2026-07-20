@@ -384,6 +384,7 @@ class HashGroup : public UnaryOperator {
 
     private:
       T* self() { return static_cast<T*>(this); }
+      const T* self() const { return static_cast<const T*>(this); }
    };
 
    /// Local aggregation phase uses column wise storage as input format for
