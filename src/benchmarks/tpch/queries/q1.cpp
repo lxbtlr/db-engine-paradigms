@@ -178,7 +178,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
    // Each expression reuses result_proj_minus as scratch, outputs to
    // intermediate_base+k. VW processes each expression sequentially so
    // register pressure stays at ~3 regardless of W.
-   auto& proj = Project();
+   auto proj = Project();
    // For W=1, output directly to disc_price buffer; for W>1, use intermediates.
    for (int k = 0; k < LIVE_SET_WIDTH; ++k) {
       auto outBuf = (LIVE_SET_WIDTH == 1) ? disc_price : intermediate_base + k;
@@ -200,7 +200,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
       // First pair
       proj.addExpression(
           Expression()
-              .addOp(BF(primitives::proj_plus_int64_t_col_int64_t_col),
+              .addOp(primitives::proj_plus_int64_t_col_int64_t_col,
                      Buffer(disc_price, sizeof(int64_t)),
                      Buffer(intermediate_base, sizeof(int64_t)),
                      Buffer(intermediate_base + 1, sizeof(int64_t))));
@@ -208,7 +208,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
       for (int k = 2; k < LIVE_SET_WIDTH; ++k) {
          proj.addExpression(
              Expression()
-                 .addOp(BF(primitives::proj_plus_int64_t_col_int64_t_col),
+                 .addOp(primitives::proj_plus_int64_t_col_int64_t_col,
                         Buffer(disc_price, sizeof(int64_t)),
                         Buffer(disc_price, sizeof(int64_t)),
                         Buffer(intermediate_base + k, sizeof(int64_t))));
