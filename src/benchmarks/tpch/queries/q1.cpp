@@ -17,6 +17,53 @@ using namespace std;
 using vectorwise::primitives::Char_1;
 using vectorwise::primitives::hash_t;
 
+#ifndef LIVE_SET_WIDTH
+#define LIVE_SET_WIDTH 2
+#endif
+
+// ---------- compile-time unrolled W-wide intermediate computation ----------
+// Each intermediate becomes a distinct scalar SSA value (not an array element).
+// Template recursion forces the compiler to allocate a separate register for
+// each v<K>, and the asm barrier prevents algebraic folding across them.
+// The combining step (sum) references all W scalars, keeping them simultaneously
+// live until the final reduction — this is where register spill occurs at high W.
+
+namespace detail {
+
+// Compute a single intermediate and pin it in a register.
+template <int K>
+inline __attribute__((always_inline)) int64_t
+compute_one(int64_t ep, int64_t disc, const int64_t* ck) {
+   int64_t v = ep * (ck[K] - disc);
+   asm volatile("" : "+r"(v)); // force register-resident, block CSE
+   return v;
+}
+
+// Recursive template: compute intermediates K..W-1, sum them.
+// Each level holds its own scalar `v` live across the recursive call,
+// forcing W simultaneous register residents at the deepest point.
+template <int K, int W>
+struct ComputeW {
+   static inline __attribute__((always_inline)) int64_t
+   apply(int64_t ep, int64_t disc, const int64_t* ck) {
+      int64_t v = compute_one<K>(ep, disc, ck);
+      // v must stay live across this call — compiler must keep it in a register
+      int64_t rest = ComputeW<K + 1, W>::apply(ep, disc, ck);
+      return v + rest;
+   }
+};
+
+// Base case: last intermediate.
+template <int W>
+struct ComputeW<W, W> {
+   static inline __attribute__((always_inline)) int64_t
+   apply(int64_t /*ep*/, int64_t /*disc*/, const int64_t* /*ck*/) {
+      return 0;
+   }
+};
+
+} // namespace detail
+
 //  select
 //    l_returnflag,
 //    l_linestatus,
@@ -55,11 +102,8 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
 
    using hash = runtime::CRC32Hash;
 
-#ifndef LIVE_SET_WIDTH
-#define LIVE_SET_WIDTH 2
-#endif
-   // Load W distinct constants from volatile source (anti-CSE: opaque to
-   // optimizer, but read once before hot loop so no memory traffic per tuple).
+   // Load W distinct constants from volatile source (opaque to optimizer,
+   // but read once before hot loop so no memory traffic per tuple).
    static volatile int64_t raw_constants[24] = {
        100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
        1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000,
@@ -95,19 +139,14 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
                 get<0>(group) += l_quantity[i];
                 get<1>(group) += l_extendedprice[i];
 
-                // W independent intermediates, each data-dependent on
-                // extendedprice and discount. asm barrier prevents algebraic
-                // folding (e.g. compiler reducing to ep*(sum_ck - W*disc)).
+                // W distinct scalar intermediates via template recursion.
+                // Each ComputeW level holds its v live across the recursive
+                // call, forcing W simultaneous register residents.
+                // Spill/reload instructions appear once W exceeds GP reg count.
                 int64_t ep = l_extendedprice[i].value;
                 int64_t disc = l_discount[i].value;
-                int64_t v[LIVE_SET_WIDTH];
-                for (int k = 0; k < LIVE_SET_WIDTH; ++k) {
-                   v[k] = ep * (ck[k] - disc);
-                   asm volatile("" : "+r"(v[k]));
-                }
-                int64_t combined = 0;
-                for (int k = 0; k < LIVE_SET_WIDTH; ++k)
-                   combined += v[k];
+                int64_t combined =
+                    detail::ComputeW<0, LIVE_SET_WIDTH>::apply(ep, disc, ck);
 
                 auto disc_price = Numeric<12, 4>(combined);
                 get<2>(group) += disc_price;
