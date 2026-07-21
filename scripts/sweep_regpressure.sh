@@ -13,9 +13,9 @@ for W in $WIDTHS; do
     DIR="${BUILD_BASE}_W${W}"
     mkdir -p "$DIR"
     pushd "$DIR" >/dev/null
-    rm -rf CMake*
-    cmake .. -DLIVE_SET_WIDTH=$W 2>&1 | grep -v "^--" >/dev/null || true
-    make -j$(nproc) run_tpch 2>&1 | tail -1
+    cmake clean
+    cmake ../.. -DLIVE_SET_WIDTH=$W 2>&1 | grep -v "^--" >/dev/null || true
+    make -j 22 run_tpch 2>&1 | tail -1
 
     # Hyper
     OUTPUT=$(./run_tpch -p "$TPCH_PATH" -q 1 -e h -t "$THREADS" -r "$REPS" 2>/dev/null | grep "q1 hyper")
