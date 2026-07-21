@@ -4,7 +4,10 @@ set -euo pipefail
 TPCH_PATH="${1:?Usage: $0 <tpch-data-path> [threads] [reps] [outfile]}"
 THREADS="${2:-1}"
 REPS="${3:-5}"
-OUTFILE="${4:-sweep_results_$(date +%Y%m%d_%H%M%S).csv}"
+_outfile="${4:-sweep_results_$(date +%Y%m%d_%H%M%S).csv}"
+# Make absolute so pushd into build dirs doesn't break the path
+[[ "$_outfile" = /* ]] || _outfile="$PWD/$_outfile"
+OUTFILE="$_outfile"
 BUILD_BASE="/home/alexb/swole/db-engines/build/dd"
 WIDTHS="2 4 6 8 10 12 14 16 20 24"
 
