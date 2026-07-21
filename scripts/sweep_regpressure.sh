@@ -1,35 +1,56 @@
 #!/bin/bash
 set -euo pipefail
 
-TPCH_PATH="${1:?Usage: $0 <tpch-data-path> [threads] [reps]}"
+TPCH_PATH="${1:?Usage: $0 <tpch-data-path> [threads] [reps] [outfile]}"
 THREADS="${2:-1}"
 REPS="${3:-5}"
-BUILD_BASE="data_depth"
+OUTFILE="${4:-sweep_results_$(date +%Y%m%d_%H%M%S).csv}"
+BUILD_BASE="/home/alexb/swole/db-engines/build/dd"
 WIDTHS="2 4 6 8 10 12 14 16 20 24"
 
-echo "W,engine,output"
+# Write params header
+{
+    echo "# sweep_regpressure run: $(date)"
+    echo "# tpch_path: $TPCH_PATH"
+    echo "# threads: $THREADS"
+    echo "# reps: $REPS"
+    echo "# widths: $WIDTHS"
+    echo "W,engine,output"
+} > "$OUTFILE"
+
+echo "Writing results to: $OUTFILE"
+echo "Params: threads=$THREADS reps=$REPS widths=[$WIDTHS]"
 
 for W in $WIDTHS; do
+    echo "--- W=$W ---"
     DIR="${BUILD_BASE}_W${W}"
     mkdir -p "$DIR"
     pushd "$DIR" >/dev/null
     rm -rf CMake*
-    cmake .. -DLIVE_SET_WIDTH=$W 2>&1 | grep -v "^--" >/dev/null || true
+    cmake ../.. -DLIVE_SET_WIDTH=$W 2>&1 | grep -v "^--" >/dev/null || true
     make -j$(nproc) run_tpch 2>&1 | tail -1
 
     # Hyper
     OUTPUT=$(./run_tpch -p "$TPCH_PATH" -q 1 -e h -t "$THREADS" -r "$REPS" 2>/dev/null | grep "q1 hyper")
-    echo "${W},hyper,${OUTPUT}"
+    LINE="${W},hyper,${OUTPUT}"
+    echo "$LINE"
+    echo "$LINE" >> "$OUTFILE"
 
     # VW
     OUTPUT=$(./run_tpch -p "$TPCH_PATH" -q 1 -e v -t "$THREADS" -r "$REPS" 2>/dev/null | grep "q1 vectorwise")
-    echo "${W},vw,${OUTPUT}"
+    LINE="${W},vw,${OUTPUT}"
+    echo "$LINE"
+    echo "$LINE" >> "$OUTFILE"
 
     # Packed
     OUTPUT=$(./run_tpch -p "$TPCH_PATH" -q 1 -e p -t "$THREADS" -r "$REPS" 2>/dev/null | grep "q1 packed" || true)
     if [ -n "$OUTPUT" ]; then
-        echo "${W},packed,${OUTPUT}"
+        LINE="${W},packed,${OUTPUT}"
+        echo "$LINE"
+        echo "$LINE" >> "$OUTFILE"
     fi
 
     popd >/dev/null
 done
+
+echo "Done. Results saved to: $OUTFILE"
