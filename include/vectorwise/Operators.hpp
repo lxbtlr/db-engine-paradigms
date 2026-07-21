@@ -520,10 +520,12 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
             }
          }
 
-         // Compute hashes from the materialized key buffers.
-         // Replaces the separate hash_sel + rehash_sel primitives.
+         // Compute hashes from the materialized key buffers using
+         // CRC32 — a single ~3-cycle instruction per key vs MurMurHash's
+         // multiply/shift chain. Safe because the local preagg HT is
+         // private to this fused path (global agg uses its own HT).
          const hash_t hashSeed = vectorwise::primitives::seed;
-         runtime::MurMurHash hasher;
+         runtime::CRC32Hash hasher;
          for (pos_t i = 0; i < n; ++i) {
             hash_t h = hasher.hashKey((uint8_t)pk0[i], hashSeed);
             groupHashes[i] = hasher.hashKey((uint8_t)pk1[i], h);
