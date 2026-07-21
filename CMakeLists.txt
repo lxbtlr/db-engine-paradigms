@@ -25,7 +25,9 @@ OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 
-
+SET(LIVE_SET_WIDTH "2" CACHE STRING "Number of live intermediate values in Q1 register pressure sweep")
+ADD_DEFINITIONS(-DLIVE_SET_WIDTH=${LIVE_SET_WIDTH})
+message(STATUS "Q1 live-set width W=${LIVE_SET_WIDTH}")
 
 # Compiler flags for the different targets
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -mtune=native -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")

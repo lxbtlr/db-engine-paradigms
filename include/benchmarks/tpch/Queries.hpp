@@ -26,11 +26,19 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
       sum_disc_price,
       sum_charge,
       count_order,
-      packed_key
+      packed_key,
+      // Live-set sweep: W intermediate buffers (v[0]..v[W-1])
+      intermediate_base,
+      intermediate_max = intermediate_base + 24,
    };
    struct Q1 {
       types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
       types::Date c1 = types::Date::castString("1998-09-02");
+#ifdef LIVE_SET_WIDTH
+      int64_t constants[LIVE_SET_WIDTH];
+#else
+      int64_t constants[2];
+#endif
       std::unique_ptr<vectorwise::Operator> rootOp;
    };
    Q1Builder(runtime::Database& db, vectorwise::SharedStateManager& shared,

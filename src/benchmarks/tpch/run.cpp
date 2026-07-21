@@ -134,8 +134,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Diagnostics
-    fprintf(stderr, "Engine: %s | Query: %s | Threads: %ld | VectorSize: %ld\n", 
-            selectedEngine.c_str(), selectedQuery.c_str(), nrThreads, vectorSize);
+    fprintf(stderr, "Engine: %s | Query: %s | Threads: %ld | VectorSize: %ld | W: %d\n",
+            selectedEngine.c_str(), selectedQuery.c_str(), nrThreads, vectorSize, LIVE_SET_WIDTH);
 
     if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
     if (auto v = std::getenv("SIMDjoin")) conf.useSimdJoin = atoi(v);

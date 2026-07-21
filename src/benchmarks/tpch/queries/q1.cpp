@@ -55,6 +55,19 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
 
    using hash = runtime::CRC32Hash;
 
+#ifndef LIVE_SET_WIDTH
+#define LIVE_SET_WIDTH 2
+#endif
+   // Load W distinct constants from volatile source (anti-CSE: opaque to
+   // optimizer, but read once before hot loop so no memory traffic per tuple).
+   static volatile int64_t raw_constants[24] = {
+       100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
+       1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000,
+       2100, 2200, 2300, 2400};
+   int64_t ck[LIVE_SET_WIDTH];
+   for (int k = 0; k < LIVE_SET_WIDTH; ++k)
+      ck[k] = raw_constants[k];
+
    auto groupOp = make_GroupBy<tuple<Char<1>, Char<1>>,
                                tuple<Numeric<12, 2>, Numeric<12, 2>,
                                      Numeric<12, 4>, Numeric<12, 6>, int64_t>,
@@ -81,7 +94,22 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
 
                 get<0>(group) += l_quantity[i];
                 get<1>(group) += l_extendedprice[i];
-                auto disc_price = l_extendedprice[i] * (one - l_discount[i]);
+
+                // W independent intermediates, each data-dependent on
+                // extendedprice and discount. asm barrier prevents algebraic
+                // folding (e.g. compiler reducing to ep*(sum_ck - W*disc)).
+                int64_t ep = l_extendedprice[i].value;
+                int64_t disc = l_discount[i].value;
+                int64_t v[LIVE_SET_WIDTH];
+                for (int k = 0; k < LIVE_SET_WIDTH; ++k) {
+                   v[k] = ep * (ck[k] - disc);
+                   asm volatile("" : "+r"(v[k]));
+                }
+                int64_t combined = 0;
+                for (int k = 0; k < LIVE_SET_WIDTH; ++k)
+                   combined += v[k];
+
+                auto disc_price = Numeric<12, 4>(combined);
                 get<2>(group) += disc_price;
                 auto charge = disc_price * (one + l_tax[i]);
                 get<3>(group) += charge;
@@ -137,31 +165,67 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
    previous = result.resultWriter.shared.result->participate();
 
    auto r = make_unique<Q1>();
+   // Initialize constants for live-set sweep
+   for (int k = 0; k < LIVE_SET_WIDTH; ++k)
+      r->constants[k] = (k + 1) * 100;
+
    auto lineitem = Scan("lineitem");
    Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
-   Project()
-       .addExpression(
-           Expression()
-               .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
-                      Buffer(sel_date),
-                      Buffer(result_proj_minus, sizeof(int64_t)),
-                      Value(&r->one), Column(lineitem, "l_discount"))
-               .addOp(conf.proj_multiplies_sel_int64_t_col_int64_t_col(),
-                      Buffer(sel_date), Buffer(disc_price, sizeof(int64_t)),
-                      Column(lineitem, "l_extendedprice"),
-                      Buffer(result_proj_minus, sizeof(int64_t))))
-       .addExpression(
-           Expression()
-               .addOp(conf.proj_sel_plus_int64_t_col_int64_t_val(),
-                      Buffer(sel_date),
-                      Buffer(result_proj_plus, sizeof(int64_t)),
-                      Column(lineitem, "l_tax"), Value(&r->one))
-               .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
-                      Buffer(charge, sizeof(int64_t)),
-                      Buffer(disc_price, sizeof(int64_t)),
-                      Buffer(result_proj_plus, sizeof(int64_t))));
+
+   // W independent projections: v[k] = extendedprice * (c_k - discount)
+   // Each expression reuses result_proj_minus as scratch, outputs to
+   // intermediate_base+k. VW processes each expression sequentially so
+   // register pressure stays at ~3 regardless of W.
+   auto& proj = Project();
+   // For W=1, output directly to disc_price buffer; for W>1, use intermediates.
+   for (int k = 0; k < LIVE_SET_WIDTH; ++k) {
+      auto outBuf = (LIVE_SET_WIDTH == 1) ? disc_price : intermediate_base + k;
+      proj.addExpression(
+          Expression()
+              .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
+                     Buffer(sel_date),
+                     Buffer(result_proj_minus, sizeof(int64_t)),
+                     Value(&r->constants[k]),
+                     Column(lineitem, "l_discount"))
+              .addOp(conf.proj_multiplies_sel_int64_t_col_int64_t_col(),
+                     Buffer(sel_date),
+                     Buffer(outBuf, sizeof(int64_t)),
+                     Column(lineitem, "l_extendedprice"),
+                     Buffer(result_proj_minus, sizeof(int64_t))));
+   }
+   // Combine: reduce W intermediates into disc_price via addition chain
+   if (LIVE_SET_WIDTH >= 2) {
+      // First pair
+      proj.addExpression(
+          Expression()
+              .addOp(BF(primitives::proj_plus_int64_t_col_int64_t_col),
+                     Buffer(disc_price, sizeof(int64_t)),
+                     Buffer(intermediate_base, sizeof(int64_t)),
+                     Buffer(intermediate_base + 1, sizeof(int64_t))));
+      // Chain remaining
+      for (int k = 2; k < LIVE_SET_WIDTH; ++k) {
+         proj.addExpression(
+             Expression()
+                 .addOp(BF(primitives::proj_plus_int64_t_col_int64_t_col),
+                        Buffer(disc_price, sizeof(int64_t)),
+                        Buffer(disc_price, sizeof(int64_t)),
+                        Buffer(intermediate_base + k, sizeof(int64_t))));
+      }
+   }
+   // Charge: disc_price * (1 + tax) — unchanged
+   proj.addExpression(
+       Expression()
+           .addOp(conf.proj_sel_plus_int64_t_col_int64_t_val(),
+                  Buffer(sel_date),
+                  Buffer(result_proj_plus, sizeof(int64_t)),
+                  Column(lineitem, "l_tax"), Value(&r->one))
+           .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
+                  Buffer(charge, sizeof(int64_t)),
+                  Buffer(disc_price, sizeof(int64_t)),
+                  Buffer(result_proj_plus, sizeof(int64_t))));
+
    HashGroup()
        .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
        .addKey(Column(lineitem, "l_returnflag"), Buffer(sel_date),
@@ -236,40 +300,69 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryPacked() {
    previous = result.resultWriter.shared.result->participate();
 
    auto r = make_unique<Q1>();
+   // Initialize constants for live-set sweep
+   for (int k = 0; k < LIVE_SET_WIDTH; ++k)
+      r->constants[k] = (k + 1) * 100;
+
    auto lineitem = Scan("lineitem");
    Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
-   Project()
-       .addExpression(
-           Expression()
-               .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
-                      Buffer(sel_date),
-                      Buffer(result_proj_minus, sizeof(int64_t)),
-                      Value(&r->one), Column(lineitem, "l_discount"))
-               .addOp(conf.proj_multiplies_sel_int64_t_col_int64_t_col(),
-                      Buffer(sel_date), Buffer(disc_price, sizeof(int64_t)),
-                      Column(lineitem, "l_extendedprice"),
-                      Buffer(result_proj_minus, sizeof(int64_t))))
-       .addExpression(
-           Expression()
-               .addOp(conf.proj_sel_plus_int64_t_col_int64_t_val(),
-                      Buffer(sel_date),
-                      Buffer(result_proj_plus, sizeof(int64_t)),
-                      Column(lineitem, "l_tax"), Value(&r->one))
-               .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
-                      Buffer(charge, sizeof(int64_t)),
-                      Buffer(disc_price, sizeof(int64_t)),
-                      Buffer(result_proj_plus, sizeof(int64_t))))
-       // Pack the two Char<1> key columns into a dense uint16_t buffer
-       .addExpression(
-           Expression()
-               .addConcat(Buffer(sel_date),
-                          Column(lineitem, "l_returnflag"),
-                          Buffer(packed_key, sizeof(uint16_t)), 0)
-               .addConcat(Buffer(sel_date),
-                          Column(lineitem, "l_linestatus"),
-                          Buffer(packed_key, sizeof(uint16_t)), 1));
+
+   auto& proj = Project();
+   // W independent projections: v[k] = extendedprice * (c_k - discount)
+   for (int k = 0; k < LIVE_SET_WIDTH; ++k) {
+      auto outBuf = (LIVE_SET_WIDTH == 1) ? disc_price : intermediate_base + k;
+      proj.addExpression(
+          Expression()
+              .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
+                     Buffer(sel_date),
+                     Buffer(result_proj_minus, sizeof(int64_t)),
+                     Value(&r->constants[k]),
+                     Column(lineitem, "l_discount"))
+              .addOp(conf.proj_multiplies_sel_int64_t_col_int64_t_col(),
+                     Buffer(sel_date),
+                     Buffer(outBuf, sizeof(int64_t)),
+                     Column(lineitem, "l_extendedprice"),
+                     Buffer(result_proj_minus, sizeof(int64_t))));
+   }
+   // Combine intermediates into disc_price
+   if (LIVE_SET_WIDTH >= 2) {
+      proj.addExpression(
+          Expression()
+              .addOp(BF(primitives::proj_plus_int64_t_col_int64_t_col),
+                     Buffer(disc_price, sizeof(int64_t)),
+                     Buffer(intermediate_base, sizeof(int64_t)),
+                     Buffer(intermediate_base + 1, sizeof(int64_t))));
+      for (int k = 2; k < LIVE_SET_WIDTH; ++k) {
+         proj.addExpression(
+             Expression()
+                 .addOp(BF(primitives::proj_plus_int64_t_col_int64_t_col),
+                        Buffer(disc_price, sizeof(int64_t)),
+                        Buffer(disc_price, sizeof(int64_t)),
+                        Buffer(intermediate_base + k, sizeof(int64_t))));
+      }
+   }
+   // Charge + key packing
+   proj.addExpression(
+       Expression()
+           .addOp(conf.proj_sel_plus_int64_t_col_int64_t_val(),
+                  Buffer(sel_date),
+                  Buffer(result_proj_plus, sizeof(int64_t)),
+                  Column(lineitem, "l_tax"), Value(&r->one))
+           .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
+                  Buffer(charge, sizeof(int64_t)),
+                  Buffer(disc_price, sizeof(int64_t)),
+                  Buffer(result_proj_plus, sizeof(int64_t))));
+   // Pack the two Char<1> key columns into a dense uint16_t buffer
+   proj.addExpression(
+       Expression()
+           .addConcat(Buffer(sel_date),
+                      Column(lineitem, "l_returnflag"),
+                      Buffer(packed_key, sizeof(uint16_t)), 0)
+           .addConcat(Buffer(sel_date),
+                      Column(lineitem, "l_linestatus"),
+                      Buffer(packed_key, sizeof(uint16_t)), 1));
    // LUT-based aggregation: packed key is used as direct array index.
    // No hashing, no hash table, no chain walking.
    LUTGroup()
