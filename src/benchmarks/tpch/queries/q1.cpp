@@ -309,7 +309,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryPacked() {
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
 
-   auto& proj = Project();
+   auto proj = Project();
    // W independent projections: v[k] = extendedprice * (c_k - discount)
    for (int k = 0; k < LIVE_SET_WIDTH; ++k) {
       auto outBuf = (LIVE_SET_WIDTH == 1) ? disc_price : intermediate_base + k;
@@ -330,14 +330,14 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryPacked() {
    if (LIVE_SET_WIDTH >= 2) {
       proj.addExpression(
           Expression()
-              .addOp(BF(primitives::proj_plus_int64_t_col_int64_t_col),
+              .addOp(primitives::proj_plus_int64_t_col_int64_t_col,
                      Buffer(disc_price, sizeof(int64_t)),
                      Buffer(intermediate_base, sizeof(int64_t)),
                      Buffer(intermediate_base + 1, sizeof(int64_t))));
       for (int k = 2; k < LIVE_SET_WIDTH; ++k) {
          proj.addExpression(
              Expression()
-                 .addOp(BF(primitives::proj_plus_int64_t_col_int64_t_col),
+                 .addOp(primitives::proj_plus_int64_t_col_int64_t_col,
                         Buffer(disc_price, sizeof(int64_t)),
                         Buffer(disc_price, sizeof(int64_t)),
                         Buffer(intermediate_base + k, sizeof(int64_t))));
