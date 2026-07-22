@@ -497,60 +497,66 @@ HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    //
    // Only active for ColumnGroupLookup (local preaggregation).
    if constexpr (std::is_same_v<T, ColumnGroupLookup>) {
-   if (keyOffset0) {
-      ++fusedCalls;
-      const size_t koff  = keyOffset0;
-      const size_t nKeys = self()->numKeyCols;
       auto* const* cols  = self()->keyCols;
-      const auto*  cSz   = self()->keyColSizes;
       auto*        sel   = self()->keySel;
-
-      // Specialized for exactly 2 keys of 1 byte each (Q1 fast path).
-      if (nKeys == 2 && cSz[0] == 1 && cSz[1] == 1) {
-         const char* col0 = cols[0];
-         const char* col1 = cols[1];
-         char pk0[n], pk1[n];
-         if (!sel) {
-            memcpy(pk0, col0, n);
-            memcpy(pk1, col1, n);
-         } else {
-            for (pos_t i = 0; i < n; ++i) {
-               pk0[i] = col0[sel[i]];
-               pk1[i] = col1[sel[i]];
-            }
-         }
-
-         // Compute hashes from the materialized key buffers using
-         // CRC32 — a single ~3-cycle instruction per key vs MurMurHash's
-         // multiply/shift chain. Safe because the local preagg HT is
-         // private to this fused path (global agg uses its own HT).
+      const char* col0 = cols[0];
+      const char* col1 = cols[1];
+        if (n== 1024){
+        //fprintf(stderr,"!sel\n", sel);
          const hash_t hashSeed = vectorwise::primitives::seed;
          runtime::CRC32Hash hasher;
-         for (pos_t i = 0; i < n; ++i) {
-            hash_t h = hasher.hashKey((uint8_t)pk0[i], hashSeed);
-            groupHashes[i] = hasher.hashKey((uint8_t)pk1[i], h);
-         }
-
          pos_t found = 0;
          for (pos_t i = 0; i < n; ++i) {
-            auto hash = groupHashes[i];
+            //auto hash = groupHashes[i];
+
+          
+            hash_t hash = hasher.hashKey((uint8_t)col0[i], hashSeed);
+            hash = hasher.hashKey((uint8_t)col1[i], hash);
+
+
             for (auto* el = ht.find_chain(hash); el != ht.end();
                  el = el->next) {
                auto* entryBase = reinterpret_cast<const char*>(el);
                if (el->hash == hash &&
-                   entryBase[koff]     == pk0[i] &&
-                   entryBase[koff + 1] == pk1[i]) {
+                   entryBase[0]     == col0[i] &&
+                   entryBase[ 1] == col1[i]) {
                   htMatches[i] = el;
                   groupsFound[found++] = i;
-                  goto fused_matched;
+                  goto fused_matched0;
                }
             }
             groupsNotFound->push_back(i);
-         fused_matched:;
+         fused_matched0:;
+         }
+         return found;
+         }  else {
+         const hash_t hashSeed = vectorwise::primitives::seed;
+         runtime::CRC32Hash hasher;
+         pos_t found = 0;
+         for (pos_t i = 0; i < n; ++i) {
+            //auto hash = groupHashes[i];
+
+          
+            hash_t hash = hasher.hashKey((uint8_t)col0[sel[i]], hashSeed);
+            hash = hasher.hashKey((uint8_t)col1[sel[i]], hash);
+
+
+            for (auto* el = ht.find_chain(hash); el != ht.end();
+                 el = el->next) {
+               auto* entryBase = reinterpret_cast<const char*>(el);
+               if (el->hash == hash &&
+                   entryBase[0]     == col0[sel[i]] &&
+                   entryBase[ 1] == col1[sel[i]]) {
+                  htMatches[i] = el;
+                  groupsFound[found++] = i;
+                  goto fused_matched1;
+               }
+            }
+            groupsNotFound->push_back(i);
+         fused_matched1:;
          }
          return found;
       }
-   }
    } // if constexpr ColumnGroupLookup
 #endif // FUSED_GROUP_LOOKUP
 
