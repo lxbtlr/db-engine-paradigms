@@ -417,9 +417,11 @@ class HashGroup : public UnaryOperator {
    std::deque<KeyColumn> keyColumns;
 
    std::vector<char> keys;
+#ifndef VW_USE_CRC32
    runtime::MurMurHash hashFn;
-   //runtime::CRC32Hash hashFn;
-
+#else
+   runtime::CRC32Hash hashFn;
+#endif
    pos_t* sel = nullptr;
 
    size_t GetOrCreate(const char* key, hash_t hash, pos_t i);
