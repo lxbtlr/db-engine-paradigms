@@ -26,6 +26,12 @@ OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 
 
+OPTION(GROUP_VERSION "Switch to using group version 2 for HashGroup::GetGroups (default v1)" OFF)
+IF(GROUP_VERSION)
+  ADD_DEFINITIONS(-DGROUP_VERSION)
+  message(STATUS "Switch to using group version 2 (HashGroup::GetGroups_v2)")
+ENDIF(GROUP_VERSION)
+
 
 # Compiler flags for the different targets
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -mtune=native -mno-avx512f -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")

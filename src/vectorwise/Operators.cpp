@@ -856,8 +856,13 @@ size_t HashGroup::next() {
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
          ConcatKeys(n);
          preAggregation.groupsNotFound->clear();
+// add parameterized toggle
+#ifndef GROUP_VERSION
          GetGroups_v1(n);
-         //GetGroups_v2(n);
+#endif
+#ifdef GROUP_VERSION
+         GetGroups_v2(n);
+#endif
          auto groupsCreated = preAggregation.createMissingGroups(ht, false);
          updateGroups.evaluate(n);
          groups += groupsCreated;
