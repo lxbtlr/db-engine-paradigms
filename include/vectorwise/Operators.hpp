@@ -3,8 +3,8 @@
 #include "common/Compat.hpp"
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Database.hpp"
-#include "common/runtime/Hashmap.hpp"
 #include "common/runtime/Hash.hpp"
+#include "common/runtime/Hashmap.hpp"
 #include "common/runtime/PartitionedDeque.hpp"
 #include "common/runtime/Query.hpp"
 #include "vectorwise/Primitives.hpp"
@@ -422,9 +422,12 @@ class HashGroup : public UnaryOperator {
 
    pos_t* sel = nullptr;
 
-   void ConcatKeys(pos_t n);
-   void GetGroups_v1(pos_t n);
-   void GetGroups_v2(pos_t n);
+   size_t GetOrCreate(const char* key, hash_t hash, pos_t i);
+   void Concat_row(pos_t n);
+   void Concat_col(pos_t n);
+   size_t GetGroups_v0(pos_t n);
+   size_t GetGroups_v1(pos_t n);
+   size_t GetGroups_v2(pos_t n);
 
  private:
    void clearHashtable();
