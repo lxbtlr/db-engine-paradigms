@@ -277,7 +277,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
 
    uint64_t memStart = 0;
    if (mem) memStart = getCurrentRSS();
-   //startAll();
+   startAll();
    double start = gettime();
    size_t performedRep = 0;
    for (; performedRep < repetitions || gettime() - start < 0.5;
@@ -285,7 +285,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
       fn();
    }
    double end = gettime();
-   //readAll();
+   readAll();
    std::cout.precision(3);
    std::cout.setf(std::ios::fixed, std::ios::floatfield);
    if (writeHeader) {
