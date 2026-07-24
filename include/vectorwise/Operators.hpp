@@ -14,6 +14,7 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <deque>
 
 namespace vectorwise {
 
@@ -404,6 +405,19 @@ class HashGroup : public UnaryOperator {
    } cont;
 
    virtual size_t next() override;
+
+   struct KeyColumn
+   {
+      size_t size = 0;
+      void* data = nullptr;
+   };
+
+   size_t keySize = 0;
+   std::deque<KeyColumn> keyColumns;
+   pos_t* sel = nullptr;
+
+   void GetGroups_all_pipeline(pos_t n);
+   //void GetGroups_all_vectorized();
 
  private:
    void clearHashtable();
