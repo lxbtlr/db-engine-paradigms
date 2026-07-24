@@ -852,9 +852,15 @@ size_t HashGroup::next() {
       }
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
+        #if GROUP_VERSION == 0
          auto groupsCreated = GetGroups_v0(n);
+        #elif GROUP_VERSION == 1
          //auto groupsCreated = GetGroups_v1(n);
+        #elif GROUP_VERSION == 2
          //auto groupsCreated = GetGroups_v2(n);
+        #else
+         fprintf(stderr,"NO GROUP VERSION SELECTED\n (use -DGROUP_VERSION=#)");
+        #endif 
          updateGroups.evaluate(n);
          groups += groupsCreated;
          if (groups >= maxFill) flushAndClear();
