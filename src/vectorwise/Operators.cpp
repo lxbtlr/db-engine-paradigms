@@ -4,6 +4,7 @@
 #include "common/runtime/SIMD.hpp"
 #include <algorithm>
 #include <iostream>
+#include "common/runtime/Hash.hpp"
 #include <stdexcept>
 #include <tuple>
 #include <x86intrin.h>
