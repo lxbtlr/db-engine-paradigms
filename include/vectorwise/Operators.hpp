@@ -414,10 +414,16 @@ class HashGroup : public UnaryOperator {
 
    size_t keySize = 0;
    std::deque<KeyColumn> keyColumns;
+
+   std::vector<char> keys;
+   runtime::MurMurHash hashFn;
+   //runtime::CRC32Hash hashFn;
+
    pos_t* sel = nullptr;
 
-   void GetGroups_all_pipeline(pos_t n);
-   //void GetGroups_all_vectorized();
+   void ConcatKeys(pos_t n);
+   void GetGroups_v1(pos_t n);
+   void GetGroups_v2(pos_t n);
 
  private:
    void clearHashtable();
