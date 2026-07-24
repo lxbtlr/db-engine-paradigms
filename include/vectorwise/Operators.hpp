@@ -4,6 +4,7 @@
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Database.hpp"
 #include "common/runtime/Hashmap.hpp"
+#include "common/runtime/Hash.hpp"
 #include "common/runtime/PartitionedDeque.hpp"
 #include "common/runtime/Query.hpp"
 #include "vectorwise/Primitives.hpp"
