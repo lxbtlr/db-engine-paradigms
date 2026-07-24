@@ -848,8 +848,7 @@ size_t HashGroup::next() {
       };
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         groupHash.evaluate(n);
-         preAggregation.findGroups(n, ht);
+         GetGroups_all_pipeline(n);
          auto groupsCreated = preAggregation.createMissingGroups(ht, false);
          updateGroups.evaluate(n);
          groups += groupsCreated;
@@ -916,5 +915,42 @@ size_t HashGroup::next() {
       }
    }
    return EndOfStream;
+}
+
+void HashGroup::GetGroups_all_pipeline(pos_t n) {
+   auto& local = preAggregation;
+   local.groupsNotFound->clear();
+
+   std::vector<char> key(keySize);
+   runtime::MurMurHash hashFn;
+   //runtime::CRC32Hash hashFn;
+
+   for (pos_t i = 0; i < n; i++) {
+      const pos_t idx = sel ? sel[i] : i;
+
+      //concat
+      size_t dest = 0;
+      for (const auto& keyColumn : keyColumns) {
+         const char* col = static_cast<const char*>(keyColumn.data);
+         const auto src = idx * keyColumn.size;
+         std::memcpy(key.data() + dest, col + src, keyColumn.size);
+         dest += keyColumn.size;
+      }
+
+      //hash
+      hash_t hash = hashFn.hashKey(key.data(), static_cast<int>(keySize), 0);
+      local.groupHashes[i] = hash;
+
+      //lookup
+      for (auto el = ht.find_chain(hash); el != ht.end(); el = el->next) {
+         const auto* k = reinterpret_cast<const char*>(el) + sizeof(*el);
+         if (el->hash == hash && std::memcmp(key.data(), k, keySize) == 0) {
+            local.htMatches[i] = el;
+            goto done;
+         }
+      }
+      local.groupsNotFound->push_back(i);
+   done:;
+   }
 }
 } // namespace vectorwise
