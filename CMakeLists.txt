@@ -25,6 +25,7 @@ OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise" OFF)
+OPTION(CONCAT_ROWWISE "Switch to using columnar concat" OFF)
 
 set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 message(STATUS "Building with Group Version: ${GROUP_VERSION}")

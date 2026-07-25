@@ -1045,8 +1045,12 @@ size_t HashGroup::GetGroups_v0(pos_t n) {
 size_t HashGroup::GetGroups_v1(pos_t n) {
    size_t groupsCreated = 0;
 
+#ifdef CONCAT_ROWWISE
    Concat_row(n);
-   //Concat_col(n);
+#endif
+#ifndef CONCAT_ROWWISE
+   Concat_col(n);
+#endif
 
    for (pos_t i = 0; i < n; i++) {
       const auto key = keys.data() + i * keySize;
