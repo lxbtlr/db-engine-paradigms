@@ -563,10 +563,10 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    local.ht_entry_size += col.dataSize;
    global.ht_entry_size += col.dataSize;
 
-   op.keySize += col.dataSize;
-   op.keyColumns.push_back({col.dataSize, col.data});
+   op.keyColumns.push_back({col.dataSize, op.keySize, col.data});
    auto& keyColumn = op.keyColumns.back();
    col.registerDS(&keyColumn.data);
+   op.keySize += col.dataSize;
 
    auto partitionOffset =
        entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
@@ -646,10 +646,10 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    local.ht_entry_size += col.dataSize;
    global.ht_entry_size += col.dataSize;
 
-   op.keySize += col.dataSize;
-   op.keyColumns.push_back({col.dataSize, col.data});
+   op.keyColumns.push_back({col.dataSize, op.keySize, col.data});
    auto& keyColumn = op.keyColumns.back();
    col.registerDS(&keyColumn.data);
+   op.keySize += col.dataSize;
    if (op.sel == nullptr) {
       op.sel = sel;
       sel.registerDS(&op.sel);
