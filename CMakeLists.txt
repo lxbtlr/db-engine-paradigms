@@ -32,8 +32,8 @@ message(STATUS "Building with Group Version: ${GROUP_VERSION}")
 add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
 
 # Compiler flags for the different targets
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -mtune=native -mno-avx512f -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -fPIC -Wall -Wextra -fno-omit-frame-pointer -mno-avx512f -march=native -fdiagnostics-color ")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -fPIC -Wall -Wextra -fno-omit-frame-pointer -march=native -fdiagnostics-color ")
 
 
 if(LINUX)
@@ -72,11 +72,11 @@ ENDIF()
 
 
 
-IF(AUTOVECTORIZE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
-ELSE(AUTOVECTORIZE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
-ENDIF(AUTOVECTORIZE)
+#IF(AUTOVECTORIZE)
+#  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
+#ELSE(AUTOVECTORIZE)
+#  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
+#ENDIF(AUTOVECTORIZE)
 
 
 # Download and unpack googletest at configure time
