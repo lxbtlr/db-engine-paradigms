@@ -410,12 +410,13 @@ class HashGroup : public UnaryOperator {
    struct KeyColumn
    {
       size_t size = 0;
+      size_t offset = 0;
       void* data = nullptr;
    };
 
    size_t keySize = 0;
    std::deque<KeyColumn> keyColumns;
-   std::vector<char> keys;
+   std::vector<uint8_t> keys;
    pos_t* sel = nullptr;
 
 #ifndef VW_USE_CRC32
@@ -424,14 +425,18 @@ class HashGroup : public UnaryOperator {
    runtime::CRC32Hash hashFn;
 #endif
 
-   size_t GetOrCreate(const char* key, hash_t hash, pos_t i);
-   void Concat_row(pos_t n);
-   void Concat_col(pos_t n);
+
+   void Concat(pos_t n);
+   template <size_t T> void Concat_T(pos_t n, const KeyColumn& col);
+   void Concat_any(pos_t n, const KeyColumn& col);
+
    void Hash(pos_t n);
-   size_t Lookup(pos_t n);
-   size_t GetGroups_v0(pos_t n);
-   size_t GetGroups_v1(pos_t n);
-   size_t GetGroups_v2(pos_t n);
+   template <size_t T> void Hash_T(pos_t n);
+   void Hash_any(pos_t n);
+
+   void Lookup(pos_t n);
+   template <size_t T> void Lookup_T(pos_t n);
+   void Lookup_any(pos_t n);
 
  private:
    void clearHashtable();
