@@ -415,18 +415,20 @@ class HashGroup : public UnaryOperator {
 
    size_t keySize = 0;
    std::deque<KeyColumn> keyColumns;
-
    std::vector<char> keys;
+   pos_t* sel = nullptr;
+
 #ifndef VW_USE_CRC32
    runtime::MurMurHash hashFn;
 #else
    runtime::CRC32Hash hashFn;
 #endif
-   pos_t* sel = nullptr;
 
    size_t GetOrCreate(const char* key, hash_t hash, pos_t i);
    void Concat_row(pos_t n);
    void Concat_col(pos_t n);
+   void Hash(pos_t n);
+   size_t Lookup(pos_t n);
    size_t GetGroups_v0(pos_t n);
    size_t GetGroups_v1(pos_t n);
    size_t GetGroups_v2(pos_t n);
