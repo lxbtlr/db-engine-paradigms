@@ -852,15 +852,15 @@ size_t HashGroup::next() {
       }
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-        #if GROUP_VERSION == 0
+#if GROUP_VERSION == 0
          auto groupsCreated = GetGroups_v0(n);
-        #elif GROUP_VERSION == 1
+#elif GROUP_VERSION == 1
          auto groupsCreated = GetGroups_v1(n);
-        #elif GROUP_VERSION == 2
+#elif GROUP_VERSION == 2
          auto groupsCreated = GetGroups_v2(n);
-        #else
+#else
          fprintf(stderr,"NO GROUP VERSION SELECTED\n (use -DGROUP_VERSION=#)");
-        #endif 
+#endif
          updateGroups.evaluate(n);
          groups += groupsCreated;
          if (groups >= maxFill) flushAndClear();
@@ -1008,6 +1008,24 @@ void HashGroup::Concat_col(pos_t n) {
    }
 }
 
+void HashGroup::Hash(pos_t n) {
+   for (pos_t i = 0; i < n; i++) {
+      const auto key = keys.data() + i * keySize;
+      const auto hash = hashFn.hashKey(key, static_cast<int>(keySize), 0);
+      preAggregation.groupHashes[i] = hash;
+   }
+}
+
+size_t HashGroup::Lookup(pos_t n) {
+   size_t groupsCreated = 0;
+   for (pos_t i = 0; i < n; i++) {
+      const auto key = keys.data() + i * keySize;
+      const auto hash = preAggregation.groupHashes[i];
+      groupsCreated += GetOrCreate(key, hash, i);
+   }
+   return groupsCreated;
+}
+
 size_t HashGroup::GetGroups_v0(pos_t n) {
    size_t groupsCreated = 0;
    const auto key = keys.data();
@@ -1043,46 +1061,29 @@ size_t HashGroup::GetGroups_v0(pos_t n) {
 }
 
 size_t HashGroup::GetGroups_v1(pos_t n) {
-   size_t groupsCreated = 0;
-
 #ifdef CONCAT_ROWWISE
    Concat_row(n);
-#endif
-#ifndef CONCAT_ROWWISE
+#else
    Concat_col(n);
 #endif
 
+   size_t groupsCreated = 0;
    for (pos_t i = 0; i < n; i++) {
       const auto key = keys.data() + i * keySize;
       const auto hash = hashFn.hashKey(key, static_cast<int>(keySize), 0);
       groupsCreated += GetOrCreate(key, hash, i);
    }
-
    return groupsCreated;
 }
 
 size_t HashGroup::GetGroups_v2(pos_t n) {
-   size_t groupsCreated = 0;
-
 #ifdef CONCAT_ROWWISE
    Concat_row(n);
-#endif
-#ifndef CONCAT_ROWWISE
+#else
    Concat_col(n);
 #endif
 
-   for (pos_t i = 0; i < n; i++) {
-      const auto key = keys.data() + i * keySize;
-      const auto hash = hashFn.hashKey(key, static_cast<int>(keySize), 0);
-      preAggregation.groupHashes[i] = hash;
-   }
-
-   for (pos_t i = 0; i < n; i++) {
-      const auto key = keys.data() + i * keySize;
-      const auto hash = preAggregation.groupHashes[i];
-      groupsCreated += GetOrCreate(key, hash, i);
-   }
-
-   return groupsCreated;
+   Hash(n);
+   return Lookup(n);
 }
 } // namespace vectorwise
