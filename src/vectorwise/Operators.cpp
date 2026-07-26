@@ -927,35 +927,35 @@ size_t HashGroup::next() {
 void HashGroup::Concat(pos_t n) {
    for (const auto& col : keyColumns) {
       switch (col.size) {
-         case 1: Concat_T<1>(n, col); break;
-         case 2: Concat_T<2>(n, col); break;
-         case 4: Concat_T<4>(n, col); break;
-         case 8: Concat_T<8>(n, col); break;
+         case 1: Concat_T<uint8_t>(n, col); break;
+         case 2: Concat_T<uint16_t>(n, col); break;
+         case 4: Concat_T<uint32_t>(n, col); break;
+         case 8: Concat_T<uint64_t>(n, col); break;
          default: Concat_any(n, col); break;
       }
    }
 }
 
-template <size_t T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
-   auto data = static_cast<const char*>(col.data);
+template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
+   const auto data = static_cast<const char*>(col.data);
    if (sel && n < vecSize) {
       for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
          const pos_t idx = sel[i];
-         const auto src = data + idx * T;
+         const auto src = data + idx * sizeof(T);
          const auto dest = keys.data() + j;
-         std::memcpy(dest, src, T);
+         std::memcpy(dest, src, sizeof(T));
       }
    } else {
       for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
-         const auto src = data + i * T;
+         const auto src = data + i * sizeof(T);
          const auto dest = keys.data() + j;
-         std::memcpy(dest, src, T);
+         std::memcpy(dest, src, sizeof(T));
       }
    }
 }
 
 void HashGroup::Concat_any(pos_t n, const KeyColumn& col) {
-   auto data = static_cast<const char*>(col.data);
+   const auto data = static_cast<const char*>(col.data);
    if (sel && n < vecSize) {
       for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
          const pos_t idx = sel[i];
@@ -977,27 +977,25 @@ void HashGroup::Concat_any(pos_t n, const KeyColumn& col) {
 
 void HashGroup::Hash(pos_t n) {
    switch (keySize) {
-      case 1: Hash_T<1>(n); break;
-      case 2: Hash_T<2>(n); break;
-      case 4: Hash_T<4>(n); break;
-      case 8: Hash_T<8>(n); break;
+      case 1: Hash_T<uint8_t>(n); break;
+      case 2: Hash_T<uint16_t>(n); break;
+      case 4: Hash_T<uint32_t>(n); break;
+      case 8: Hash_T<uint64_t>(n); break;
       default: Hash_any(n); break;
    }
 }
 
-template <size_t T> void HashGroup::Hash_T(pos_t n) {
+template <typename T> void HashGroup::Hash_T(pos_t n) {
+   const auto data = reinterpret_cast<const T*>(keys.data());
    for (pos_t i = 0; i < n; i++) {
-      const auto key = keys.data() + i * keySize;
-      const auto hash = hashFn.hashKey(key, T, 0);
-      preAggregation.groupHashes[i] = hash;
+      preAggregation.groupHashes[i] = hashFn.hashKey(data[i]);
    }
 }
 
 void HashGroup::Hash_any(pos_t n) {
-   for (pos_t i = 0; i < n; i++) {
-      const auto key = keys.data() + i * keySize;
-      const auto hash = hashFn.hashKey(key, keySize, 0);
-      preAggregation.groupHashes[i] = hash;
+   for (pos_t i = 0; i < n; i += keySize) {
+      const auto key = keys.data() + i;
+      preAggregation.groupHashes[i] = hashFn.hashKey(key, keySize, 0);
    }
 }
 
@@ -1006,15 +1004,15 @@ void HashGroup::Hash_any(pos_t n) {
 
 void HashGroup::Lookup(pos_t n) {
    switch (keySize) {
-      case 1: Lookup_T<1>(n); break;
-      case 2: Lookup_T<2>(n); break;
-      case 4: Lookup_T<4>(n); break;
-      case 8: Lookup_T<8>(n); break;
+      case 1: Lookup_T<uint8_t>(n); break;
+      case 2: Lookup_T<uint16_t>(n); break;
+      case 4: Lookup_T<uint32_t>(n); break;
+      case 8: Lookup_T<uint64_t>(n); break;
       default: Lookup_any(n); break;
    }
 }
 
-template <size_t T> void HashGroup::Lookup_T(pos_t n) {
+template <typename T> void HashGroup::Lookup_T(pos_t n) {
    for (pos_t i = 0; i < n; i++) {
       const auto key = keys.data() + i * keySize;
       const auto hash = preAggregation.groupHashes[i];
@@ -1038,7 +1036,7 @@ template <size_t T> void HashGroup::Lookup_T(pos_t n) {
          }
 
          const auto* el_key = reinterpret_cast<const char*>(el) + sizeof(*el);
-         if (el->hash == hash && std::memcmp(key, el_key, T) == 0) {
+         if (el->hash == hash && std::memcmp(key, el_key, sizeof(T)) == 0) {
             break;
          }
 
