@@ -940,8 +940,7 @@ template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
    const auto data = static_cast<const char*>(col.data);
    if (sel && n < vecSize) {
       for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
-         const pos_t idx = sel[i];
-         const auto src = data + idx * sizeof(T);
+         const auto src = data + sel[i] * sizeof(T);
          const auto dest = keys.data() + j;
          std::memcpy(dest, src, sizeof(T));
       }
@@ -958,8 +957,7 @@ void HashGroup::Concat_any(pos_t n, const KeyColumn& col) {
    const auto data = static_cast<const char*>(col.data);
    if (sel && n < vecSize) {
       for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
-         const pos_t idx = sel[i];
-         const auto src = data + idx * col.size;
+         const auto src = data + sel[i] * col.size;
          const auto dest = keys.data() + j;
          std::memcpy(dest, src, col.size);
       }
