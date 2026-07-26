@@ -427,15 +427,15 @@ class HashGroup : public UnaryOperator {
 
 
    void Concat(pos_t n);
-   template <size_t T> void Concat_T(pos_t n, const KeyColumn& col);
+   template <typename T> void Concat_T(pos_t n, const KeyColumn& col);
    void Concat_any(pos_t n, const KeyColumn& col);
 
    void Hash(pos_t n);
-   template <size_t T> void Hash_T(pos_t n);
+   template <typename T> void Hash_T(pos_t n);
    void Hash_any(pos_t n);
 
    void Lookup(pos_t n);
-   template <size_t T> void Lookup_T(pos_t n);
+   template <typename T> void Lookup_T(pos_t n);
    void Lookup_any(pos_t n);
 
  private:
