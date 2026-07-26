@@ -6,6 +6,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <tuple>
+#include <type_traits>
 #include <x86intrin.h>
 
 namespace vectorwise {
@@ -921,9 +922,7 @@ size_t HashGroup::next() {
    return EndOfStream;
 }
 
-
-/*** CONCAT ***/
-
+// CONCAT
 void HashGroup::Concat(pos_t n) {
    for (const auto& col : keyColumns) {
       switch (col.size) {
@@ -931,86 +930,64 @@ void HashGroup::Concat(pos_t n) {
          case 2: Concat_T<uint16_t>(n, col); break;
          case 4: Concat_T<uint32_t>(n, col); break;
          case 8: Concat_T<uint64_t>(n, col); break;
-         default: Concat_any(n, col); break;
+         default: Concat_T<char*>(n, col); break;
       }
    }
 }
 
 template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
-   const auto data = static_cast<const char*>(col.data);
+   const size_t size = std::is_same_v<T, char*> ? col.size : sizeof(T);
+   const char* __restrict__ src = static_cast<const char*>(col.data);
+   char* __restrict__ dest = keys.data();
    if (sel && n < vecSize) {
       for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
-         const auto src = data + sel[i] * sizeof(T);
-         const auto dest = keys.data() + j;
-         std::memcpy(dest, src, sizeof(T));
+         std::memcpy(dest + j, src + sel[i] * size, size);
       }
    } else {
       for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
-         const auto src = data + i * sizeof(T);
-         const auto dest = keys.data() + j;
-         std::memcpy(dest, src, sizeof(T));
+         std::memcpy(dest + j, src + i * size, size);
       }
    }
 }
 
-void HashGroup::Concat_any(pos_t n, const KeyColumn& col) {
-   const auto data = static_cast<const char*>(col.data);
-   if (sel && n < vecSize) {
-      for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
-         const auto src = data + sel[i] * col.size;
-         const auto dest = keys.data() + j;
-         std::memcpy(dest, src, col.size);
-      }
-   } else {
-      for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
-         const auto src = data + i * col.size;
-         const auto dest = keys.data() + j;
-         std::memcpy(dest, src, col.size);
-      }
-   }
-}
-
-
-/*** HASH ***/
-
+// HASH
 void HashGroup::Hash(pos_t n) {
    switch (keySize) {
       case 1: Hash_T<uint8_t>(n); break;
       case 2: Hash_T<uint16_t>(n); break;
       case 4: Hash_T<uint32_t>(n); break;
       case 8: Hash_T<uint64_t>(n); break;
-      default: Hash_any(n); break;
+      default: Hash_T<char*>(n); break;
    }
 }
 
 template <typename T> void HashGroup::Hash_T(pos_t n) {
-   const auto data = reinterpret_cast<const T*>(keys.data());
+   const char* __restrict__ src = keys.data();
+   hash_t* __restrict__ dest = preAggregation.groupHashes;
    for (pos_t i = 0; i < n; i++) {
-      preAggregation.groupHashes[i] = hashFn.hashKey(data[i]);
+      if constexpr (std::is_same_v<T, char*>) {
+         dest[i] = hashFn.hashKey(src + i * keySize, keySize, 0);
+      } else {
+         T key;
+         std::memcpy(&key, src + i * sizeof(T), sizeof(T));
+         dest[i] = hashFn.hashKey(key);
+      }
    }
 }
 
-void HashGroup::Hash_any(pos_t n) {
-   for (pos_t i = 0; i < n; i += keySize) {
-      const auto key = keys.data() + i;
-      preAggregation.groupHashes[i] = hashFn.hashKey(key, keySize, 0);
-   }
-}
-
-
-/*** LOOKUP ***/
-
+// LOOKUP
 void HashGroup::Lookup(pos_t n) {
    switch (keySize) {
       case 1: Lookup_T<uint8_t>(n); break;
       case 2: Lookup_T<uint16_t>(n); break;
       case 4: Lookup_T<uint32_t>(n); break;
       case 8: Lookup_T<uint64_t>(n); break;
-      default: Lookup_any(n); break;
+      default: Lookup_T<char*>(n); break;
    }
 }
 
 template <typename T> void HashGroup::Lookup_T(pos_t n) {
+   const size_t size = std::is_same_v<T, char*> ? keySize : sizeof(T);
    for (pos_t i = 0; i < n; i++) {
       const auto key = keys.data() + i * keySize;
       const auto hash = preAggregation.groupHashes[i];
@@ -1033,42 +1010,8 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
             break;
          }
 
-         const auto* el_key = reinterpret_cast<const char*>(el) + sizeof(*el);
-         if (el->hash == hash && std::memcmp(key, el_key, sizeof(T)) == 0) {
-            break;
-         }
-
-         el = el->next;
-      } while (true);
-      preAggregation.htMatches[i] = el;
-   }
-}
-
-void HashGroup::Lookup_any(pos_t n) {
-   for (pos_t i = 0; i < n; i++) {
-      const auto key = keys.data() + i * keySize;
-      const auto hash = preAggregation.groupHashes[i];
-
-      auto el = ht.find_chain(hash);
-      do {
-         if (el == ht.end()) {
-            auto alloc = groupStore.allocate(preAggregation.ht_entry_size);
-            if (!alloc) throw std::runtime_error("malloc failed");
-            preAggregation.allocations.emplace_back(alloc, 1);
-
-            el = reinterpret_cast<runtime::Hashmap::EntryHeader*>(alloc);
-            preAggregation.groupRepresentatives[0] = i;
-            preAggregation.scatterStart = el;
-            preAggregation.buildScatter.evaluate(1);
-
-            ht.insertAll<false>(el, 1, preAggregation.ht_entry_size);
-            ++preAggregation.entries_in_ht;
-
-            break;
-         }
-
-         const auto* el_key = reinterpret_cast<const char*>(el) + sizeof(*el);
-         if (el->hash == hash && std::memcmp(key, el_key, keySize) == 0) {
+         const char* el_key = reinterpret_cast<const char*>(el) + sizeof(*el);
+         if (el->hash == hash && std::memcmp(key, el_key, size) == 0) {
             break;
          }
 
