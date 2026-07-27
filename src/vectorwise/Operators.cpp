@@ -1003,20 +1003,17 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
       const hash_t hash = hashes[i];
 
       EntryHeader* el = ht.find_chain(hash);
-      do {
-         if (el == ht.end()) {
-            preAggregation.groupsNotFound->push_back(i);
-            break;
-         }
-
-         const char* el_key = reinterpret_cast<const char*>(el) + sizeof(*el);
+      for (; el != ht.end(); el = el->next) {
+         const char* el_key = reinterpret_cast<const char*>(el + 1);
          if (el->hash == hash && std::memcmp(key, el_key, size) == 0) {
             matches[i] = el;
             break;
          }
+      }
 
-         el = el->next;
-      } while (true);
+      if (el == ht.end()) {
+         preAggregation.groupsNotFound->push_back(i);
+      }
    }
 }
 } // namespace vectorwise
