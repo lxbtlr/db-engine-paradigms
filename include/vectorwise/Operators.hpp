@@ -409,15 +409,15 @@ class HashGroup : public UnaryOperator {
 
    struct KeyColumn
    {
-      size_t size = 0;
-      size_t offset = 0;
+      uint32_t size = 0;
+      uint32_t offset = 0;
       void* data = nullptr;
    };
 
-   size_t keySize = 0;
+   uint32_t keySize = 0;
    std::deque<KeyColumn> keyColumns;
-   std::vector<char> keys;
-   pos_t* sel = nullptr;
+   std::vector<char> packedKeys;
+   pos_t* selVec = nullptr;
 
 #ifndef VW_USE_CRC32
    runtime::MurMurHash hashFn;
