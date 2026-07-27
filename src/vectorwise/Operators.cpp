@@ -938,14 +938,14 @@ void HashGroup::Concat(pos_t n) {
 template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
    const size_t size = std::is_same_v<T, char*> ? col.size : sizeof(T);
    const char* __restrict__ src = static_cast<const char*>(col.data);
-   char* __restrict__ dest = keys.data();
+   char* __restrict__ dest = keys.data() + col.offset;
    if (sel && n < vecSize) {
-      for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
-         std::memcpy(dest + j, src + sel[i] * size, size);
+      for (pos_t i = 0; i < n; i++, dest += keySize) {
+         std::memcpy(dest, src + sel[i] * size, size);
       }
    } else {
-      for (pos_t i = 0, j = col.offset; i < n; i++, j += keySize) {
-         std::memcpy(dest + j, src + i * size, size);
+      for (pos_t i = 0; i < n; i++, dest += keySize) {
+         std::memcpy(dest, src + i * size, size);
       }
    }
 }
