@@ -847,8 +847,8 @@ size_t HashGroup::next() {
          preAggregation.clearHashtable(ht);
       };
 
-      if (keys.size() != vecSize * keySize) {
-         keys.resize(vecSize * keySize);
+      if (packedKeys.size() != vecSize * keySize) {
+         packedKeys.resize(vecSize * keySize);
       }
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
@@ -856,6 +856,7 @@ size_t HashGroup::next() {
          Hash(n);
          Lookup(n);
 
+         preAggregation.createMissingGroups(ht, false);
          updateGroups.evaluate(n);
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
@@ -938,14 +939,16 @@ void HashGroup::Concat(pos_t n) {
 template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
    const size_t size = std::is_same_v<T, char*> ? col.size : sizeof(T);
    const char* __restrict__ src = static_cast<const char*>(col.data);
-   char* __restrict__ dest = keys.data() + col.offset;
+   const pos_t* __restrict__ sel = static_cast<const pos_t*>(selVec);
+   char* __restrict__ dest = packedKeys.data() + col.offset;
+
    if (sel && n < vecSize) {
-      for (pos_t i = 0; i < n; i++, dest += keySize) {
-         std::memcpy(dest, src + sel[i] * size, size);
+      for (pos_t i = 0; i < n; i++) {
+         std::memcpy(dest + i * keySize, src + sel[i] * size, size);
       }
    } else {
-      for (pos_t i = 0; i < n; i++, dest += keySize) {
-         std::memcpy(dest, src + i * size, size);
+      for (pos_t i = 0; i < n; i++) {
+         std::memcpy(dest + i * keySize, src + i * size, size);
       }
    }
 }
@@ -962,15 +965,16 @@ void HashGroup::Hash(pos_t n) {
 }
 
 template <typename T> void HashGroup::Hash_T(pos_t n) {
-   const char* __restrict__ src = keys.data();
-   hash_t* __restrict__ dest = preAggregation.groupHashes;
+   const char* __restrict__ keys = packedKeys.data();
+   hash_t* __restrict__ hashes = preAggregation.groupHashes;
+
    for (pos_t i = 0; i < n; i++) {
       if constexpr (std::is_same_v<T, char*>) {
-         dest[i] = hashFn.hashKey(src + i * keySize, keySize, 0);
+         hashes[i] = hashFn.hashKey(keys + i * keySize, keySize, 0);
       } else {
          T key;
-         std::memcpy(&key, src + i * sizeof(T), sizeof(T));
-         dest[i] = hashFn.hashKey(key);
+         std::memcpy(&key, keys + i * sizeof(T), sizeof(T));
+         hashes[i] = hashFn.hashKey(key);
       }
    }
 }
@@ -988,36 +992,29 @@ void HashGroup::Lookup(pos_t n) {
 
 template <typename T> void HashGroup::Lookup_T(pos_t n) {
    const size_t size = std::is_same_v<T, char*> ? keySize : sizeof(T);
-   for (pos_t i = 0; i < n; i++) {
-      const auto key = keys.data() + i * keySize;
-      const auto hash = preAggregation.groupHashes[i];
+   const char* __restrict__ keys = packedKeys.data();
+   const hash_t* __restrict__ hashes = preAggregation.groupHashes;
+   EntryHeader** __restrict__ matches = preAggregation.htMatches;
 
-      auto el = ht.find_chain(hash);
+   for (pos_t i = 0; i < n; i++) {
+      const char* key = keys + i * size;
+      const hash_t hash = hashes[i];
+
+      EntryHeader* el = ht.find_chain(hash);
       do {
          if (el == ht.end()) {
-            auto alloc = groupStore.allocate(preAggregation.ht_entry_size);
-            if (!alloc) throw std::runtime_error("malloc failed");
-            preAggregation.allocations.emplace_back(alloc, 1);
-
-            el = reinterpret_cast<runtime::Hashmap::EntryHeader*>(alloc);
-            preAggregation.groupRepresentatives[0] = i;
-            preAggregation.scatterStart = el;
-            preAggregation.buildScatter.evaluate(1);
-
-            ht.insertAll<false>(el, 1, preAggregation.ht_entry_size);
-            ++preAggregation.entries_in_ht;
-
+            preAggregation.groupsNotFound->push_back(i);
             break;
          }
 
          const char* el_key = reinterpret_cast<const char*>(el) + sizeof(*el);
          if (el->hash == hash && std::memcmp(key, el_key, size) == 0) {
+            matches[i] = el;
             break;
          }
 
          el = el->next;
       } while (true);
-      preAggregation.htMatches[i] = el;
    }
 }
 } // namespace vectorwise
