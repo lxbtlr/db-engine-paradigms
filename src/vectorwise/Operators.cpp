@@ -856,6 +856,7 @@ size_t HashGroup::next() {
          Hash(n);
          Lookup(n);
 
+         preAggregation.createMissingGroups(ht, false);
          updateGroups.evaluate(n);
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
@@ -1002,29 +1003,18 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
       EntryHeader* el = ht.find_chain(hash);
       do {
          if (el == ht.end()) {
-            auto alloc = groupStore.allocate(preAggregation.ht_entry_size);
-            if (!alloc) throw std::runtime_error("malloc failed");
-            preAggregation.allocations.emplace_back(alloc, 1);
-
-            el = reinterpret_cast<runtime::Hashmap::EntryHeader*>(alloc);
-            preAggregation.groupRepresentatives[0] = i;
-            preAggregation.scatterStart = el;
-            preAggregation.buildScatter.evaluate(1);
-
-            ht.insertAll<false>(el, 1, preAggregation.ht_entry_size);
-            ++preAggregation.entries_in_ht;
-
+            preAggregation.groupsNotFound->push_back(i);
             break;
          }
 
          const char* el_key = reinterpret_cast<const char*>(el) + sizeof(*el);
          if (el->hash == hash && std::memcmp(key, el_key, size) == 0) {
+            matches[i] = el;
             break;
          }
 
          el = el->next;
       } while (true);
-      matches[i] = el;
    }
 }
 } // namespace vectorwise
