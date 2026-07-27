@@ -71,11 +71,11 @@ ENDIF()
 
 
 
-#IF(AUTOVECTORIZE)
-#  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
-#ELSE(AUTOVECTORIZE)
-#  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
-#ENDIF(AUTOVECTORIZE)
+IF(AUTOVECTORIZE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
+ELSE(AUTOVECTORIZE)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
+ENDIF(AUTOVECTORIZE)
 
 
 # Download and unpack googletest at configure time
