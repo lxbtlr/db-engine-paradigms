@@ -852,6 +852,8 @@ size_t HashGroup::next() {
       }
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
+         preAggregation.groupsNotFound->clear();
+
          Concat(n);
          Hash(n);
          Lookup(n);
@@ -1001,17 +1003,20 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
       const hash_t hash = hashes[i];
 
       EntryHeader* el = ht.find_chain(hash);
-      for (; el != ht.end(); el = el->next) {
-         const char* el_key = reinterpret_cast<const char*>(el + 1);
+      do {
+         if (el == ht.end()) {
+            preAggregation.groupsNotFound->push_back(i);
+            break;
+         }
+
+         const char* el_key = reinterpret_cast<const char*>(el) + sizeof(*el);
          if (el->hash == hash && std::memcmp(key, el_key, size) == 0) {
             matches[i] = el;
             break;
          }
-      }
 
-      if (el == ht.end()) {
-         preAggregation.groupsNotFound->push_back(i);
-      }
+         el = el->next;
+      } while (true);
    }
 }
 } // namespace vectorwise
