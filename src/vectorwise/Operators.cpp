@@ -939,10 +939,10 @@ void HashGroup::Concat(pos_t n) {
 }
 
 template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
-   const size_t size = std::is_same_v<T, char*> ? col.size : sizeof(T);
-   const char* __restrict__ src = static_cast<const char*>(col.data);
-   const pos_t* __restrict__ sel = static_cast<const pos_t*>(selVec);
-   char* __restrict__ dest = packedKeys.data() + col.offset;
+   const uint32_t size = std::is_same_v<T, char*> ? col.size : sizeof(T);
+   const char* const __restrict__ src = static_cast<const char*>(col.data);
+   const pos_t* const __restrict__ sel = static_cast<const pos_t*>(selVec);
+   char* const __restrict__ dest = packedKeys.data() + col.offset;
 
    if (sel && n < vecSize) {
       for (pos_t i = 0; i < n; i++) {
@@ -967,8 +967,8 @@ void HashGroup::Hash(pos_t n) {
 }
 
 template <typename T> void HashGroup::Hash_T(pos_t n) {
-   const char* __restrict__ keys = packedKeys.data();
-   hash_t* __restrict__ hashes = preAggregation.groupHashes;
+   const char* const __restrict__ keys = packedKeys.data();
+   hash_t* const __restrict__ hashes = preAggregation.groupHashes;
 
    for (pos_t i = 0; i < n; i++) {
       if constexpr (std::is_same_v<T, char*>) {
@@ -993,25 +993,25 @@ void HashGroup::Lookup(pos_t n) {
 }
 
 template <typename T> void HashGroup::Lookup_T(pos_t n) {
-   const size_t size = std::is_same_v<T, char*> ? keySize : sizeof(T);
-   const char* __restrict__ keys = packedKeys.data();
-   const hash_t* __restrict__ hashes = preAggregation.groupHashes;
-   EntryHeader** __restrict__ matches = preAggregation.htMatches;
+   const uint32_t size = std::is_same_v<T, char*> ? keySize : sizeof(T);
+   const char* const __restrict__ keys = packedKeys.data();
+   const hash_t* const __restrict__ hashes = preAggregation.groupHashes;
+   EntryHeader** const __restrict__ matches = preAggregation.htMatches;
 
+   EntryHeader* const end = ht.end();
    for (pos_t i = 0; i < n; i++) {
-      const char* key = keys + i * size;
       const hash_t hash = hashes[i];
-
       EntryHeader* el = ht.find_chain(hash);
-      for (; el != ht.end(); el = el->next) {
-         const char* el_key = reinterpret_cast<const char*>(el + 1);
-         if (el->hash == hash && std::memcmp(key, el_key, size) == 0) {
-            matches[i] = el;
-            break;
+      for (; el != end; el = el->next) {
+         if (el->hash == hash) {
+            const char* el_key = reinterpret_cast<const char*>(el + 1);
+            if (std::memcmp(keys + i * size, el_key, size) == 0) {
+               matches[i] = el;
+               break;
+            }
          }
       }
-
-      if (el == ht.end()) {
+      if (el == end) {
          preAggregation.groupsNotFound->push_back(i);
       }
    }
