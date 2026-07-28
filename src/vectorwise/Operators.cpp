@@ -946,11 +946,15 @@ template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
 
    if (sel && n < vecSize) {
       pos_t i = 0;
-      for (; i + 3 < n; i += 4) {
+      for (; i + 7 < n; i += 8) {
          std::memcpy(dest + (i + 0) * keySize, src + sel[i + 0] * size, size);
          std::memcpy(dest + (i + 1) * keySize, src + sel[i + 1] * size, size);
          std::memcpy(dest + (i + 2) * keySize, src + sel[i + 2] * size, size);
          std::memcpy(dest + (i + 3) * keySize, src + sel[i + 3] * size, size);
+         std::memcpy(dest + (i + 4) * keySize, src + sel[i + 4] * size, size);
+         std::memcpy(dest + (i + 5) * keySize, src + sel[i + 5] * size, size);
+         std::memcpy(dest + (i + 6) * keySize, src + sel[i + 6] * size, size);
+         std::memcpy(dest + (i + 7) * keySize, src + sel[i + 7] * size, size);
       }
       for (; i < n; i++) {
          std::memcpy(dest + i * keySize, src + sel[i] * size, size);
@@ -1005,7 +1009,7 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
    const hash_t* const __restrict__ hashes = preAggregation.groupHashes;
    EntryHeader** const __restrict__ matches = preAggregation.htMatches;
 
-   EntryHeader* const end = ht.end();
+   const EntryHeader* const end = ht.end();
    for (pos_t i = 0; i < n; i++) {
       const hash_t hash = hashes[i];
       EntryHeader* el = ht.find_chain(hash);
