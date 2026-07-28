@@ -945,7 +945,14 @@ template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
    char* const __restrict__ dest = packedKeys.data() + col.offset;
 
    if (sel && n < vecSize) {
-      for (pos_t i = 0; i < n; i++) {
+      pos_t i = 0;
+      for (; i + 3 < n; i += 4) {
+         std::memcpy(dest + (i + 0) * keySize, src + sel[i + 0] * size, size);
+         std::memcpy(dest + (i + 1) * keySize, src + sel[i + 1] * size, size);
+         std::memcpy(dest + (i + 2) * keySize, src + sel[i + 2] * size, size);
+         std::memcpy(dest + (i + 3) * keySize, src + sel[i + 3] * size, size);
+      }
+      for (; i < n; i++) {
          std::memcpy(dest + i * keySize, src + sel[i] * size, size);
       }
    } else {
