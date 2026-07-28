@@ -940,9 +940,9 @@ void HashGroup::Concat(pos_t n) {
 
 template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
    const uint32_t size = std::is_same_v<T, char*> ? col.size : sizeof(T);
-   const char* const __restrict__ src = static_cast<const char*>(col.data);
-   const pos_t* const __restrict__ sel = static_cast<const pos_t*>(selVec);
-   char* const __restrict__ dest = packedKeys.data() + col.offset;
+   const char* __restrict__ src = static_cast<const char*>(col.data);
+   const pos_t* __restrict__ sel = static_cast<const pos_t*>(selVec);
+   char* __restrict__ dest = packedKeys.data() + col.offset;
 
    if (sel && n < vecSize) {
       for (pos_t i = 0; i < n; i++) {
@@ -967,13 +967,15 @@ void HashGroup::Hash(pos_t n) {
 }
 
 template <typename T> void HashGroup::Hash_T(pos_t n) {
-   const char* const __restrict__ keys = packedKeys.data();
-   hash_t* const __restrict__ hashes = preAggregation.groupHashes;
+   const char* __restrict__ keys = packedKeys.data();
+   hash_t* __restrict__ hashes = preAggregation.groupHashes;
 
-   for (pos_t i = 0; i < n; i++) {
-      if constexpr (std::is_same_v<T, char*>) {
+   if constexpr (std::is_same_v<T, char*>) {
+      for (pos_t i = 0; i < n; i++) {
          hashes[i] = hashFn.hashKey(keys + i * keySize, keySize, 0);
-      } else {
+      }
+   } else {
+      for (pos_t i = 0; i < n; i++) {
          T key;
          std::memcpy(&key, keys + i * sizeof(T), sizeof(T));
          hashes[i] = hashFn.hashKey(key);
@@ -994,13 +996,13 @@ void HashGroup::Lookup(pos_t n) {
 
 template <typename T> void HashGroup::Lookup_T(pos_t n) {
    const uint32_t size = std::is_same_v<T, char*> ? keySize : sizeof(T);
-   const char* const __restrict__ keys = packedKeys.data();
-   const hash_t* const __restrict__ hashes = preAggregation.groupHashes;
-   EntryHeader** const __restrict__ matches = preAggregation.htMatches;
+   const char* __restrict__ keys = packedKeys.data();
+   const hash_t* __restrict__ hashes = preAggregation.groupHashes;
+   EntryHeader** __restrict__ matches = preAggregation.htMatches;
 
-   const EntryHeader* const end = ht.end();
+   EntryHeader* end = ht.end();
    for (pos_t i = 0; i < n; i++) {
-      const hash_t hash = hashes[i];
+      hash_t hash = hashes[i];
       EntryHeader* el = ht.find_chain(hash);
       for (; el != end; el = el->next) {
          if (el->hash == hash) {
