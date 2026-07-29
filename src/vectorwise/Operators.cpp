@@ -940,14 +940,27 @@ void HashGroup::Concat(pos_t n) {
 
 template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
    const uint32_t size = std::is_same_v<T, char*> ? col.size : sizeof(T);
-   const char* const __restrict__ src = static_cast<const char*>(col.data);
-   const pos_t* const __restrict__ sel = static_cast<const pos_t*>(selVec);
-   char* const __restrict__ dest = packedKeys.data() + col.offset;
+   const char* __restrict__ src = static_cast<const char*>(col.data);
+   const pos_t* __restrict__ sel = static_cast<const pos_t*>(selVec);
+   char* __restrict__ dest = packedKeys.data() + col.offset;
 
    if (sel && n < vecSize) {
+#ifndef UNROLL_CONCAT
       for (pos_t i = 0; i < n; i++) {
          std::memcpy(dest + i * keySize, src + sel[i] * size, size);
       }
+#else
+      pos_t i = 0;
+      for (; i + 3 < n; i += 4) {
+         std::memcpy(dest + (i + 0) * keySize, src + sel[i + 0] * size, size);
+         std::memcpy(dest + (i + 1) * keySize, src + sel[i + 1] * size, size);
+         std::memcpy(dest + (i + 2) * keySize, src + sel[i + 2] * size, size);
+         std::memcpy(dest + (i + 3) * keySize, src + sel[i + 3] * size, size);
+      }
+      for (; i < n; i++) {
+         std::memcpy(dest + i * keySize, src + sel[i] * size, size);
+      }
+#endif
    } else {
       for (pos_t i = 0; i < n; i++) {
          std::memcpy(dest + i * keySize, src + i * size, size);
@@ -967,17 +980,41 @@ void HashGroup::Hash(pos_t n) {
 }
 
 template <typename T> void HashGroup::Hash_T(pos_t n) {
-   const char* const __restrict__ keys = packedKeys.data();
-   hash_t* const __restrict__ hashes = preAggregation.groupHashes;
+   const char* __restrict__ keys = packedKeys.data();
+   hash_t* __restrict__ hashes = preAggregation.groupHashes;
 
-   for (pos_t i = 0; i < n; i++) {
-      if constexpr (std::is_same_v<T, char*>) {
+   if constexpr (std::is_same_v<T, char*>) {
+      for (pos_t i = 0; i < n; i++) {
          hashes[i] = hashFn.hashKey(keys + i * keySize, keySize, 0);
-      } else {
+      }
+   } else {
+#ifndef UNROLL_HASH
+      for (pos_t i = 0; i < n; i++) {
          T key;
          std::memcpy(&key, keys + i * sizeof(T), sizeof(T));
          hashes[i] = hashFn.hashKey(key);
       }
+#else
+      pos_t i = 0;
+      for (; i + 3 < n; i += 4) {
+         T key0, key1, key2, key3;
+
+         std::memcpy(&key0, keys + (i + 0) * sizeof(T), sizeof(T));
+         std::memcpy(&key1, keys + (i + 1) * sizeof(T), sizeof(T));
+         std::memcpy(&key2, keys + (i + 2) * sizeof(T), sizeof(T));
+         std::memcpy(&key3, keys + (i + 3) * sizeof(T), sizeof(T));
+
+         hashes[i + 0] = hashFn.hashKey(key0);
+         hashes[i + 1] = hashFn.hashKey(key1);
+         hashes[i + 2] = hashFn.hashKey(key2);
+         hashes[i + 3] = hashFn.hashKey(key3);
+      }
+      for (; i < n; i++) {
+         T key;
+         std::memcpy(&key, keys + i * sizeof(T), sizeof(T));
+         hashes[i] = hashFn.hashKey(key);
+      }
+#endif
    }
 }
 
@@ -994,13 +1031,13 @@ void HashGroup::Lookup(pos_t n) {
 
 template <typename T> void HashGroup::Lookup_T(pos_t n) {
    const uint32_t size = std::is_same_v<T, char*> ? keySize : sizeof(T);
-   const char* const __restrict__ keys = packedKeys.data();
-   const hash_t* const __restrict__ hashes = preAggregation.groupHashes;
-   EntryHeader** const __restrict__ matches = preAggregation.htMatches;
+   const char* __restrict__ keys = packedKeys.data();
+   const hash_t* __restrict__ hashes = preAggregation.groupHashes;
+   EntryHeader** __restrict__ matches = preAggregation.htMatches;
 
-   const EntryHeader* const end = ht.end();
+   EntryHeader* end = ht.end();
    for (pos_t i = 0; i < n; i++) {
-      const hash_t hash = hashes[i];
+      hash_t hash = hashes[i];
       EntryHeader* el = ht.find_chain(hash);
       for (; el != end; el = el->next) {
          if (el->hash == hash) {
