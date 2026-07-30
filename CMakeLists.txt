@@ -28,8 +28,16 @@ OPTION(UNROLL_CONCAT "Unroll HashGroup::Concat_T() 4x" OFF)
 OPTION(UNROLL_HASH "Unroll HashGroup::Hash_T() 4x" OFF)
 
 set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
-message(STATUS "Building with Group Version: ${GROUP_VERSION}")
+message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
 add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
+
+message(STATUS "Building with UNROLL_CONCAT: ${UNROLL_CONCAT}")
+add_compile_definitions(UNROLL_CONCAT=${UNROLL_CONCAT})
+
+message(STATUS "Building with UNROLL_HASH: ${UNROLL_HASH}")
+add_compile_definitions(UNROLL_HASH=${UNROLL_HASH})
+
+
 
 # Compiler flags for the different targets
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
