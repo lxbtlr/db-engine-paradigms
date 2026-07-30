@@ -27,6 +27,15 @@ OPTION(HASH_SIZE_32 OFF)
 OPTION(UNROLL_CONCAT "Unroll HashGroup::Concat_T() 4x" OFF)
 OPTION(UNROLL_HASH "Unroll HashGroup::Hash_T() 4x" OFF)
 
+OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise" OFF)
+
+if (VW_USE_CRC32)
+  message(STATUS "Building with CRC32Hash ")
+else ()
+  message(STATUS "Building with MurMurHash")
+endif ()
+
+
 set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
 add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
