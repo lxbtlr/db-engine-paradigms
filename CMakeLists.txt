@@ -33,7 +33,7 @@ if (VW_USE_CRC32)
   message(STATUS "Building with CRC32Hash ")
 else ()
   message(STATUS "Building with MurMurHash")
-endif ()
+endif (VW_USE_CRC32)
 
 
 set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
