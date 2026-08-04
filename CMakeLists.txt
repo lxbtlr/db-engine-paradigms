@@ -38,23 +38,25 @@ endif (VW_USE_CRC32)
 
 IF(UNROLL_CONCAT)
         ADD_DEFINITIONS(-DUNROLL_CONCAT=1)
-ENDIF()
+
+else ()
+ENDIF(UNROLL_CONCAT)
 
 IF(UNROLL_HASH)
         ADD_DEFINITIONS(-DUNROLL_HASH=1)
-ENDIF()
+else ()
+
+ENDIF(UNROLL_HASH)
 
 
 
-set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
-message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
-add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
+#set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
+#message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
+# add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
 
 message(STATUS "Building with UNROLL_CONCAT: ${UNROLL_CONCAT}")
-add_compile_definitions(UNROLL_CONCAT=${UNROLL_CONCAT})
 
 message(STATUS "Building with UNROLL_HASH: ${UNROLL_HASH}")
-add_compile_definitions(UNROLL_HASH=${UNROLL_HASH})
 
 
 
