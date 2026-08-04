@@ -30,10 +30,20 @@ OPTION(UNROLL_HASH "Unroll HashGroup::Hash_T() 4x" OFF)
 OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise" OFF)
 
 if (VW_USE_CRC32)
+  ADD_DEFINITIONS(-DVW_USE_CRC32=1)
   message(STATUS "Building with CRC32Hash ")
 else ()
   message(STATUS "Building with MurMurHash")
 endif (VW_USE_CRC32)
+
+IF(UNROLL_CONCAT)
+        ADD_DEFINITIONS(-DUNROLL_CONCAT=1)
+ENDIF()
+
+IF(UNROLL_HASH)
+        ADD_DEFINITIONS(-DUNROLL_HASH=1)
+ENDIF()
+
 
 
 set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
