@@ -141,14 +141,15 @@ IF(USE_TCMALLOC)
       -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
       -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
       -Dgperftools_build_minimal=ON
-      -DBUILD_SHARED_LIBS=OFF
+      -DBUILD_SHARED_LIBS=ON
       -DBUILD_TESTING=OFF
     INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS ${GPERFTOOLS_BUILD_DIR}/libtcmalloc_minimal.a
+    BUILD_BYPRODUCTS ${GPERFTOOLS_BUILD_DIR}/libtcmalloc_minimal.so
   )
-  add_library(tcmalloc_minimal STATIC IMPORTED GLOBAL)
+  add_library(tcmalloc_minimal SHARED IMPORTED GLOBAL)
   set_target_properties(tcmalloc_minimal PROPERTIES
-    IMPORTED_LOCATION ${GPERFTOOLS_BUILD_DIR}/libtcmalloc_minimal.a
+    IMPORTED_LOCATION ${GPERFTOOLS_BUILD_DIR}/libtcmalloc_minimal.so
+    IMPORTED_NO_SONAME TRUE
   )
   add_dependencies(tcmalloc_minimal gperftools_external)
   set(TCMALLOC_LIB tcmalloc_minimal)
