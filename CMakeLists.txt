@@ -132,6 +132,7 @@ ENDIF(LINUX)
 IF(USE_TCMALLOC)
   include(ExternalProject)
   set(GPERFTOOLS_PREFIX ${CMAKE_BINARY_DIR}/gperftools)
+  set(GPERFTOOLS_BUILD_DIR ${GPERFTOOLS_PREFIX}/src/gperftools_external-build)
   ExternalProject_Add(gperftools_external
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/gperftools
     PREFIX ${GPERFTOOLS_PREFIX}
@@ -139,14 +140,16 @@ IF(USE_TCMALLOC)
       -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
       -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
       -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+      -DCMAKE_C_FLAGS="-O3 -fPIC"
+      -DCMAKE_CXX_FLAGS="-O3 -fPIC"
       -Dgperftools_build_minimal=ON
       -DBUILD_TESTING=OFF
-      -DCMAKE_INSTALL_PREFIX=${GPERFTOOLS_PREFIX}
-    BUILD_BYPRODUCTS ${GPERFTOOLS_PREFIX}/lib/libtcmalloc_minimal.a
+    INSTALL_COMMAND ""
+    BUILD_BYPRODUCTS ${GPERFTOOLS_BUILD_DIR}/libtcmalloc_minimal.a
   )
   add_library(tcmalloc_minimal STATIC IMPORTED GLOBAL)
   set_target_properties(tcmalloc_minimal PROPERTIES
-    IMPORTED_LOCATION ${GPERFTOOLS_PREFIX}/lib/libtcmalloc_minimal.a
+    IMPORTED_LOCATION ${GPERFTOOLS_BUILD_DIR}/libtcmalloc_minimal.a
   )
   add_dependencies(tcmalloc_minimal gperftools_external)
   set(TCMALLOC_LIB tcmalloc_minimal)
