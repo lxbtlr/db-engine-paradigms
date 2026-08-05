@@ -366,6 +366,19 @@ ELSE()
   set(TCMALLOC_LIB "")
 ENDIF()
 
+# tcmalloc from gperftools
+IF(USE_TCMALLOC)
+  set(gperftools_build_minimal ON CACHE BOOL "" FORCE)
+  set(BUILD_TESTING_SAVED ${BUILD_TESTING})
+  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  add_subdirectory(3rdparty/gperftools EXCLUDE_FROM_ALL)
+  set(BUILD_TESTING ${BUILD_TESTING_SAVED} CACHE BOOL "" FORCE)
+  set(TCMALLOC_LIB tcmalloc_minimal)
+  message(STATUS "Using tcmalloc as the allocator")
+ELSE()
+  set(TCMALLOC_LIB "")
+ENDIF()
+
 add_library(common
   src/common/algebra/Operators.cpp
   src/common/algebra/Types.cpp
