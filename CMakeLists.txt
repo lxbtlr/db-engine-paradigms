@@ -128,13 +128,29 @@ ELSE(LINUX)
   set(JEVENTSLIB "")
 ENDIF(LINUX)
 
-# tcmalloc from gperftools
+# tcmalloc from gperftools (built out-of-tree to avoid target name collisions)
 IF(USE_TCMALLOC)
-  set(gperftools_build_minimal ON CACHE BOOL "" FORCE)
-  set(BUILD_TESTING_SAVED ${BUILD_TESTING})
-  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-  add_subdirectory(3rdparty/gperftools EXCLUDE_FROM_ALL)
-  set(BUILD_TESTING ${BUILD_TESTING_SAVED} CACHE BOOL "" FORCE)
+  include(ExternalProject)
+  set(GPERFTOOLS_PREFIX ${CMAKE_BINARY_DIR}/gperftools)
+  ExternalProject_Add(gperftools_external
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/gperftools
+    PREFIX ${GPERFTOOLS_PREFIX}
+    CMAKE_ARGS
+      -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+      -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+      -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+      -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
+      -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}
+      -Dgperftools_build_minimal=ON
+      -DBUILD_TESTING=OFF
+      -DCMAKE_INSTALL_PREFIX=${GPERFTOOLS_PREFIX}
+    BUILD_BYPRODUCTS ${GPERFTOOLS_PREFIX}/lib/libtcmalloc_minimal.a
+  )
+  add_library(tcmalloc_minimal STATIC IMPORTED GLOBAL)
+  set_target_properties(tcmalloc_minimal PROPERTIES
+    IMPORTED_LOCATION ${GPERFTOOLS_PREFIX}/lib/libtcmalloc_minimal.a
+  )
+  add_dependencies(tcmalloc_minimal gperftools_external)
   set(TCMALLOC_LIB tcmalloc_minimal)
   message(STATUS "Using tcmalloc as the allocator")
 ELSE()
