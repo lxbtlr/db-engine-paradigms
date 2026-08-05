@@ -24,7 +24,7 @@ OPTION(AVX512EXPERIMENTS OFF)
 OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
-
+OPTION(USE_TCMALLOC "Use tcmalloc from gperftools as the allocator" OFF)
 
 
 # Compiler flags for the different targets
@@ -128,6 +128,19 @@ ELSE(LINUX)
   set(JEVENTSLIB "")
 ENDIF(LINUX)
 
+# tcmalloc from gperftools
+IF(USE_TCMALLOC)
+  set(gperftools_build_minimal ON CACHE BOOL "" FORCE)
+  set(BUILD_TESTING_SAVED ${BUILD_TESTING})
+  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  add_subdirectory(3rdparty/gperftools EXCLUDE_FROM_ALL)
+  set(BUILD_TESTING ${BUILD_TESTING_SAVED} CACHE BOOL "" FORCE)
+  set(TCMALLOC_LIB tcmalloc_minimal)
+  message(STATUS "Using tcmalloc as the allocator")
+ELSE()
+  set(TCMALLOC_LIB "")
+ENDIF()
+
 add_library(common
   src/common/algebra/Operators.cpp
   src/common/algebra/Types.cpp
@@ -144,6 +157,7 @@ target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
+target_link_libraries(common ${TCMALLOC_LIB})
 
 
 set(HYPER_TRANSLATORS
