@@ -563,11 +563,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    local.ht_entry_size += col.dataSize;
    global.ht_entry_size += col.dataSize;
 
-   const uint32_t colSize = static_cast<uint32_t>(col.dataSize);
-   op.keyColumns.push_back({colSize, op.keySize, col.data});
+   uint32_t colSize = static_cast<uint32_t>(col.dataSize);
+   op.keyColumns.push_back({colSize, op.totalKeySize, col.data});
    auto& keyColumn = op.keyColumns.back();
    col.registerDS(&keyColumn.data);
-   op.keySize += colSize;
+   op.totalKeySize += colSize;
 
    auto partitionOffset =
        entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
@@ -647,11 +647,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    local.ht_entry_size += col.dataSize;
    global.ht_entry_size += col.dataSize;
 
-   const uint32_t colSize = static_cast<uint32_t>(col.dataSize);
-   op.keyColumns.push_back({colSize, op.keySize, col.data});
+   uint32_t colSize = static_cast<uint32_t>(col.dataSize);
+   op.keyColumns.push_back({colSize, op.totalKeySize, col.data});
    auto& keyColumn = op.keyColumns.back();
    col.registerDS(&keyColumn.data);
-   op.keySize += colSize;
+   op.totalKeySize += colSize;
    if (op.selVec == nullptr) {
       op.selVec = sel;
       sel.registerDS(&op.selVec);
