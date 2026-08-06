@@ -14,6 +14,9 @@
 #include "profile.hpp"
 #include "tbb/tbb.h"
 #include <tbb/global_control.h>
+#ifdef NUMA_ALLOC
+#include "common/runtime/NumaAlloc.hpp"
+#endif
 
 // NOTE: this was helpful for debuging, but breaks if we dont use the thread arg, disable for now
 // lets force this thing to use one thread
@@ -113,6 +116,12 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
     importTPCH(tpchPath, tpch);
+
+#ifdef NUMA_ALLOC
+    runtime::numaReplicateRelation(tpch["lineitem"]);
+    fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
+            runtime::NUM_NUMA_REGIONS);
+#endif
 
     // Now, filter the master query set
     std::unordered_set<std::string> allQueries = {"1h", "1v", "1p", "3h", "3v", "5h", "5v", "6h", "6v" ,"18h", "18v", "9h", "9v"};

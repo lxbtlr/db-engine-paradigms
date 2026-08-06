@@ -3,6 +3,7 @@
 #include "common/runtime/MemoryPool.hpp"
 #include "common/runtime/Mmap.hpp"
 #include "common/runtime/Util.hpp"
+#include <array>
 #include <deque>
 #include <exception>
 #include <memory>
@@ -56,6 +57,15 @@ struct Relation {
    size_t nrTuples;
    Attribute& operator[](std::string key);
    Attribute& insert(std::string name, std::unique_ptr<Type> t);
+
+#ifdef NUMA_ALLOC
+   struct NumaReplica {
+      std::unordered_map<std::string, void*> columns;
+      std::vector<std::pair<void*, size_t>> mmaps; // base, size for cleanup
+   };
+   std::array<NumaReplica, 4> numaReplicas;
+   bool hasNumaReplicas = false;
+#endif
 };
 
 class BlockRelation {

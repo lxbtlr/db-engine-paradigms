@@ -1,5 +1,8 @@
 #include "vectorwise/QueryBuilder.hpp"
 #include <cstddef>
+#ifdef NUMA_ALLOC
+#include "common/runtime/Concurrency.hpp"
+#endif
 
 using namespace std;
 
@@ -127,7 +130,15 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
    r.buf = DataStorage::BufferSpec::Column;
    auto& attr = scan.rel[attribute];
    r.dataSize = attr.type->rt_size();
-   r.data = attr.data();
+#ifdef NUMA_ALLOC
+   if (scan.rel.hasNumaReplicas) {
+      size_t region = runtime::regionOf(runtime::this_worker->worker_id);
+      r.data = scan.rel.numaReplicas[region].columns[attribute];
+   } else
+#endif
+   {
+      r.data = attr.data();
+   }
    r.scan = &scan.scan;
    return r;
 }

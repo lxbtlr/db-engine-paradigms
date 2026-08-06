@@ -25,6 +25,7 @@ OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 OPTION(USE_TCMALLOC "Use tcmalloc from gperftools as the allocator" OFF)
+OPTION(NUMA_ALLOC "Replicate base-table columns per NUMA region" OFF)
 
 
 # Compiler flags for the different targets
@@ -66,7 +67,9 @@ ELSE()
   ADD_DEFINITIONS(-DHASH_SIZE=64)
 ENDIF()
 
-
+IF(NUMA_ALLOC)
+  ADD_DEFINITIONS(-DNUMA_ALLOC)
+ENDIF()
 
 IF(AUTOVECTORIZE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
@@ -168,6 +171,7 @@ add_library(common
   src/common/runtime/Import.cpp
   src/common/runtime/Hashmap.cpp
   src/common/runtime/Concurrency.cpp
+  src/common/runtime/NumaAlloc.cpp
   src/common/runtime/Profile.cpp
   )
 target_include_directories(common PUBLIC
