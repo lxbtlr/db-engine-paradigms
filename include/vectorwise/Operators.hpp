@@ -414,7 +414,7 @@ class HashGroup : public UnaryOperator {
       void* data = nullptr;
    };
 
-   uint32_t keySize = 0;
+   uint32_t totalKeySize = 0;
    std::deque<KeyColumn> keyColumns;
    std::vector<char> packedKeys;
    pos_t* selVec = nullptr;
