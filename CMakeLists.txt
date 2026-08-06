@@ -24,8 +24,6 @@ OPTION(AVX512EXPERIMENTS OFF)
 OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
-OPTION(UNROLL_CONCAT "Unroll HashGroup::Concat_T() 4x" OFF)
-OPTION(UNROLL_HASH "Unroll HashGroup::Hash_T() 4x" OFF)
 
 OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise" OFF)
 
@@ -36,29 +34,10 @@ else ()
   message(STATUS "Building with MurMurHash")
 endif (VW_USE_CRC32)
 
-IF(UNROLL_CONCAT)
-        ADD_DEFINITIONS(-DUNROLL_CONCAT=1)
-
-else ()
-ENDIF(UNROLL_CONCAT)
-
-IF(UNROLL_HASH)
-        ADD_DEFINITIONS(-DUNROLL_HASH=1)
-else ()
-
-ENDIF(UNROLL_HASH)
-
-
 
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
 # add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
-
-message(STATUS "Building with UNROLL_CONCAT: ${UNROLL_CONCAT}")
-
-message(STATUS "Building with UNROLL_HASH: ${UNROLL_HASH}")
-
-
 
 # Compiler flags for the different targets
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
