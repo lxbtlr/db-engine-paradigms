@@ -112,17 +112,14 @@ inline void WorkerGroup::run(std::function<void()> f) {
          CPU_ZERO(&cpuset);
 #ifdef NUMA_ALLOC
          // Consolidated schedule: pack threads per socket
-         // Thread i -> socket (i / threads_per_socket)
-         // Within socket: core = (i % threads_per_socket) / SMT_PER_CORE
-         //                smt  = (i % threads_per_socket) % SMT_PER_CORE
+         // Threads 0..43 -> socket 0, 44..87 -> socket 1, etc.
+         // CPU topology: CPU c is on NUMA node (c % SOCKETS_COUNT)
+         // So socket s, logical index j -> CPU = j * SOCKETS_COUNT + s
          {
             size_t threadsPerSocket = CORES_PER_SOCKET * SMT_PER_CORE;
             size_t socket = i / threadsPerSocket;
-            size_t withinSocket = i % threadsPerSocket;
-            size_t core = withinSocket / SMT_PER_CORE;
-            size_t smt = withinSocket % SMT_PER_CORE;
-            size_t cpu = socket * CORES_PER_SOCKET + core
-                         + smt * SOCKETS_COUNT * CORES_PER_SOCKET;
+            size_t j = i % threadsPerSocket; // index within socket
+            size_t cpu = j * SOCKETS_COUNT + socket;
             CPU_SET(cpu, &cpuset);
          }
 #else

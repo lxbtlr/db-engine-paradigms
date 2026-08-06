@@ -17,10 +17,11 @@ void numaReplicateRelation(Relation& rel) {
    for (size_t r = 0; r < NUM_NUMA_REGIONS; ++r) {
       threads.emplace_back([&rel, r]() {
          // Pin this thread to the first core on NUMA region r
+         // CPU topology: CPU c is on NUMA node (c % SOCKETS_COUNT)
+         // First CPU on socket r is simply r (i.e. j=0 -> cpu = 0*4 + r = r)
          cpu_set_t cpuset;
          CPU_ZERO(&cpuset);
-         size_t cpu = r * CORES_PER_SOCKET; // first physical core on socket r
-         CPU_SET(cpu, &cpuset);
+         CPU_SET(r, &cpuset);
          pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 
          auto& replica = rel.numaReplicas[r];
