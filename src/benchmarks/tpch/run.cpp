@@ -162,6 +162,11 @@ int main(int argc, char* argv[]) {
     runtime::numaReplicateRelation(tpch["lineitem"]);
     fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
             runtime::NUM_NUMA_REGIONS);
+#ifdef NUMA_DEBUG
+    fprintf(stderr, "--- NUMA placement verification ---\n");
+    runtime::verifyNumaPlacement(tpch["lineitem"]);
+    fprintf(stderr, "--- end verification ---\n");
+#endif
 #endif
 
 #ifdef NUMA_SHARD

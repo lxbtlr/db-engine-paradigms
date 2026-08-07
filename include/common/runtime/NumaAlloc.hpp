@@ -32,4 +32,10 @@ void numaFreeShards(Relation& rel);
 void verifyNumaPlacement(Relation& rel);
 #endif
 
+#ifdef NUMA_DEBUG
+/// Verify that replicated pages landed on the expected NUMA nodes.
+/// Uses move_pages() syscall to query physical placement.
+void verifyNumaPlacement(Relation& rel);
+#endif
+
 } // namespace runtime
