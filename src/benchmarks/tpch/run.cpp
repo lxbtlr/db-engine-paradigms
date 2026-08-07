@@ -164,7 +164,7 @@ int main(int argc, char* argv[]) {
                        repetitions);
       // Correctness dump
       auto hResult = q1_hyper(tpch, nrThreads);
-      dumpQ1Result("hyper", hResult.get());
+      //dumpQ1Result("hyper", hResult.get());
    }
    if (q.count("1v")) {
       e.timeAndProfile("q1 vectorwise", nrTuples(tpch, {"lineitem"}),
@@ -186,21 +186,21 @@ int main(int argc, char* argv[]) {
 #else
       auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
 #endif
-      dumpQ1Result("vectorwise", vResult.get());
+      //dumpQ1Result("vectorwise", vResult.get());
    }
-   if (q.count("1p")) {
-      e.timeAndProfile("q1 packed    ", nrTuples(tpch, {"lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result =
-                              q1_vectorwise_packed(tpch, nrThreads, vectorSize);
-                          escape(&result);
-                       },
-                       repetitions);
-      // Correctness dump
-      auto pResult = q1_vectorwise_packed(tpch, nrThreads, vectorSize);
-      dumpQ1Result("packed", pResult.get());
-   }
+   // if (q.count("1p")) {
+   //    e.timeAndProfile("q1 packed    ", nrTuples(tpch, {"lineitem"}),
+   //                     [&]() {
+   //                        if (clearCaches) clearOsCaches();
+   //                        auto result =
+   //                            q1_vectorwise_packed(tpch, nrThreads, vectorSize);
+   //                        escape(&result);
+   //                     },
+   //                     repetitions);
+   //    // Correctness dump
+   //    auto pResult = q1_vectorwise_packed(tpch, nrThreads, vectorSize);
+   //    dumpQ1Result("packed", pResult.get());
+   // }
    if (q.count("3h"))
       e.timeAndProfile("q3 hyper     ",
                        nrTuples(tpch, {"customer", "orders", "lineitem"}),
