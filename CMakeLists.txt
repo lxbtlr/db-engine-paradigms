@@ -79,6 +79,9 @@ ENDIF()
 
 IF(NUMA_DEBUG)
   ADD_DEFINITIONS(-DNUMA_DEBUG)
+  set(NUMA_LIB numa)
+ELSE()
+  set(NUMA_LIB "")
 ENDIF()
 
 IF(AUTOVECTORIZE)
@@ -188,7 +191,7 @@ target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-target_link_libraries(common ${TCMALLOC_LIB})
+target_link_libraries(common ${TCMALLOC_LIB} ${NUMA_LIB})
 
 
 set(HYPER_TRANSLATORS
