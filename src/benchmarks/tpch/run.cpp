@@ -121,6 +121,9 @@ int main(int argc, char* argv[]) {
     runtime::numaReplicateRelation(tpch["lineitem"]);
     fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
             runtime::NUM_NUMA_REGIONS);
+    fprintf(stderr, "Waiting 10s for THP compaction to settle...\n");
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    fprintf(stderr, "Done waiting.\n");
 #ifdef NUMA_DEBUG
     fprintf(stderr, "--- NUMA placement verification ---\n");
     runtime::verifyNumaPlacement(tpch["lineitem"]);
