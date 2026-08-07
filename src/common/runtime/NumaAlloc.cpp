@@ -7,6 +7,10 @@
 #include <pthread.h>
 #include <thread>
 #include <vector>
+#ifdef NUMA_DEBUG
+#include <cstdio>
+#include <numaif.h>
+#endif
 
 namespace runtime {
 
@@ -55,6 +59,24 @@ void numaFreeReplicas(Relation& rel) {
    }
    rel.hasNumaReplicas = false;
 }
+
+#ifdef NUMA_DEBUG
+void verifyNumaPlacement(Relation& rel) {
+   for (size_t r = 0; r < NUM_NUMA_REGIONS; ++r) {
+      for (auto& kv : rel.numaReplicas[r].columns) {
+         constexpr size_t pageSize = 4096;
+         constexpr size_t nPages = 4;
+         void* pages[nPages];
+         int status[nPages];
+         for (size_t p = 0; p < nPages; ++p)
+            pages[p] = (char*)kv.second + p * pageSize;
+         move_pages(0, nPages, pages, nullptr, status, 0);
+         fprintf(stderr, "region %zu col %-20s: pages on nodes %d %d %d %d\n",
+                 r, kv.first.c_str(), status[0], status[1], status[2], status[3]);
+      }
+   }
+}
+#endif
 
 } // namespace runtime
 

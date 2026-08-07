@@ -3,6 +3,9 @@
 #ifdef NUMA_ALLOC
 #include "common/runtime/Concurrency.hpp"
 #endif
+#if defined(NUMA_DEBUG) && defined(NUMA_ALLOC)
+#include <cstdio>
+#endif
 
 using namespace std;
 
@@ -134,6 +137,11 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
    if (scan.rel.hasNumaReplicas) {
       size_t region = runtime::regionOf(runtime::this_worker->worker_id);
       r.data = scan.rel.numaReplicas[region].columns[attribute];
+#ifdef NUMA_DEBUG
+      fprintf(stderr, "worker %zu region %zu col %s data=%p numa_replica=%p\n",
+              runtime::this_worker->worker_id, region,
+              attribute.c_str(), attr.data(), r.data);
+#endif
    } else
 #endif
    {
