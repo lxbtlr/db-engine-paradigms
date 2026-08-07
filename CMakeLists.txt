@@ -26,6 +26,7 @@ OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 OPTION(USE_TCMALLOC "Use tcmalloc from gperftools as the allocator" OFF)
 OPTION(NUMA_ALLOC "Replicate base-table columns per NUMA region" OFF)
+OPTION(THREAD_PIN_PACKED "Pack threads per socket (vs spread round-robin)" OFF)
 
 
 # Compiler flags for the different targets
@@ -69,6 +70,10 @@ ENDIF()
 
 IF(NUMA_ALLOC)
   ADD_DEFINITIONS(-DNUMA_ALLOC)
+ENDIF()
+
+IF(THREAD_PIN_PACKED)
+  ADD_DEFINITIONS(-DTHREAD_PIN_PACKED)
 ENDIF()
 
 IF(AUTOVECTORIZE)

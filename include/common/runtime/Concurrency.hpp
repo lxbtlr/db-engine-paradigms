@@ -17,16 +17,18 @@
 
 namespace runtime {
 
-#ifdef NUMA_ALLOC
 constexpr size_t SOCKETS_COUNT = 4;
 constexpr size_t CORES_PER_SOCKET = 22;
 constexpr size_t SMT_PER_CORE = 2;
 constexpr size_t NUM_NUMA_REGIONS = SOCKETS_COUNT;
 
 inline size_t regionOf(size_t tid) {
+#ifdef THREAD_PIN_PACKED
    return tid / (CORES_PER_SOCKET * SMT_PER_CORE);
-}
+#else
+   return tid % SOCKETS_COUNT;
 #endif
+}
 
 class Worker;
 class WorkerGroup;
@@ -44,9 +46,7 @@ class Worker
    WorkerGroup* group;
    Allocator allocator;
    HierarchicBarrier* barrier;
-#ifdef NUMA_ALLOC
    size_t worker_id = 0;
-#endif
 
    void start() {
       // set reference to worker in this thread
@@ -99,9 +99,7 @@ inline void WorkerGroup::run(std::function<void()> f) {
       if (i % HierarchicBarrier::threadsPerBarrier == 0) ++group;
       threads.emplace_back(this, f, barriers[group]);
       auto worker = &threads.back();
-#ifdef NUMA_ALLOC
       worker->worker_id = i;
-#endif
       g.run([worker, i]() {
 
 #ifndef __APPLE__
@@ -110,19 +108,20 @@ inline void WorkerGroup::run(std::function<void()> f) {
                             ("workerPool " + std::to_string(i)).c_str());
          cpu_set_t cpuset;
          CPU_ZERO(&cpuset);
-#ifdef NUMA_ALLOC
-         // Consolidated schedule: pack threads per socket
-         // Threads 0..43 -> socket 0, 44..87 -> socket 1, etc.
+#ifdef THREAD_PIN_PACKED
+         // Packed: threads 0..43 -> socket 0, 44..87 -> socket 1, etc.
          // CPU topology: CPU c is on NUMA node (c % SOCKETS_COUNT)
          // So socket s, logical index j -> CPU = j * SOCKETS_COUNT + s
          {
-            size_t threadsPerSocket = CORES_PER_SOCKET * SMT_PER_CORE;
-            size_t socket = i / threadsPerSocket;
-            size_t j = i % threadsPerSocket; // index within socket
+            size_t tps = CORES_PER_SOCKET * SMT_PER_CORE;
+            size_t socket = i / tps;
+            size_t j = i % tps;
             size_t cpu = j * SOCKETS_COUNT + socket;
             CPU_SET(cpu, &cpuset);
          }
 #else
+         // Spread: sequential CPU IDs, which round-robins across sockets
+         // due to interleaved topology (CPU c -> node c % 4)
          CPU_SET(i, &cpuset);
 #endif
          if (pthread_setaffinity_np(currentThread, sizeof(cpu_set_t),
@@ -145,9 +144,7 @@ inline void WorkerGroup::run(std::function<void()> f) {
    this_worker->group = this;
    this_worker->barrier = barriers.back();
    currentBarrier = 0;
-#ifdef NUMA_ALLOC
    this_worker->worker_id = size - 1;
-#endif
    f();
    this_worker->group = prevGroup;
    currentBarrier = prevBarrier;
