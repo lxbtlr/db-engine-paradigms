@@ -14,20 +14,51 @@
 
 namespace runtime {
 
+// Pin the calling thread to a specific CPU on NUMA region r.
+// CPU topology: CPU c is on NUMA node (c % SOCKETS_COUNT).
+// logical index j on socket r -> CPU = j * SOCKETS_COUNT + r
+static void pinToRegion(size_t r, size_t j = 0) {
+   cpu_set_t cpuset;
+   CPU_ZERO(&cpuset);
+   CPU_SET(j * SOCKETS_COUNT + r, &cpuset);
+   pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+}
+
+// Parallel memcpy: split the byte range across nWorkers threads, each pinned
+// to a different core on NUMA region r so first-touch places pages locally.
+static void parallelMemcpyOnRegion(void* dst, const void* src, size_t bytes,
+                                   size_t r, size_t nWorkers) {
+   if (nWorkers <= 1) {
+      pinToRegion(r, 0);
+      std::memcpy(dst, src, bytes);
+      return;
+   }
+   std::vector<std::thread> workers;
+   workers.reserve(nWorkers);
+   // Align chunk boundaries to 4KB pages for clean first-touch placement
+   constexpr size_t PAGE = 4096;
+   size_t chunkBase = (bytes / nWorkers) & ~(PAGE - 1);
+   for (size_t w = 0; w < nWorkers; ++w) {
+      size_t off = w * chunkBase;
+      size_t len = (w + 1 == nWorkers) ? (bytes - off) : chunkBase;
+      workers.emplace_back([dst, src, off, len, r, w]() {
+         pinToRegion(r, w);
+         std::memcpy(static_cast<char*>(dst) + off,
+                     static_cast<const char*>(src) + off, len);
+      });
+   }
+   for (auto& t : workers) t.join();
+}
+
 void numaReplicateRelation(Relation& rel) {
+   // Use all cores on each socket for parallel first-touch memcpy
+   constexpr size_t workersPerRegion = CORES_PER_SOCKET;
    std::vector<std::thread> threads;
    threads.reserve(NUM_NUMA_REGIONS);
 
    for (size_t r = 0; r < NUM_NUMA_REGIONS; ++r) {
       threads.emplace_back([&rel, r]() {
-         // Pin this thread to the first core on NUMA region r
-         // CPU topology: CPU c is on NUMA node (c % SOCKETS_COUNT)
-         // First CPU on socket r is simply r (i.e. j=0 -> cpu = 0*4 + r = r)
-         cpu_set_t cpuset;
-         CPU_ZERO(&cpuset);
-         CPU_SET(r, &cpuset);
-         pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
-
+         pinToRegion(r, 0);
          auto& replica = rel.numaReplicas[r];
 
          for (auto& kv : rel.attributes) {
@@ -36,8 +67,7 @@ void numaReplicateRelation(Relation& rel) {
             size_t bytes = rel.nrTuples * attr.type->rt_size();
 
             void* p = mem::malloc_huge(bytes);
-            // First-touch: memcpy triggers page faults on this NUMA node
-            std::memcpy(p, attr.data(), bytes);
+            parallelMemcpyOnRegion(p, attr.data(), bytes, r, workersPerRegion);
 
             replica.columns[attrName] = p;
             replica.mmaps.emplace_back(p, bytes);
