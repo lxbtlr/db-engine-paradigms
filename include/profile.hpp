@@ -271,9 +271,8 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                                 std::function<void()> fn, uint64_t repetitions,
                                 bool mem) {
    using namespace std;
-   // warmup round
-   double warumupStart = gettime();
-   while (gettime() - warumupStart < 0.15) fn();
+   // warmup rounds
+   for (int warmup = 0; warmup < 3; ++warmup) fn();
 
    uint64_t memStart = 0;
    if (mem) memStart = getCurrentRSS();
