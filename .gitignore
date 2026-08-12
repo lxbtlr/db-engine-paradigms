@@ -6,6 +6,19 @@ plot/*.log
 plot/*.tex
 .Rhistory
 
+
+# comparison artifacts
+*.bkup
+
+# emacs artifacts
+\#*\#
+
+
+# Data Errata
+*.csv
+*.out
+*.err
+
 # Prerequisites
 *.d
 
