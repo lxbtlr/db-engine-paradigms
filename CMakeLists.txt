@@ -26,8 +26,13 @@ OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 OPTION(USE_TCMALLOC "Use tcmalloc from gperftools as the allocator" OFF)
 OPTION(NUMA_ALLOC "Replicate base-table columns per NUMA region" OFF)
+OPTION(NUMA_SHARD "Shard base-table columns across NUMA regions" OFF)
 OPTION(THREAD_PIN_PACKED "Pack threads per socket (vs spread round-robin)" OFF)
 OPTION(NUMA_DEBUG "Enable NUMA allocation debug logging and placement verification" OFF)
+
+IF(NUMA_ALLOC AND NUMA_SHARD)
+  message(FATAL_ERROR "NUMA_ALLOC and NUMA_SHARD are mutually exclusive. Pick one.")
+ENDIF()
 
 
 # Compiler flags for the different targets
@@ -73,12 +78,19 @@ IF(NUMA_ALLOC)
   ADD_DEFINITIONS(-DNUMA_ALLOC)
 ENDIF()
 
+IF(NUMA_SHARD)
+  ADD_DEFINITIONS(-DNUMA_SHARD)
+ENDIF()
+
 IF(THREAD_PIN_PACKED)
   ADD_DEFINITIONS(-DTHREAD_PIN_PACKED)
 ENDIF()
 
 IF(NUMA_DEBUG)
   ADD_DEFINITIONS(-DNUMA_DEBUG)
+ENDIF()
+
+IF(NUMA_DEBUG OR NUMA_SHARD)
   set(NUMA_LIB numa)
 ELSE()
   set(NUMA_LIB "")

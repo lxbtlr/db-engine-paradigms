@@ -66,6 +66,17 @@ struct Relation {
    std::array<NumaReplica, 4> numaReplicas;
    bool hasNumaReplicas = false;
 #endif
+
+#ifdef NUMA_SHARD
+   struct NumaShard {
+      std::unordered_map<std::string, void*> columns;
+      std::vector<std::pair<void*, size_t>> mmaps; // base, allocSize for cleanup
+      size_t tupleBegin = 0;
+      size_t tupleEnd = 0;
+   };
+   std::array<NumaShard, 4> numaShards;
+   bool hasNumaShards = false;
+#endif
 };
 
 class BlockRelation {

@@ -30,6 +30,13 @@ inline size_t regionOf(size_t tid) {
 #endif
 }
 
+#if defined(NUMA_SHARD) || defined(NUMA_DEBUG)
+/// Validate at startup that the compile-time topology constants match the
+/// actual hardware.  Aborts if numa_node_of_cpu(c) != c % SOCKETS_COUNT
+/// for any CPU, or if the node count differs from SOCKETS_COUNT.
+void assertTopology();
+#endif
+
 class Worker;
 class WorkerGroup;
 
