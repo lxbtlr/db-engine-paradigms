@@ -14,8 +14,11 @@
 #include "profile.hpp"
 #include "tbb/tbb.h"
 #include <tbb/global_control.h>
-#ifdef NUMA_ALLOC
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 #include "common/runtime/NumaAlloc.hpp"
+#endif
+#ifdef NUMA_SHARD
+#include "common/runtime/Concurrency.hpp"
 #endif
 
 // NOTE: this was helpful for debuging, but breaks if we dont use the thread arg, disable for now
@@ -124,6 +127,23 @@ int main(int argc, char* argv[]) {
     fprintf(stderr, "Waiting 10s for THP compaction to settle...\n");
     std::this_thread::sleep_for(std::chrono::seconds(10));
     fprintf(stderr, "Done waiting.\n");
+#ifdef NUMA_DEBUG
+    fprintf(stderr, "--- NUMA placement verification ---\n");
+    runtime::verifyNumaPlacement(tpch["lineitem"]);
+    fprintf(stderr, "--- end verification ---\n");
+#endif
+#endif
+
+#ifdef NUMA_SHARD
+    runtime::assertTopology();
+    runtime::numaShardRelation(tpch["lineitem"]);
+    fprintf(stderr, "NUMA sharding: lineitem sharded across %zu regions\n",
+            runtime::NUM_NUMA_REGIONS);
+    for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
+       auto& s = tpch["lineitem"].numaShards[r];
+       fprintf(stderr, "  shard %zu: tuples [%zu, %zu)\n",
+               r, s.tupleBegin, s.tupleEnd);
+    }
 #ifdef NUMA_DEBUG
     fprintf(stderr, "--- NUMA placement verification ---\n");
     runtime::verifyNumaPlacement(tpch["lineitem"]);

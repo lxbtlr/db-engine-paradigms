@@ -27,6 +27,9 @@ class QueryBuilder {
       void* data = nullptr;
       class Scan* scan = nullptr;
       std::string attribute;
+#ifdef NUMA_SHARD
+      std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases = {};
+#endif
       void registerDS(void** location);
       void registerDS(pos_t** location);
       operator void*() const;

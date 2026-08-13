@@ -1,9 +1,9 @@
 #include "vectorwise/QueryBuilder.hpp"
 #include <cstddef>
-#ifdef NUMA_ALLOC
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 #include "common/runtime/Concurrency.hpp"
 #endif
-#if defined(NUMA_DEBUG) && defined(NUMA_ALLOC)
+#if defined(NUMA_DEBUG) && (defined(NUMA_ALLOC) || defined(NUMA_SHARD))
 #include <cstdio>
 #endif
 
@@ -61,7 +61,28 @@ QueryBuilder::ScanBuilder QueryBuilder::Scan(std::string relation) {
    auto& rel = db[relation];
    auto nr = nextOpNr();
    auto& s = operatorState.get<Scan::Shared>(nr);
+#ifdef NUMA_SHARD
+   // Populate per-node ranges from the relation's shard metadata.
+   // For non-sharded relations, put everything on a virtual "node 0" so
+   // the sharded Scan::next() still works (all workers steal from node 0).
+   // All workers write identical values; benign race on naturally-aligned size_t.
+   if (rel.hasNumaShards) {
+      for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
+         s.ranges[r].tupleBegin = rel.numaShards[r].tupleBegin;
+         s.ranges[r].tupleEnd = rel.numaShards[r].tupleEnd;
+      }
+   } else {
+      s.ranges[0].tupleBegin = 0;
+      s.ranges[0].tupleEnd = rel.nrTuples;
+      for (size_t r = 1; r < runtime::NUM_NUMA_REGIONS; ++r) {
+         s.ranges[r].tupleBegin = 0;
+         s.ranges[r].tupleEnd = 0;
+      }
+   }
    auto scan = make_unique<class Scan>(s, rel.nrTuples, vecs.getVecSize());
+#else
+   auto scan = make_unique<class Scan>(s, rel.nrTuples, vecs.getVecSize());
+#endif
    auto res = scan.get();
    pushOperator(move(scan));
    return {*res, rel};
@@ -133,7 +154,30 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
    r.buf = DataStorage::BufferSpec::Column;
    auto& attr = scan.rel[attribute];
    r.dataSize = attr.type->rt_size();
-#ifdef NUMA_ALLOC
+
+#ifdef NUMA_SHARD
+   {
+      void* base = attr.data();
+      if (scan.rel.hasNumaShards) {
+         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n)
+            r.shardBases[n] = scan.rel.numaShards[n].columns[attribute];
+         size_t home = runtime::regionOf(runtime::this_worker->worker_id);
+         r.data = r.shardBases[home];
+      } else {
+         // Non-sharded relation: all shardBases point to the single column
+         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n)
+            r.shardBases[n] = base;
+         r.data = base;
+      }
+#ifdef NUMA_DEBUG
+      fprintf(stderr,
+              "worker %zu col %s shardBases=[%p,%p,%p,%p] data=%p\n",
+              runtime::this_worker->worker_id, attribute.c_str(),
+              r.shardBases[0], r.shardBases[1], r.shardBases[2],
+              r.shardBases[3], r.data);
+#endif
+   }
+#elif defined(NUMA_ALLOC)
    if (scan.rel.hasNumaReplicas) {
       size_t region = runtime::regionOf(runtime::this_worker->worker_id);
       r.data = scan.rel.numaReplicas[region].columns[attribute];
@@ -142,11 +186,13 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
               runtime::this_worker->worker_id, region,
               attribute.c_str(), attr.data(), r.data);
 #endif
-   } else
-#endif
-   {
+   } else {
       r.data = attr.data();
    }
+#else
+   r.data = attr.data();
+#endif
+
    r.scan = &scan.scan;
    return r;
 }
@@ -173,7 +219,11 @@ void QueryBuilder::DataStorage::registerDS(void** location) {
       assert(location);
       assert(scan);
       assert(dataSize);
+#ifdef NUMA_SHARD
+      scan->addConsumer(location, dataSize, shardBases);
+#else
       scan->addConsumer(location, dataSize);
+#endif
    }
 }
 

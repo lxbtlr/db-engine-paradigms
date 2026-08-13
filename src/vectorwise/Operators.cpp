@@ -48,8 +48,98 @@ Scan::Scan(Shared& s, size_t n, size_t v)
    size_t scanMorselSize = 1024 * 10;
    if (vecSize < scanMorselSize) scanChunkSize = scanMorselSize / vecSize + 1;
    vecInChunk = scanChunkSize;
+
+#ifdef NUMA_SHARD
+   // Compute steal order from this worker's identity
+   homeNode = runtime::regionOf(runtime::this_worker->worker_id);
+   constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+
+   // Intra-node rank: how many workers with lower worker_id map to the same node
+   size_t myId = runtime::this_worker->worker_id;
+   size_t rank = 0;
+#ifdef THREAD_PIN_PACKED
+   rank = myId % (runtime::CORES_PER_SOCKET * runtime::SMT_PER_CORE);
+#else
+   rank = myId / runtime::SOCKETS_COUNT;
+#endif
+
+   // ring[k] = (home + 1 + ((rank + k) % (N-1))) % N
+   stealOrder[0] = homeNode;
+   for (size_t k = 0; k < N - 1; ++k)
+      stealOrder[k + 1] = (homeNode + 1 + ((rank + k) % (N - 1))) % N;
+   currentStealIdx = 0;
+#endif
 }
 
+#ifdef NUMA_SHARD
+void Scan::addConsumer(void** colPtr, size_t typeSize,
+                       std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases) {
+   Consumer c;
+   c.location = colPtr;
+   c.vecBytes = vecSize * typeSize;
+   c.elemSize = typeSize;
+   c.shardBases = shardBases;
+   consumers.push_back(c);
+}
+
+size_t Scan::next() {
+   constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+
+   if (vecInChunk < scanChunkSize) {
+      // Continue within current chunk on current node — relative advance
+      size_t node = stealOrder[currentStealIdx];
+      auto& range = shared.ranges[node];
+      size_t nodeTuples = range.tupleEnd - range.tupleBegin;
+      size_t nextLocalOffset =
+          currentChunk * scanChunkSize * vecSize + vecInChunk * vecSize;
+      if (nextLocalOffset >= nodeTuples) {
+         // This chunk extends past the node's shard — force new chunk fetch
+         vecInChunk = scanChunkSize;
+      } else {
+         auto nextBatchSize = std::min(nodeTuples - nextLocalOffset, vecSize);
+         // Relative pointer advance (step = 1 vector)
+         for (auto& cons : consumers)
+            *cons.location =
+                (void*)(*(uint8_t**)cons.location + cons.vecBytes);
+         lastOffset = nextLocalOffset;
+         vecInChunk++;
+         return nextBatchSize;
+      }
+   }
+
+   // Need a new chunk — try nodes in steal order
+   for (; currentStealIdx < N; ++currentStealIdx) {
+      size_t node = stealOrder[currentStealIdx];
+      auto& range = shared.ranges[node];
+      size_t nodeTuples = range.tupleEnd - range.tupleBegin;
+      if (nodeTuples == 0) continue;
+
+      size_t morselTuples = scanChunkSize * vecSize;
+
+      while (true) {
+         size_t chunk =
+             shared.nodePos[node].pos.fetch_add(1, std::memory_order_relaxed);
+         size_t localOffset = chunk * morselTuples;
+         if (localOffset >= nodeTuples) break; // this node exhausted
+
+         currentChunk = chunk;
+         vecInChunk = 1; // we're consuming the first vector of this chunk
+
+         size_t nextBatchSize =
+             std::min(nodeTuples - localOffset, vecSize);
+
+         // Absolute pointer set — switching to (possibly different) node
+         for (auto& cons : consumers)
+            *cons.location = static_cast<char*>(cons.shardBases[node]) +
+                             localOffset * cons.elemSize;
+         lastOffset = localOffset;
+         return nextBatchSize;
+      }
+   }
+
+   return EndOfStream;
+}
+#else
 void Scan::addConsumer(void** colPtr, size_t typeSize) {
    consumers.emplace_back(colPtr, vecSize * typeSize);
 }
@@ -80,6 +170,7 @@ size_t Scan::next() {
    vecInChunk++;
    return nextBatchSize;
 }
+#endif
 
 ResultWriter::Input::Input(void* d, size_t size,
                            runtime::BlockRelation::Attribute attr)
