@@ -3,7 +3,7 @@
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 #include "common/runtime/Concurrency.hpp"
 #endif
-#if defined(NUMA_SHARD) || (defined(NUMA_DEBUG) && defined(NUMA_ALLOC))
+#if defined(NUMA_DEBUG) && (defined(NUMA_ALLOC) || defined(NUMA_SHARD))
 #include <cstdio>
 #endif
 
@@ -60,14 +60,16 @@ QueryBuilder::ResultBuilder::addValue(std::string name, DS buffer) {
 QueryBuilder::ScanBuilder QueryBuilder::Scan(std::string relation) {
    auto& rel = db[relation];
    auto nr = nextOpNr();
+   auto& s = operatorState.get<Scan::Shared>(nr);
+#ifdef NUMA_SHARD
+#ifdef NUMA_DEBUG
    fprintf(stderr, "[SCAN] relation=%s nr=%zu nrTuples=%zu this_worker=%p worker_id=%zu\n",
            relation.c_str(), nr, rel.nrTuples,
            (void*)runtime::this_worker,
            runtime::this_worker ? runtime::this_worker->worker_id : 999999);
-   auto& s = operatorState.get<Scan::Shared>(nr);
-   fprintf(stderr, "[SCAN] got Shared at %p\n", (void*)&s);
-#ifdef NUMA_SHARD
-   fprintf(stderr, "[SCAN] hasNumaShards=%d\n", (int)rel.hasNumaShards);
+   fprintf(stderr, "[SCAN] got Shared at %p hasNumaShards=%d\n",
+           (void*)&s, (int)rel.hasNumaShards);
+#endif
    if (rel.hasNumaShards) {
       for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
          s.ranges[r].tupleBegin = rel.numaShards[r].tupleBegin;
