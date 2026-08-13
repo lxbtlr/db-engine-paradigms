@@ -3,6 +3,7 @@
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/SIMD.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <iostream>
 #include <stdexcept>
 #include <tuple>
@@ -51,7 +52,12 @@ Scan::Scan(Shared& s, size_t n, size_t v)
 
 #ifdef NUMA_SHARD
    // Compute steal order from this worker's identity
+   fprintf(stderr, "[SCAN_CTOR] this_worker=%p worker_id=%zu nrTuples=%zu vecSize=%zu\n",
+           (void*)runtime::this_worker,
+           runtime::this_worker ? runtime::this_worker->worker_id : 999999,
+           n, v);
    homeNode = runtime::regionOf(runtime::this_worker->worker_id);
+   fprintf(stderr, "[SCAN_CTOR] homeNode=%zu\n", homeNode);
    constexpr size_t N = runtime::NUM_NUMA_REGIONS;
 
    // Intra-node rank: how many workers with lower worker_id map to the same node
@@ -84,20 +90,16 @@ void Scan::addConsumer(void** colPtr, size_t typeSize,
 
 size_t Scan::next() {
    constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+   size_t morselTuples = scanChunkSize * vecSize;
 
-   if (vecInChunk < scanChunkSize) {
-      // Continue within current chunk on current node — relative advance
+   // Try to continue within current chunk (intra-chunk relative advance)
+   if (vecInChunk < scanChunkSize && currentStealIdx < N) {
       size_t node = stealOrder[currentStealIdx];
-      auto& range = shared.ranges[node];
-      size_t nodeTuples = range.tupleEnd - range.tupleBegin;
-      size_t nextLocalOffset =
-          currentChunk * scanChunkSize * vecSize + vecInChunk * vecSize;
-      if (nextLocalOffset >= nodeTuples) {
-         // This chunk extends past the node's shard — force new chunk fetch
-         vecInChunk = scanChunkSize;
-      } else {
+      size_t nodeTuples = shared.ranges[node].tupleEnd -
+                          shared.ranges[node].tupleBegin;
+      size_t nextLocalOffset = currentChunk * morselTuples + vecInChunk * vecSize;
+      if (nextLocalOffset < nodeTuples) {
          auto nextBatchSize = std::min(nodeTuples - nextLocalOffset, vecSize);
-         // Relative pointer advance (step = 1 vector)
          for (auto& cons : consumers)
             *cons.location =
                 (void*)(*(uint8_t**)cons.location + cons.vecBytes);
@@ -105,30 +107,29 @@ size_t Scan::next() {
          vecInChunk++;
          return nextBatchSize;
       }
+      // Chunk extends past shard end — fall through to get a new chunk
+      vecInChunk = scanChunkSize;
    }
 
    // Need a new chunk — try nodes in steal order
    for (; currentStealIdx < N; ++currentStealIdx) {
       size_t node = stealOrder[currentStealIdx];
-      auto& range = shared.ranges[node];
-      size_t nodeTuples = range.tupleEnd - range.tupleBegin;
+      size_t nodeTuples = shared.ranges[node].tupleEnd -
+                          shared.ranges[node].tupleBegin;
       if (nodeTuples == 0) continue;
-
-      size_t morselTuples = scanChunkSize * vecSize;
 
       while (true) {
          size_t chunk =
              shared.nodePos[node].pos.fetch_add(1, std::memory_order_relaxed);
          size_t localOffset = chunk * morselTuples;
-         if (localOffset >= nodeTuples) break; // this node exhausted
+         if (localOffset >= nodeTuples) break;
 
          currentChunk = chunk;
-         vecInChunk = 1; // we're consuming the first vector of this chunk
+         vecInChunk = 1;
 
          size_t nextBatchSize =
              std::min(nodeTuples - localOffset, vecSize);
 
-         // Absolute pointer set — switching to (possibly different) node
          for (auto& cons : consumers)
             *cons.location = static_cast<char*>(cons.shardBases[node]) +
                              localOffset * cons.elemSize;

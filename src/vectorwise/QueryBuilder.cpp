@@ -3,7 +3,7 @@
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 #include "common/runtime/Concurrency.hpp"
 #endif
-#if defined(NUMA_DEBUG) && (defined(NUMA_ALLOC) || defined(NUMA_SHARD))
+#if defined(NUMA_SHARD) || (defined(NUMA_DEBUG) && defined(NUMA_ALLOC))
 #include <cstdio>
 #endif
 
@@ -60,12 +60,14 @@ QueryBuilder::ResultBuilder::addValue(std::string name, DS buffer) {
 QueryBuilder::ScanBuilder QueryBuilder::Scan(std::string relation) {
    auto& rel = db[relation];
    auto nr = nextOpNr();
+   fprintf(stderr, "[SCAN] relation=%s nr=%zu nrTuples=%zu this_worker=%p worker_id=%zu\n",
+           relation.c_str(), nr, rel.nrTuples,
+           (void*)runtime::this_worker,
+           runtime::this_worker ? runtime::this_worker->worker_id : 999999);
    auto& s = operatorState.get<Scan::Shared>(nr);
+   fprintf(stderr, "[SCAN] got Shared at %p\n", (void*)&s);
 #ifdef NUMA_SHARD
-   // Populate per-node ranges from the relation's shard metadata.
-   // For non-sharded relations, put everything on a virtual "node 0" so
-   // the sharded Scan::next() still works (all workers steal from node 0).
-   // All workers write identical values; benign race on naturally-aligned size_t.
+   fprintf(stderr, "[SCAN] hasNumaShards=%d\n", (int)rel.hasNumaShards);
    if (rel.hasNumaShards) {
       for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
          s.ranges[r].tupleBegin = rel.numaShards[r].tupleBegin;
@@ -79,11 +81,9 @@ QueryBuilder::ScanBuilder QueryBuilder::Scan(std::string relation) {
          s.ranges[r].tupleEnd = 0;
       }
    }
-   auto scan = make_unique<class Scan>(s, rel.nrTuples, vecs.getVecSize());
-#else
-   auto scan = make_unique<class Scan>(s, rel.nrTuples, vecs.getVecSize());
 #endif
-   auto res = scan.get();
+   auto scan = make_unique<class Scan>(s, rel.nrTuples, vecs.getVecSize());
+   auto* res = scan.get();
    pushOperator(move(scan));
    return {*res, rel};
 }
