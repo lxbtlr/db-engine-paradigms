@@ -141,9 +141,11 @@ class Scan : public Operator {
  public:
 #ifdef NUMA_SHARD
    struct Shared : public SharedState {
-      struct alignas(64) PaddedAtomic {
+      struct PaddedAtomic {
          std::atomic<size_t> pos{0};
+         char pad_[64 - sizeof(std::atomic<size_t>)];
       };
+      static_assert(sizeof(PaddedAtomic) == 64, "PaddedAtomic must be 64 bytes");
       std::array<PaddedAtomic, runtime::NUM_NUMA_REGIONS> nodePos;
       struct NodeRange {
          size_t tupleBegin = 0;
