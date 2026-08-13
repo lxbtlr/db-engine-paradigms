@@ -2,8 +2,10 @@
 #include "common/Compat.hpp"
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/SIMD.hpp"
-#include <algorithm>
+#if defined(NUMA_DEBUG) && defined(NUMA_SHARD)
 #include <cstdio>
+#endif
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <tuple>
@@ -52,12 +54,16 @@ Scan::Scan(Shared& s, size_t n, size_t v)
 
 #ifdef NUMA_SHARD
    // Compute steal order from this worker's identity
+#ifdef NUMA_DEBUG
    fprintf(stderr, "[SCAN_CTOR] this_worker=%p worker_id=%zu nrTuples=%zu vecSize=%zu\n",
            (void*)runtime::this_worker,
            runtime::this_worker ? runtime::this_worker->worker_id : 999999,
            n, v);
+#endif
    homeNode = runtime::regionOf(runtime::this_worker->worker_id);
+#ifdef NUMA_DEBUG
    fprintf(stderr, "[SCAN_CTOR] homeNode=%zu\n", homeNode);
+#endif
    constexpr size_t N = runtime::NUM_NUMA_REGIONS;
 
    // Intra-node rank: how many workers with lower worker_id map to the same node
