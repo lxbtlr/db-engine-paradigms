@@ -29,6 +29,10 @@ OPTION(NUMA_ALLOC "Replicate base-table columns per NUMA region" OFF)
 OPTION(NUMA_SHARD "Shard base-table columns across NUMA regions" OFF)
 OPTION(THREAD_PIN_PACKED "Pack threads per socket (vs spread round-robin)" OFF)
 OPTION(NUMA_DEBUG "Enable NUMA allocation debug logging and placement verification" OFF)
+OPTION(NO_HUGE_PAGES "Disable huge pages for malloc_huge" OFF)
+OPTION(HUGE_2MB_MALLOC_HUGE "Use 2MB hugetlb pages for malloc_huge" OFF)
+OPTION(HUGE_1GB_MALLOC_HUGE "Use 1GB huge pages for malloc_huge" OFF)
+OPTION(HUGE_1GB_MALLOC_NUMA "Use 1GB huge pages for malloc_numa" OFF)
 
 IF(NUMA_ALLOC AND NUMA_SHARD)
   message(FATAL_ERROR "NUMA_ALLOC and NUMA_SHARD are mutually exclusive. Pick one.")
@@ -88,6 +92,22 @@ ENDIF()
 
 IF(NUMA_DEBUG)
   ADD_DEFINITIONS(-DNUMA_DEBUG)
+ENDIF()
+
+IF(NO_HUGE_PAGES)
+  ADD_DEFINITIONS(-DNO_HUGE_PAGES)
+ENDIF()
+
+IF(HUGE_2MB_MALLOC_HUGE)
+  ADD_DEFINITIONS(-DHUGE_2MB_MALLOC_HUGE)
+ENDIF()
+
+IF(HUGE_1GB_MALLOC_HUGE)
+  ADD_DEFINITIONS(-DHUGE_1GB_MALLOC_HUGE)
+ENDIF()
+
+IF(HUGE_1GB_MALLOC_NUMA)
+  ADD_DEFINITIONS(-DHUGE_1GB_MALLOC_NUMA)
 ENDIF()
 
 IF(NUMA_DEBUG OR NUMA_SHARD)
