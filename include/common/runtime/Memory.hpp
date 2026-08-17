@@ -1,6 +1,7 @@
 #pragma once
 #include <stdexcept>
 #include <sys/mman.h>
+#include <linux/mman.h>  // MAP_HUGE_2MB / MAP_HUGE_1GB (not pulled in by sys/mman.h)
 
 #ifdef NUMA_SHARD
 #include <cerrno>
