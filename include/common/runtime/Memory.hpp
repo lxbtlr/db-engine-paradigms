@@ -71,8 +71,7 @@ inline void free_huge(void* p, size_t size) {
 
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 /// Allocate anonymous memory bound to a specific NUMA node.
-/// Tries MAP_HUGETLB first; falls back to base pages if unavailable.
-/// Does NOT use MADV_HUGEPAGE (avoids THP defrag overhead).
+/// Tries MAP_HUGETLB first; falls back to base pages with MADV_HUGEPAGE.
 inline void* malloc_numa(size_t size, int node) {
 #ifdef HUGE_1GB_MALLOC_NUMA
    constexpr size_t PAGE = 1UL * 1024 * 1024 * 1024; // 1GB

@@ -93,12 +93,13 @@ int main(int argc, char* argv[]) {
     std::string tpchPath = "";
     size_t nrThreads = std::thread::hardware_concurrency();
     size_t vectorSize = 1024;
+    int settleSeconds = 10;
     std::string selectedQuery = "";  // e.g., "1"
     std::string selectedEngine = ""; // e.g., "h" or "v"
 
     int opt;
-    // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize
-    while ((opt = getopt(argc, argv, "q:e:r:p:t:v:")) != -1) {
+    // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize, s: settle
+    while ((opt = getopt(argc, argv, "q:e:r:p:t:v:s:")) != -1) {
         switch (opt) {
             case 'q': selectedQuery = optarg; break;
             case 'e': selectedEngine = optarg; break;
@@ -106,8 +107,9 @@ int main(int argc, char* argv[]) {
             case 'p': tpchPath = optarg; break;
             case 't': nrThreads = atoi(optarg); break;
             case 'v': vectorSize = atoi(optarg); break;
+            case 's': settleSeconds = atoi(optarg); break;
             default:
-                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize]\n";
+                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds]\n";
                 exit(1);
         }
     }
@@ -123,14 +125,6 @@ int main(int argc, char* argv[]) {
     runtime::numaReplicateRelation(tpch["lineitem"]);
     fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
             runtime::NUM_NUMA_REGIONS);
-    fprintf(stderr, "Waiting 10s for THP compaction to settle...\n");
-    std::this_thread::sleep_for(std::chrono::seconds(10));
-    fprintf(stderr, "Done waiting.\n");
-#ifdef NUMA_DEBUG
-    fprintf(stderr, "--- NUMA placement verification ---\n");
-    runtime::verifyNumaPlacement(tpch["lineitem"]);
-    fprintf(stderr, "--- end verification ---\n");
-#endif
 #endif
 
 #ifdef NUMA_SHARD
@@ -143,11 +137,19 @@ int main(int argc, char* argv[]) {
        fprintf(stderr, "  shard %zu: tuples [%zu, %zu)\n",
                r, s.tupleBegin, s.tupleEnd);
     }
-#ifdef NUMA_DEBUG
+#endif
+
+    // Settle: let THP compaction / khugepaged finish before measurement
+    if (settleSeconds > 0) {
+        fprintf(stderr, "Settling for %d seconds...\n", settleSeconds);
+        std::this_thread::sleep_for(std::chrono::seconds(settleSeconds));
+        fprintf(stderr, "Done settling.\n");
+    }
+
+#if defined(NUMA_DEBUG) && (defined(NUMA_ALLOC) || defined(NUMA_SHARD))
     fprintf(stderr, "--- NUMA placement verification ---\n");
     runtime::verifyNumaPlacement(tpch["lineitem"]);
     fprintf(stderr, "--- end verification ---\n");
-#endif
 #endif
 
     // Now, filter the master query set
@@ -170,8 +172,20 @@ int main(int argc, char* argv[]) {
     }
 
     // Diagnostics
-    fprintf(stderr, "Engine: %s | Query: %s | Threads: %ld | VectorSize: %ld\n", 
-            selectedEngine.c_str(), selectedQuery.c_str(), nrThreads, vectorSize);
+    const char* numaMode = "baseline";
+#ifdef NUMA_ALLOC
+    numaMode = "NUMA_ALLOC";
+#endif
+#ifdef NUMA_SHARD
+    numaMode = "NUMA_SHARD";
+#endif
+    fprintf(stderr, "Config: %s | Engine: %s | Query: %s | Threads: %zu | VectorSize: %zu | Settle: %ds"
+#ifdef NUMA_DEBUG
+            " | NUMA_DEBUG"
+#endif
+            "\n",
+            numaMode, selectedEngine.c_str(), selectedQuery.c_str(),
+            nrThreads, vectorSize, settleSeconds);
 
     if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
     if (auto v = std::getenv("SIMDjoin")) conf.useSimdJoin = atoi(v);

@@ -1,9 +1,12 @@
 #include "common/Compat.hpp"
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <string.h>
 #include <string>
 #include <sys/ioctl.h>
@@ -274,22 +277,47 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    // warmup rounds
    for (int warmup = 0; warmup < 3; ++warmup) fn();
 
+   // Collect per-rep wall times
+   std::vector<double> repTimes;
+   repTimes.reserve(repetitions);
+
    uint64_t memStart = 0;
    if (mem) memStart = getCurrentRSS();
    startAll();
-   double start = gettime();
+   double totalStart = gettime();
    size_t performedRep = 0;
-   for (; performedRep < repetitions || gettime() - start < 0.5;
+   for (; performedRep < repetitions || gettime() - totalStart < 0.5;
         ++performedRep) {
+      double t0 = gettime();
       fn();
+      double t1 = gettime();
+      repTimes.push_back((t1 - t0) * 1e3); // ms
    }
-   double end = gettime();
+   double totalEnd = gettime();
    readAll();
+
+   // Compute statistics
+   std::vector<double> sorted = repTimes;
+   std::sort(sorted.begin(), sorted.end());
+   double minTime = sorted.front();
+   double maxTime = sorted.back();
+   double median = (sorted.size() % 2 == 1)
+       ? sorted[sorted.size() / 2]
+       : (sorted[sorted.size() / 2 - 1] + sorted[sorted.size() / 2]) / 2.0;
+   double mean = std::accumulate(repTimes.begin(), repTimes.end(), 0.0) / repTimes.size();
+   double sq_sum = 0;
+   for (auto t : repTimes) sq_sum += (t - mean) * (t - mean);
+   double stddev = repTimes.size() > 1 ? std::sqrt(sq_sum / (repTimes.size() - 1)) : 0.0;
+
    std::cout.precision(3);
    std::cout.setf(std::ios::fixed, std::ios::floatfield);
    if (writeHeader) {
       std::cout << setw(20) << "name"
-                << "," << setw(printFieldWidth) << " time"
+                << "," << setw(printFieldWidth) << "median"
+                << "," << setw(printFieldWidth) << "mean"
+                << "," << setw(printFieldWidth) << "min"
+                << "," << setw(printFieldWidth) << "max"
+                << "," << setw(printFieldWidth) << "stddev"
                 << "," << setw(printFieldWidth) << " CPUs"
                 << "," << setw(printFieldWidth) << " IPC"
                 << "," << setw(printFieldWidth) << " GHz"
@@ -299,9 +327,14 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
       std::cout << std::endl;
    }
 
-   auto runtime = end - start;
-   std::cout << setw(20) << s << "," << setw(printFieldWidth)
-             << (runtime * 1e3 / performedRep) << ",";
+   auto runtime = totalEnd - totalStart;
+   std::cout << setw(20) << s
+             << "," << setw(printFieldWidth) << median
+             << "," << setw(printFieldWidth) << mean
+             << "," << setw(printFieldWidth) << minTime
+             << "," << setw(printFieldWidth) << maxTime
+             << "," << setw(printFieldWidth) << stddev
+             << ",";
 #ifdef __linux__
    if (!getenv("EXTERNALPROFILE")) {
       std::cout << setw(printFieldWidth)
@@ -315,16 +348,20 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                 << ",";
       std::cout << setw(printFieldWidth)
                 << ((((*this)["all_rd"] * 64.0) / (1024 * 1024)) /
-                    (end - start))
+                    runtime)
                 << ",";
    }
 #endif
-   // std::cout <<
-   // (((e["all_requests"]*64.0)/(1024*1024))/(e.events["cycles"][0].data.time_enabled/1e9))
-   // << " allMB/s,";
 
    printAll(std::cout, count * performedRep);
    if (mem) std::cout << (getCurrentRSS() - memStart) / (1024.0 * 1024) << "MB";
    std::cout << std::endl;
+
+   // Emit per-rep times to stderr for post-processing
+   std::cerr << "per-rep " << s << ":";
+   for (size_t i = 0; i < repTimes.size(); ++i)
+      std::cerr << " " << std::fixed << std::setprecision(3) << repTimes[i];
+   std::cerr << std::endl;
+
    writeHeader = false;
 }
