@@ -119,6 +119,7 @@ int main(int argc, char* argv[]) {
     importTPCH(tpchPath, tpch);
 
 #ifdef NUMA_ALLOC
+    runtime::assertTopology();
     runtime::numaReplicateRelation(tpch["lineitem"]);
     fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
             runtime::NUM_NUMA_REGIONS);

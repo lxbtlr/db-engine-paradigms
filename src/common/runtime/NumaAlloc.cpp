@@ -27,35 +27,91 @@ static void pinToRegion(size_t r, size_t j = 0) {
    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 }
 
-// Parallel memcpy: split the byte range across nWorkers threads, each pinned
-// to a different core on NUMA region r so first-touch places pages locally.
-static void parallelMemcpyOnRegion(void* dst, const void* src, size_t bytes,
-                                   size_t r, size_t nWorkers) {
-   if (nWorkers <= 1) {
-      pinToRegion(r, 0);
-      std::memcpy(dst, src, bytes);
-      return;
+// A pool of pinned worker threads for a single NUMA region.
+// Created once, reused across all columns, then joined.
+struct RegionPool {
+   struct Work {
+      void* dst;
+      const void* src;
+      size_t off;
+      size_t len;
+   };
+
+   size_t nWorkers;
+   size_t region;
+   std::vector<std::thread> threads;
+
+   // Synchronisation: main sets work items then increments generation;
+   // workers spin-wait on generation, do their chunk, then signal done.
+   std::mutex mu;
+   std::condition_variable cv_work;   // workers wait for new work
+   std::condition_variable cv_done;   // main waits for workers to finish
+   std::vector<Work> items;           // one per worker
+   size_t generation = 0;            // bumped each dispatch
+   std::atomic<size_t> doneCount{0};
+   bool shutdown = false;
+
+   RegionPool(size_t nw, size_t r) : nWorkers(nw), region(r) {
+      items.resize(nw);
+      threads.reserve(nw);
+      for (size_t w = 0; w < nw; ++w) {
+         threads.emplace_back([this, w]() { workerLoop(w); });
+      }
    }
-   std::vector<std::thread> workers;
-   workers.reserve(nWorkers);
-   // Align chunk boundaries to 4KB pages for clean first-touch placement
-   constexpr size_t PAGE = 4096;
-   size_t chunkBase = (bytes / nWorkers) & ~(PAGE - 1);
-   for (size_t w = 0; w < nWorkers; ++w) {
-      size_t off = w * chunkBase;
-      size_t len = (w + 1 == nWorkers) ? (bytes - off) : chunkBase;
-      workers.emplace_back([dst, src, off, len, r, w]() {
-         pinToRegion(r, w);
-         std::memcpy(static_cast<char*>(dst) + off,
-                     static_cast<const char*>(src) + off, len);
+
+   void workerLoop(size_t w) {
+      pinToRegion(region, w);
+      size_t myGen = 0;
+      for (;;) {
+         {
+            std::unique_lock<std::mutex> lk(mu);
+            cv_work.wait(lk, [&] { return generation > myGen || shutdown; });
+            if (shutdown) return;
+            myGen = generation;
+         }
+         auto& item = items[w];
+         if (item.len > 0)
+            std::memcpy(static_cast<char*>(item.dst) + item.off,
+                        static_cast<const char*>(item.src) + item.off,
+                        item.len);
+         if (doneCount.fetch_add(1, std::memory_order_acq_rel) + 1 == nWorkers)
+            cv_done.notify_one();
+      }
+   }
+
+   void dispatch(void* dst, const void* src, size_t bytes) {
+      constexpr size_t PAGE = 4096;
+      size_t chunkBase = (bytes / nWorkers) & ~(PAGE - 1);
+      {
+         std::lock_guard<std::mutex> lk(mu);
+         for (size_t w = 0; w < nWorkers; ++w) {
+            size_t off = w * chunkBase;
+            size_t len = (w + 1 == nWorkers) ? (bytes - off) : chunkBase;
+            items[w] = {dst, src, off, len};
+         }
+         doneCount.store(0, std::memory_order_relaxed);
+         ++generation;
+      }
+      cv_work.notify_all();
+      // Wait for all workers to finish
+      std::unique_lock<std::mutex> lk(mu);
+      cv_done.wait(lk, [&] {
+         return doneCount.load(std::memory_order_acquire) == nWorkers;
       });
    }
-   for (auto& t : workers) t.join();
-}
+
+   void join() {
+      {
+         std::lock_guard<std::mutex> lk(mu);
+         shutdown = true;
+      }
+      cv_work.notify_all();
+      for (auto& t : threads) t.join();
+   }
+};
 
 #ifdef NUMA_ALLOC
 void numaReplicateRelation(Relation& rel) {
-   // Use all cores on each socket for parallel first-touch memcpy
    constexpr size_t workersPerRegion = CORES_PER_SOCKET;
    std::vector<std::thread> threads;
    threads.reserve(NUM_NUMA_REGIONS);
@@ -65,17 +121,22 @@ void numaReplicateRelation(Relation& rel) {
          pinToRegion(r, 0);
          auto& replica = rel.numaReplicas[r];
 
+         RegionPool pool(workersPerRegion, r);
+
          for (auto& kv : rel.attributes) {
             auto& attrName = kv.first;
             auto& attr = kv.second;
             size_t bytes = rel.nrTuples * attr.type->rt_size();
 
-            void* p = mem::malloc_huge(bytes);
-            parallelMemcpyOnRegion(p, attr.data(), bytes, r, workersPerRegion);
+            void* p = mem::malloc_numa(bytes, static_cast<int>(r));
+            size_t allocSize = mem::malloc_numa_size(bytes);
+            pool.dispatch(p, attr.data(), bytes);
 
             replica.columns[attrName] = p;
-            replica.mmaps.emplace_back(p, bytes);
+            replica.mmaps.emplace_back(p, allocSize);
          }
+
+         pool.join();
       });
    }
 
@@ -125,25 +186,28 @@ void numaShardRelation(Relation& rel) {
          size_t shardTuples = shard.tupleEnd - shard.tupleBegin;
          if (shardTuples == 0) return;
 
+         pinToRegion(r, 0);
+         RegionPool pool(workersPerRegion, r);
+
          for (auto& kv : rel.attributes) {
             auto& attrName = kv.first;
             auto& attr = kv.second;
             size_t elemSize = attr.type->rt_size();
             size_t bytes = shardTuples * elemSize;
 
-            // 1. mmap anonymous + 2. mbind to node r (before any touch)
             void* p = mem::malloc_numa(bytes, static_cast<int>(r));
             size_t allocSize = mem::malloc_numa_size(bytes);
 
-            // 3. Parallel memcpy from file-backed source into bound region
             const char* src =
                 static_cast<const char*>(attr.data()) +
                 shard.tupleBegin * elemSize;
-            parallelMemcpyOnRegion(p, src, bytes, r, workersPerRegion);
+            pool.dispatch(p, src, bytes);
 
             shard.columns[attrName] = p;
             shard.mmaps.emplace_back(p, allocSize);
          }
+
+         pool.join();
       });
    }
 
