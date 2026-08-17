@@ -93,6 +93,7 @@ inline void* malloc_numa(size_t size, int node) {
       if (p == MAP_FAILED)
          throw std::runtime_error("malloc_numa: mmap failed: " +
                                   std::string(std::strerror(errno)));
+      madvise(p, allocSize, MADV_HUGEPAGE);
    }
 
    // Bind to the target node before any page is touched
