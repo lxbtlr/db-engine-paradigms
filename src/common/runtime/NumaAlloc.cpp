@@ -86,7 +86,7 @@ void numaReplicateRelation(Relation& rel) {
 void numaFreeReplicas(Relation& rel) {
    for (size_t r = 0; r < NUM_NUMA_REGIONS; ++r) {
       for (auto& m : rel.numaReplicas[r].mmaps) {
-         mem::free_huge(m.first, m.second);
+         munmap(m.first, m.second); // m.second is already malloc_numa_size(bytes)
       }
       rel.numaReplicas[r].columns.clear();
       rel.numaReplicas[r].mmaps.clear();
@@ -154,7 +154,7 @@ void numaShardRelation(Relation& rel) {
 void numaFreeShards(Relation& rel) {
    for (size_t r = 0; r < NUM_NUMA_REGIONS; ++r) {
       for (auto& m : rel.numaShards[r].mmaps) {
-         mem::free_huge(m.first, m.second);
+         munmap(m.first, m.second); // m.second is already malloc_numa_size(bytes)
       }
       rel.numaShards[r].columns.clear();
       rel.numaShards[r].mmaps.clear();
