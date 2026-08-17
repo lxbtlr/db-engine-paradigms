@@ -1,6 +1,6 @@
 #include "common/runtime/Concurrency.hpp"
 
-#if defined(NUMA_SHARD) || defined(NUMA_DEBUG)
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD) || defined(NUMA_DEBUG)
 #include <numa.h>
 #include <cstdio>
 #include <cstdlib>
@@ -16,7 +16,7 @@ HierarchicBarrier mainBarrier(1, nullptr);
 GlobalPool defaultPool;
 Worker mainWorker(&mainGroup, &mainBarrier, defaultPool);
 
-#if defined(NUMA_SHARD) || defined(NUMA_DEBUG)
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD) || defined(NUMA_DEBUG)
 void assertTopology() {
    if (numa_available() < 0) {
       fprintf(stderr, "assertTopology: libnuma reports NUMA not available\n");

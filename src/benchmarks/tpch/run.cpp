@@ -16,8 +16,6 @@
 #include <tbb/global_control.h>
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 #include "common/runtime/NumaAlloc.hpp"
-#endif
-#ifdef NUMA_SHARD
 #include "common/runtime/Concurrency.hpp"
 #endif
 
@@ -121,6 +119,7 @@ int main(int argc, char* argv[]) {
     importTPCH(tpchPath, tpch);
 
 #ifdef NUMA_ALLOC
+    runtime::assertTopology();
     runtime::numaReplicateRelation(tpch["lineitem"]);
     fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
             runtime::NUM_NUMA_REGIONS);
