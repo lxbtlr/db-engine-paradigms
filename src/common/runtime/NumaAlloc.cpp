@@ -3,7 +3,10 @@
 #include "common/runtime/NumaAlloc.hpp"
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Memory.hpp"
+#include <atomic>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
 #include <pthread.h>
 #include <thread>
 #include <vector>
