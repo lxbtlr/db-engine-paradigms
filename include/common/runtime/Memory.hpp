@@ -2,7 +2,7 @@
 #include <stdexcept>
 #include <sys/mman.h>
 
-#ifdef NUMA_SHARD
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 #include <cerrno>
 #include <cstring>
 #include <numaif.h>
@@ -68,7 +68,7 @@ inline void free_huge(void* p, size_t size) {
    if (r) throw std::runtime_error("Memory unmapping failed.");
 }
 
-#ifdef NUMA_SHARD
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 /// Allocate anonymous memory bound to a specific NUMA node.
 /// Tries MAP_HUGETLB first; falls back to base pages if unavailable.
 /// Does NOT use MADV_HUGEPAGE (avoids THP defrag overhead).
@@ -115,6 +115,6 @@ inline size_t malloc_numa_size(size_t size) {
 #endif
    return (size + PAGE - 1) & ~(PAGE - 1);
 }
-#endif // NUMA_SHARD
+#endif // NUMA_ALLOC || NUMA_SHARD
 
 } // namespace mem

@@ -16,8 +16,6 @@
 #include <tbb/global_control.h>
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 #include "common/runtime/NumaAlloc.hpp"
-#endif
-#ifdef NUMA_SHARD
 #include "common/runtime/Concurrency.hpp"
 #endif
 
