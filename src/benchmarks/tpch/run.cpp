@@ -153,18 +153,32 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Now, filter the master query set
-    std::unordered_set<std::string> allQueries = {"1h", "1v", "1p", "3h", "3v", "5h", "5v", "6h", "6v" ,"18h", "18v", "9h", "9v"};
+    std::unordered_set<std::string> allQueries = {"1h", "1v", "3h", "3v", "5h", "5v", "6h", "6v", "18h", "18v", "9h", "9v"};
     std::unordered_set<std::string> q;
 
-    if (!selectedQuery.empty() && !selectedEngine.empty()) {
-        // Run specific pair, e.g., "1" + "h" -> "1h"
-        std::string target = selectedQuery + selectedEngine;
-        if (allQueries.count(target)) q.insert(target);
-    } else if (!selectedQuery.empty()) {
-        // Run all engines for one query
-        for (auto& aq : allQueries) {
-            if (aq.substr(0, selectedQuery.size()) == selectedQuery)
-                q.insert(aq);
+    // Parse comma-separated query list (e.g. "1,3,6" or just "1")
+    std::vector<std::string> queryNumbers;
+    if (!selectedQuery.empty()) {
+        std::istringstream ss(selectedQuery);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            if (!token.empty()) queryNumbers.push_back(token);
+        }
+    }
+
+    if (!queryNumbers.empty() && !selectedEngine.empty()) {
+        // Run specific query+engine pairs
+        for (auto& qn : queryNumbers) {
+            std::string target = qn + selectedEngine;
+            if (allQueries.count(target)) q.insert(target);
+        }
+    } else if (!queryNumbers.empty()) {
+        // Run all engines for specified queries
+        for (auto& qn : queryNumbers) {
+            for (auto& aq : allQueries) {
+                if (aq.substr(0, qn.size()) == qn)
+                    q.insert(aq);
+            }
         }
     } else {
         // Default: Run everything
