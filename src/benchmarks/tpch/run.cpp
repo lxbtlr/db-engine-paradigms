@@ -91,10 +91,10 @@ int main(int argc, char* argv[]) {
     // Defaults
     int repetitions = 1;
     std::string tpchPath = "";
-    size_t nrThreads = std::thread::hardware_concurrency();
+    std::string threadArg = "";
     size_t vectorSize = 1024;
     int settleSeconds = 10;
-    std::string selectedQuery = "";  // e.g., "1"
+    std::string selectedQuery = "";  // e.g., "1" or "1,3,6"
     std::string selectedEngine = ""; // e.g., "h" or "v"
 
     int opt;
@@ -105,7 +105,7 @@ int main(int argc, char* argv[]) {
             case 'e': selectedEngine = optarg; break;
             case 'r': repetitions = atoi(optarg); break;
             case 'p': tpchPath = optarg; break;
-            case 't': nrThreads = atoi(optarg); break;
+            case 't': threadArg = optarg; break;
             case 'v': vectorSize = atoi(optarg); break;
             case 's': settleSeconds = atoi(optarg); break;
             default:
@@ -113,6 +113,18 @@ int main(int argc, char* argv[]) {
                 exit(1);
         }
     }
+
+    // Parse comma-separated thread counts (e.g. "1,4,12,44" or just "44")
+    std::vector<size_t> threadCounts;
+    if (!threadArg.empty()) {
+        std::istringstream ts(threadArg);
+        std::string tok;
+        while (std::getline(ts, tok, ',')) {
+            if (!tok.empty()) threadCounts.push_back(std::atoi(tok.c_str()));
+        }
+    }
+    if (threadCounts.empty())
+        threadCounts.push_back(std::thread::hardware_concurrency());
 
     if (tpchPath.empty()) {
         std::cerr << "Error: Path to TPC-H directory (-p) is required.\n";
@@ -193,13 +205,20 @@ int main(int argc, char* argv[]) {
 #ifdef NUMA_SHARD
     numaMode = "NUMA_SHARD";
 #endif
-    fprintf(stderr, "Config: %s | Engine: %s | Query: %s | Threads: %zu | VectorSize: %zu | Settle: %ds"
+    {
+        std::string tcStr;
+        for (size_t i = 0; i < threadCounts.size(); ++i) {
+            if (i > 0) tcStr += ",";
+            tcStr += std::to_string(threadCounts[i]);
+        }
+        fprintf(stderr, "Config: %s | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds"
 #ifdef NUMA_DEBUG
-            " | NUMA_DEBUG"
+                " | NUMA_DEBUG"
 #endif
-            "\n",
-            numaMode, selectedEngine.c_str(), selectedQuery.c_str(),
-            nrThreads, vectorSize, settleSeconds);
+                "\n",
+                numaMode, selectedEngine.c_str(), selectedQuery.c_str(),
+                tcStr.c_str(), vectorSize, settleSeconds);
+    }
 
     if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
     if (auto v = std::getenv("SIMDjoin")) conf.useSimdJoin = atoi(v);
@@ -207,22 +226,28 @@ int main(int argc, char* argv[]) {
     if (auto v = std::getenv("SIMDproj")) conf.useSimdProj = atoi(v);
     if (auto v = std::getenv("clearCaches")) clearCaches = atoi(v);
 
-    tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
+    // Helper to build query label with thread count suffix
+    auto label = [](const char* base, size_t t) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s t%-3zu", base, t);
+        return std::string(buf);
+    };
 
-   if (q.count("1h")) {
-      e.timeAndProfile("q1 hyper     ", nrTuples(tpch, {"lineitem"}),
+   for (size_t nrThreads : threadCounts) {
+    tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
+    fprintf(stderr, "--- threads: %zu ---\n", nrThreads);
+    writeHeader = true;
+
+   if (q.count("1h"))
+      e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           auto result = q1_hyper(tpch, nrThreads);
                           escape(&result);
                        },
                        repetitions);
-      // Correctness dump
-      auto hResult = q1_hyper(tpch, nrThreads);
-      //dumpQ1Result("hyper", hResult.get());
-   }
-   if (q.count("1v")) {
-      e.timeAndProfile("q1 vectorwise", nrTuples(tpch, {"lineitem"}),
+   if (q.count("1v"))
+      e.timeAndProfile(label("q1 v ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
 #ifdef VW_SPLIT_HASHGROUP
@@ -235,29 +260,8 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
-      // Correctness dump
-#ifdef VW_SPLIT_HASHGROUP
-      auto vResult = q1_vectorwise_split(tpch, nrThreads, vectorSize);
-#else
-      auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
-#endif
-      //dumpQ1Result("vectorwise", vResult.get());
-   }
-   // if (q.count("1p")) {
-   //    e.timeAndProfile("q1 packed    ", nrTuples(tpch, {"lineitem"}),
-   //                     [&]() {
-   //                        if (clearCaches) clearOsCaches();
-   //                        auto result =
-   //                            q1_vectorwise_packed(tpch, nrThreads, vectorSize);
-   //                        escape(&result);
-   //                     },
-   //                     repetitions);
-   //    // Correctness dump
-   //    auto pResult = q1_vectorwise_packed(tpch, nrThreads, vectorSize);
-   //    dumpQ1Result("packed", pResult.get());
-   // }
    if (q.count("3h"))
-      e.timeAndProfile("q3 hyper     ",
+      e.timeAndProfile(label("q3 h ", nrThreads),
                        nrTuples(tpch, {"customer", "orders", "lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
@@ -267,7 +271,7 @@ int main(int argc, char* argv[]) {
                        repetitions);
    if (q.count("3v"))
       e.timeAndProfile(
-          "q3 vectorwise", nrTuples(tpch, {"customer", "orders", "lineitem"}),
+          label("q3 v ", nrThreads), nrTuples(tpch, {"customer", "orders", "lineitem"}),
           [&]() {
              if (clearCaches) clearOsCaches();
              auto result = q3_vectorwise(tpch, nrThreads, vectorSize);
@@ -275,7 +279,7 @@ int main(int argc, char* argv[]) {
           },
           repetitions);
    if (q.count("5h"))
-      e.timeAndProfile("q5 hyper     ",
+      e.timeAndProfile(label("q5 h ", nrThreads),
                        nrTuples(tpch, {"supplier", "region", "nation",
                                        "customer", "orders", "lineitem"}),
                        [&]() {
@@ -285,7 +289,7 @@ int main(int argc, char* argv[]) {
                        },
                        repetitions);
    if (q.count("5v"))
-      e.timeAndProfile("q5 vectorwise",
+      e.timeAndProfile(label("q5 v ", nrThreads),
                        nrTuples(tpch, {"supplier", "region", "nation",
                                        "customer", "orders", "lineitem"}),
                        [&]() {
@@ -296,7 +300,7 @@ int main(int argc, char* argv[]) {
                        },
                        repetitions);
    if (q.count("6h"))
-      e.timeAndProfile("q6 hyper     ", tpch["lineitem"].nrTuples,
+      e.timeAndProfile(label("q6 h ", nrThreads), tpch["lineitem"].nrTuples,
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           auto result = q6_hyper(tpch, nrThreads);
@@ -304,7 +308,7 @@ int main(int argc, char* argv[]) {
                        },
                        repetitions);
    if (q.count("6v"))
-      e.timeAndProfile("q6 vectorwise", tpch["lineitem"].nrTuples,
+      e.timeAndProfile(label("q6 v ", nrThreads), tpch["lineitem"].nrTuples,
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           auto result =
@@ -313,7 +317,7 @@ int main(int argc, char* argv[]) {
                        },
                        repetitions);
    if (q.count("9h"))
-      e.timeAndProfile("q9 hyper     ",
+      e.timeAndProfile(label("q9 h ", nrThreads),
                        nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
                                        "lineitem", "orders"}),
                        [&]() {
@@ -323,7 +327,7 @@ int main(int argc, char* argv[]) {
                        },
                        repetitions);
    if (q.count("9v"))
-      e.timeAndProfile("q9 vectorwise",
+      e.timeAndProfile(label("q9 v ", nrThreads),
                        nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
                                        "lineitem", "orders"}),
                        [&]() {
@@ -335,7 +339,7 @@ int main(int argc, char* argv[]) {
                        repetitions);
    if (q.count("18h"))
       e.timeAndProfile(
-          "q18 hyper     ",
+          label("q18 h", nrThreads),
           nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
           [&]() {
              if (clearCaches) clearOsCaches();
@@ -345,7 +349,7 @@ int main(int argc, char* argv[]) {
           repetitions);
    if (q.count("18v"))
       e.timeAndProfile(
-          "q18 vectorwise",
+          label("q18 v", nrThreads),
           nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
           [&]() {
              if (clearCaches) clearOsCaches();
@@ -353,6 +357,7 @@ int main(int argc, char* argv[]) {
              escape(&result);
           },
           repetitions);
+   } // end thread count loop
    return 0;
 }
 
