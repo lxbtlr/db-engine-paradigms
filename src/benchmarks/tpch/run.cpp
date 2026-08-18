@@ -178,6 +178,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Extract the query number from a key like "18h" -> "18"
+    auto queryNum = [](const std::string& key) {
+        return key.substr(0, key.size() - 1);
+    };
+
     if (!queryNumbers.empty() && !selectedEngine.empty()) {
         // Run specific query+engine pairs
         for (auto& qn : queryNumbers) {
@@ -188,7 +193,7 @@ int main(int argc, char* argv[]) {
         // Run all engines for specified queries
         for (auto& qn : queryNumbers) {
             for (auto& aq : allQueries) {
-                if (aq.substr(0, qn.size()) == qn)
+                if (queryNum(aq) == qn)
                     q.insert(aq);
             }
         }
