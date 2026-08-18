@@ -73,6 +73,15 @@ inline void free_huge(void* p, size_t size) {
 /// Allocate anonymous memory bound to a specific NUMA node.
 /// Tries MAP_HUGETLB first; falls back to base pages with MADV_HUGEPAGE.
 inline void* malloc_numa(size_t size, int node) {
+#ifdef NO_HUGE_PAGES
+   // Plain base pages, no hugetlb, no THP
+   size_t allocSize = size;
+   void* p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if (p == MAP_FAILED)
+      throw std::runtime_error("malloc_numa: mmap failed: " +
+                               std::string(std::strerror(errno)));
+#else
 #ifdef HUGE_1GB_MALLOC_NUMA
    constexpr size_t PAGE = 1UL * 1024 * 1024 * 1024; // 1GB
    constexpr int HUGETLB_FLAGS = MAP_HUGETLB | MAP_HUGE_1GB;
@@ -94,6 +103,7 @@ inline void* malloc_numa(size_t size, int node) {
                                   std::string(std::strerror(errno)));
       madvise(p, allocSize, MADV_HUGEPAGE);
    }
+#endif
 
    // Bind to the target node before any page is touched
    unsigned long nodemask = 1UL << node;
@@ -109,12 +119,16 @@ inline void* malloc_numa(size_t size, int node) {
 /// Return the actual mmap size used by malloc_numa for cleanup.
 /// Must match the rounding logic in malloc_numa.
 inline size_t malloc_numa_size(size_t size) {
+#ifdef NO_HUGE_PAGES
+   return size;
+#else
 #ifdef HUGE_1GB_MALLOC_NUMA
    constexpr size_t PAGE = 1UL * 1024 * 1024 * 1024;
 #else
    constexpr size_t PAGE = 2 * 1024 * 1024;
 #endif
    return (size + PAGE - 1) & ~(PAGE - 1);
+#endif
 }
 #endif // NUMA_ALLOC || NUMA_SHARD
 
