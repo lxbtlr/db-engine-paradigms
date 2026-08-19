@@ -208,8 +208,8 @@ size_t inline Hashmap::setSize(size_t nrEntries) {
    entries = static_cast<std::atomic<EntryHeader*>*>(
        mem::malloc_huge(capacity * sizeof(std::atomic<EntryHeader*>)));
 #endif
+   mem::populate_pages(entries, capacity * sizeof(std::atomic<EntryHeader*>));
    clear();
-   mem::collapse_huge(entries, capacity * sizeof(std::atomic<EntryHeader*>));
    return capacity * loadFactor;
 }
 
