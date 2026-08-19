@@ -131,6 +131,7 @@ void numaReplicateRelation(Relation& rel) {
             void* p = mem::malloc_numa(bytes, static_cast<int>(r));
             size_t allocSize = mem::malloc_numa_size(bytes);
             pool.dispatch(p, attr.data(), bytes);
+            mem::collapse_huge(p, bytes);
 
             replica.columns[attrName] = p;
             replica.mmaps.emplace_back(p, allocSize);
@@ -202,6 +203,7 @@ void numaShardRelation(Relation& rel) {
                 static_cast<const char*>(attr.data()) +
                 shard.tupleBegin * elemSize;
             pool.dispatch(p, src, bytes);
+            mem::collapse_huge(p, bytes);
 
             shard.columns[attrName] = p;
             shard.mmaps.emplace_back(p, allocSize);

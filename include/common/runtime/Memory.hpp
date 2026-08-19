@@ -69,6 +69,20 @@ inline void free_huge(void* p, size_t size) {
    if (r) throw std::runtime_error("Memory unmapping failed.");
 }
 
+/// Synchronously collapse base pages into THPs (Linux 6.1+).
+/// Call after pages are populated. No-op if MADV_COLLAPSE is unavailable
+/// or if pages are already huge (MAP_HUGETLB).
+inline void collapse_huge(void* p, size_t size) {
+#if defined(__linux__) && defined(MADV_COLLAPSE) && !defined(NO_HUGE_PAGES)
+   constexpr size_t HUGEPAGE = 2 * 1024 * 1024;
+   size_t aligned = (size + HUGEPAGE - 1) & ~(HUGEPAGE - 1);
+   madvise(p, aligned, MADV_COLLAPSE);
+   // Errors are silently ignored — collapse is best-effort
+#else
+   (void)p; (void)size;
+#endif
+}
+
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 /// Allocate anonymous memory bound to a specific NUMA node.
 /// Tries MAP_HUGETLB first; falls back to base pages with MADV_HUGEPAGE.
