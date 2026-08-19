@@ -3,7 +3,7 @@
 #include <sys/mman.h>
 #include <linux/mman.h>  // MAP_HUGE_2MB / MAP_HUGE_1GB (not pulled in by sys/mman.h)
 
-#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD) || defined(INTERLEAVE_HT)
 #include <cerrno>
 #include <cstring>
 #include <numaif.h>
@@ -82,6 +82,31 @@ inline void collapse_huge(void* p, size_t size) {
    (void)p; (void)size;
 #endif
 }
+
+#ifdef INTERLEAVE_HT
+/// Allocate anonymous memory interleaved across all NUMA nodes.
+/// Uses the same size semantics as malloc_huge (no rounding in default path),
+/// so free_huge / malloc_huge_size work unchanged.
+inline void* malloc_huge_interleaved(size_t size) {
+   void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if (p == MAP_FAILED)
+      throw std::runtime_error("malloc_huge_interleaved: mmap failed: " +
+                               std::string(std::strerror(errno)));
+
+   // Interleave across all nodes — kernel ignores bits for non-existent nodes
+   unsigned long allNodes = ~0UL;
+   int rc = mbind(p, size, MPOL_INTERLEAVE, &allNodes, 64, 0);
+   if (rc != 0)
+      throw std::runtime_error("malloc_huge_interleaved: mbind failed: " +
+                               std::string(std::strerror(errno)));
+
+#if !defined(NO_HUGE_PAGES)
+   madvise(p, size, MADV_HUGEPAGE);
+#endif
+   return p;
+}
+#endif // INTERLEAVE_HT
 
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 /// Allocate anonymous memory bound to a specific NUMA node.
