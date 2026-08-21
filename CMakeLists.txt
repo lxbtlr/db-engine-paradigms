@@ -33,7 +33,9 @@ OPTION(NO_HUGE_PAGES "Disable huge pages for malloc_huge" OFF)
 OPTION(HUGE_2MB_MALLOC_HUGE "Use 2MB hugetlb pages for malloc_huge" OFF)
 OPTION(HUGE_1GB_MALLOC_HUGE "Use 1GB huge pages for malloc_huge" OFF)
 OPTION(HUGE_1GB_MALLOC_NUMA "Use 1GB huge pages for malloc_numa" OFF)
+OPTION(WARM_PAGES "Touch all relation pages before measurement to warm page tables" OFF)
 OPTION(INTERLEAVE_HT "Interleave hash table pages across NUMA nodes" OFF)
+OPTION(HYPER_FLOAT "Let TBB hyper-engine threads float (no pinning)" OFF)
 
 IF(NUMA_ALLOC AND NUMA_SHARD)
   message(FATAL_ERROR "NUMA_ALLOC and NUMA_SHARD are mutually exclusive. Pick one.")
@@ -111,8 +113,16 @@ IF(HUGE_1GB_MALLOC_NUMA)
   ADD_DEFINITIONS(-DHUGE_1GB_MALLOC_NUMA)
 ENDIF()
 
+IF(WARM_PAGES)
+  ADD_DEFINITIONS(-DWARM_PAGES)
+ENDIF()
+
 IF(INTERLEAVE_HT)
   ADD_DEFINITIONS(-DINTERLEAVE_HT)
+ENDIF()
+
+IF(HYPER_FLOAT)
+  ADD_DEFINITIONS(-DHYPER_FLOAT)
 ENDIF()
 
 IF(NUMA_ALLOC OR NUMA_DEBUG OR NUMA_SHARD OR INTERLEAVE_HT)

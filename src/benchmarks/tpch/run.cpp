@@ -11,13 +11,44 @@
 
 #include "benchmarks/tpch/Queries.hpp"
 #include "common/runtime/Import.hpp"
+#include "common/runtime/Concurrency.hpp"
 #include "profile.hpp"
 #include "tbb/tbb.h"
 #include <tbb/global_control.h>
+#include <tbb/task_arena.h>
+#include <tbb/task_scheduler_observer.h>
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 #include "common/runtime/NumaAlloc.hpp"
-#include "common/runtime/Concurrency.hpp"
 #endif
+
+#ifndef HYPER_FLOAT
+/// Pins each TBB worker thread to a CPU using the same policy as
+/// WorkerGroup::run (spread by default, packed with THREAD_PIN_PACKED).
+class PinningObserver : public tbb::task_scheduler_observer {
+public:
+   explicit PinningObserver(tbb::task_arena& arena)
+       : tbb::task_scheduler_observer(arena) {
+      observe(true);
+   }
+   void on_scheduler_entry(bool /*is_worker*/) override {
+      int slot = tbb::this_task_arena::current_thread_index();
+      if (slot < 0) return;
+      cpu_set_t cpuset;
+      CPU_ZERO(&cpuset);
+#ifdef THREAD_PIN_PACKED
+      size_t tps = runtime::CORES_PER_SOCKET * runtime::SMT_PER_CORE;
+      size_t socket = static_cast<size_t>(slot) / tps;
+      size_t j = static_cast<size_t>(slot) % tps;
+      size_t cpu = j * runtime::SOCKETS_COUNT + socket;
+      CPU_SET(cpu, &cpuset);
+#else
+      CPU_SET(slot, &cpuset);
+#endif
+      pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+   }
+   ~PinningObserver() override { observe(false); }
+};
+#endif // !HYPER_FLOAT
 
 // NOTE: this was helpful for debuging, but breaks if we dont use the thread arg, disable for now
 // lets force this thing to use one thread
@@ -151,6 +182,29 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
+#ifdef WARM_PAGES
+    // Touch every page of every relation to warm page tables and TLB caches.
+    // Equalizes page-walk costs across configs (sharding/replication does this
+    // implicitly via memcpy; baseline does not).
+    {
+        volatile char sink = 0;
+        const char* tables[] = {"lineitem", "orders", "customer", "part",
+                                "supplier", "partsupp", "nation", "region"};
+        for (auto& name : tables) {
+            if (!tpch.hasRelation(name)) continue;
+            auto& rel = tpch[name];
+            for (auto& attrKv : rel.attributes) {
+                auto& attr = attrKv.second;
+                const char* p = static_cast<const char*>(attr.data());
+                size_t bytes = rel.nrTuples * attr.type->rt_size();
+                for (size_t off = 0; off < bytes; off += 4096)
+                    sink += p[off];
+            }
+        }
+        fprintf(stderr, "Page warmup complete.\n");
+    }
+#endif
+
     // Settle: let THP compaction / khugepaged finish before measurement
     if (settleSeconds > 0) {
         fprintf(stderr, "Settling for %d seconds...\n", settleSeconds);
@@ -240,6 +294,10 @@ int main(int argc, char* argv[]) {
 
    for (size_t nrThreads : threadCounts) {
     tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
+    tbb::task_arena arena(static_cast<int>(nrThreads));
+#ifndef HYPER_FLOAT
+    PinningObserver pinner(arena);
+#endif
     fprintf(stderr, "--- threads: %zu ---\n", nrThreads);
     writeHeader = true;
 
@@ -247,8 +305,10 @@ int main(int argc, char* argv[]) {
       e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          auto result = q1_hyper(tpch, nrThreads);
-                          escape(&result);
+                          arena.execute([&] {
+                             auto result = q1_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
                        },
                        repetitions);
    if (q.count("1v"))
@@ -270,8 +330,10 @@ int main(int argc, char* argv[]) {
                        nrTuples(tpch, {"customer", "orders", "lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          auto result = q3_hyper(tpch, nrThreads);
-                          escape(&result);
+                          arena.execute([&] {
+                             auto result = q3_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
                        },
                        repetitions);
    if (q.count("3v"))
@@ -289,8 +351,10 @@ int main(int argc, char* argv[]) {
                                        "customer", "orders", "lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          auto result = q5_hyper(tpch, nrThreads);
-                          escape(&result);
+                          arena.execute([&] {
+                             auto result = q5_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
                        },
                        repetitions);
    if (q.count("5v"))
@@ -308,8 +372,10 @@ int main(int argc, char* argv[]) {
       e.timeAndProfile(label("q6 h ", nrThreads), tpch["lineitem"].nrTuples,
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          auto result = q6_hyper(tpch, nrThreads);
-                          escape(&result);
+                          arena.execute([&] {
+                             auto result = q6_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
                        },
                        repetitions);
    if (q.count("6v"))
@@ -327,8 +393,10 @@ int main(int argc, char* argv[]) {
                                        "lineitem", "orders"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          auto result = q9_hyper(tpch, nrThreads);
-                          escape(&result);
+                          arena.execute([&] {
+                             auto result = q9_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
                        },
                        repetitions);
    if (q.count("9v"))
@@ -348,8 +416,10 @@ int main(int argc, char* argv[]) {
           nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
           [&]() {
              if (clearCaches) clearOsCaches();
-             auto result = q18_hyper(tpch, nrThreads);
-             escape(&result);
+             arena.execute([&] {
+                auto result = q18_hyper(tpch, nrThreads);
+                escape(&result);
+             });
           },
           repetitions);
    if (q.count("18v"))
