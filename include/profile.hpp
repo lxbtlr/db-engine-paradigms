@@ -91,7 +91,6 @@ struct PerfEvents {
          add("instr.", "instructions");
          add("br. misses", "cpu/branch-misses/");
          add("all_rd", "offcore_requests.all_data_rd");
-         add("br. misses", "cpu/branch-misses/");
          add("stores", "mem_inst_retired.all_stores");
          add("loads", "mem_inst_retired.all_loads");
          add("mem_stall", "cycle_activity.stalls_mem_any");
