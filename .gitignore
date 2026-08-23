@@ -51,3 +51,6 @@ plot/*.tex
 *.exe
 *.out
 *.app
+
+# transient config->binary maps (regenerated per build)
+*_map.txt
