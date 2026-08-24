@@ -306,6 +306,7 @@ class Hashjoin : public BinaryOperator {
 };
 
 class HashGroup : public UnaryOperator {
+ protected:
    runtime::Hashmap ht;
    size_t maxFill;
    const size_t initialMapSize = 1024;
