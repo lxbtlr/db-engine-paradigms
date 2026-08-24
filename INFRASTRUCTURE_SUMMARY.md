@@ -188,5 +188,11 @@ The defining pattern: **everything is async and self-reporting, no babysitting.*
 - The repo home is `/tank/alexb/swole/db-engines` (was `/home/...`; all skills/tool
   calls now default to the `/tank` home). Build helper scripts live in
   `/tank/alexb/swole/db-engines/scripts/`.
+- **Operating convention (authoritative):** all work is done out of the
+  `/tank/alexb/swole/db-engines` copy. The `/home/alexb/swole/db-engines` copy is
+  the user's private staging area where they develop and stage implementations,
+  and is **removed from my view** — never read, run, or modify it. Code flows
+  into `/tank` via the shared `origin` remote (`git@github.com:lxbtlr/db-engine-paradigms.git`)
+  or the user's explicit sync, never by inspecting `/home`.
 - The NUMA sharding smoke test verified 4 regions; `NUMA_ALLOC` variant failed
   NUMA-validation reproducibly (no tldr; heads-up texts sent instead).
