@@ -599,6 +599,76 @@ QueryBuilder::HashGroupBuilder QueryBuilder::HashGroup() {
    return b;
 }
 
+QueryBuilder::HashGroupBuilder QueryBuilder::OptHashGroup() {
+   HashGroupBuilder b(*this);
+   auto nr = nextOpNr();
+   auto& s = operatorState.get<class HashGroup::Shared>(nr);
+   auto gr = make_unique<class OptHashGroup>(s);
+   b.group = gr.get();
+   gr->vecSize = vecs.getVecSize();
+   gr->groupStore.setSource(&runtime::this_worker->allocator);
+
+   auto& op = *gr;
+   op.groupHt =
+       make_unique<runtime::HashmapSmall<pos_t, pos_t>>(vecs.getVecSize());
+   auto& local = op.preAggregation;
+   local.ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
+   local.groupHashes = static_cast<runtime::Hashmap::hash_t*>(
+       vecs.get(8));
+   local.htMatches = static_cast<runtime::Hashmap::EntryHeader**>(
+       vecs.get(sizeof(runtime::Hashmap::EntryHeader*)));
+   local.groupsFound = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.groupsNotFound =
+       reinterpret_cast<SizeBuffer<pos_t>*>(vecs.getSizeBuffer(sizeof(pos_t)));
+   local.keysNEq =
+       reinterpret_cast<SizeBuffer<pos_t>*>(vecs.getSizeBuffer(sizeof(pos_t)));
+   local.partitionEndsIn = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.partitionEndsOut = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.unpartitionedRows = local.groupsNotFound->data();
+   local.partitionedRows = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.groupRepresentatives = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+
+   b.localLookup.partitionEndsIn = local.partitionEndsIn;
+   b.localLookup.partitionEndsOut = local.partitionEndsOut;
+   b.localLookup.unpartitionedRows = local.unpartitionedRows;
+   b.localLookup.partitionedRows = local.partitionedRows;
+
+   auto& global = op.globalAggregation;
+   global.ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
+   global.groupHashes = local.groupHashes;
+   global.htMatches = local.htMatches;
+   global.groupsFound = local.groupsFound;
+   global.groupsNotFound = local.groupsNotFound;
+   global.keysNEq = local.keysNEq;
+   global.partitionEndsIn = local.partitionEndsIn;
+   global.partitionEndsOut = local.partitionEndsOut;
+   global.unpartitionedRows = global.groupsNotFound->data();
+   global.partitionedRows = local.partitionedRows;
+   global.groupRepresentatives = local.groupRepresentatives;
+
+   b.globalLookup.partitionEndsIn = local.partitionEndsIn;
+   b.globalLookup.partitionEndsOut = local.partitionEndsOut;
+   b.globalLookup.unpartitionedRows = local.unpartitionedRows;
+   b.globalLookup.partitionedRows = local.partitionedRows;
+
+   auto scatter_build = make_unique<FScatterSelOp>(
+       primitives::scatter_sel_hash_t_col, Value(local.groupRepresentatives),
+       Value(local.groupHashes), reinterpret_cast<void**>(&local.scatterStart),
+       &local.ht_entry_size, offsetof(runtime::Hashmap::EntryHeader, hash));
+   local.buildScatter += move(scatter_build);
+
+   auto scatter_build_global = make_unique<FScatterSelRowOp>(
+       primitives::scatter_sel_row_hash_t_col,
+       Value(global.groupRepresentatives), &global.rowData, &global.rowSize, 0,
+       reinterpret_cast<void**>(&global.scatterStart), &global.ht_entry_size,
+       offsetof(runtime::Hashmap::EntryHeader, hash));
+   global.buildScatter += move(scatter_build_global);
+
+   op.child = popOperator();
+   pushOperator(move(gr));
+   return b;
+}
+
 QueryBuilder::HashGroupBuilder::~HashGroupBuilder() {
 
    // set partitioning buffers in operator

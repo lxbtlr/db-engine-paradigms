@@ -197,7 +197,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                       Buffer(charge, sizeof(int64_t)),
                       Buffer(disc_price, sizeof(int64_t)),
                       Buffer(result_proj_plus, sizeof(int64_t))));
-   HashGroup()
+   OptHashGroup()
        .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
        .addKey(Column(lineitem, "l_returnflag"), Buffer(sel_date),
                primitives::hash_sel_Char_1_col,

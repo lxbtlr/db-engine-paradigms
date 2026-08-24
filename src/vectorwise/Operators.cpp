@@ -927,14 +927,13 @@ size_t HashGroup::next() {
    using header_t = decltype(ht)::EntryHeader;
    if (!cont.consumed) {
       /// ------ phase 1: local preaggregation
-      /// aggregate all incoming tuples into local hashtable
+      size_t groups = 0;
       auto& spill = shared.spillStorage.local();
       auto entry_size = preAggregation.ht_entry_size;
 
       auto flushAndClear = [&]() INTERPRET_SEPARATE {
          assert(offsetof(header_t, next) + sizeof(header_t::next) ==
                 offsetof(header_t, hash));
-         // flush ht entries into spillStorage
          for (auto& alloc : preAggregation.allocations) {
             for (auto entry = reinterpret_cast<header_t*>(alloc.first),
                       end = addBytes(entry, alloc.second * entry_size);
@@ -945,23 +944,16 @@ size_t HashGroup::next() {
          preAggregation.clearHashtable(ht);
       };
 
-      if (packedKeys.size() != vecSize * totalKeySize) {
-         packedKeys.resize(vecSize * totalKeySize);
-      }
-
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         preAggregation.groupsNotFound->clear();
-
-         Concat(n);
-         Hash(n);
-         Lookup(n);
-
-         preAggregation.createMissingGroups(ht, false);
+         groupHash.evaluate(n);
+         preAggregation.findGroups(n, ht);
+         auto groupsCreated = preAggregation.createMissingGroups(ht, false);
          updateGroups.evaluate(n);
-         if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
+         groups += groupsCreated;
+         if (groups >= maxFill) flushAndClear();
       }
-      flushAndClear(); // flush remaining entries into spillStorage
-      barrier();       // Wait until all workers have finished phase 1
+      flushAndClear();
+      barrier();
 
       cont.consumed = true;
       cont.partition = shared.partition.fetch_add(1);
@@ -969,22 +961,16 @@ size_t HashGroup::next() {
    }
 
    /// ------ phase 2: global aggregation
-   // get a partition
    for (; cont.partition < nrPartitions;) {
       if (cont.partitionNeedsAggregation) {
          auto partNr = cont.partition;
-         // for all thread local partitions
          for (auto& threadPartitions : shared.spillStorage.threadData) {
-            // aggregate data from thread local partition
             auto& partition = threadPartitions.second.getPartitions()[partNr];
             for (auto chunk = partition.first; chunk; chunk = chunk->next) {
                auto elementSize = threadPartitions.second.entrySize;
                auto nPart = partition.size(chunk, elementSize);
                for (size_t n = std::min(nPart, vecSize), pos = 0; n;
                     nPart -= n, pos += n, n = std::min(nPart, vecSize)) {
-
-                  // communicate data position of current chunk to primitives
-                  // for group lookup and creation
                   auto data = addBytes(chunk->data<void>(), pos * elementSize);
                   globalAggregation.rowData = data;
                   findGroupsFromPartition(data, n);
@@ -999,12 +985,8 @@ size_t HashGroup::next() {
          cont.partitionNeedsAggregation = false;
          cont.iter = globalAggregation.allocations.begin();
       }
-      // send aggregation result to parent operator
-      // TODO: refill result instead of sending all allocations separately
       if (cont.iter != globalAggregation.allocations.end()) {
          auto& block = *cont.iter;
-         // write current block start to htMatches so the the gather primitives
-         // can read the offset from there
          *globalAggregation.htMatches =
              reinterpret_cast<header_t*>(block.first);
          auto n = block.second;
@@ -1163,6 +1145,97 @@ template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
          std::memcpy(dest + i * keySize, src + i * colSize, colSize);
       }
    }
+}
+
+// ---------------------------------------------------------------------------
+// OptHashGroup — Concat/Hash/Lookup key-packing path
+// ---------------------------------------------------------------------------
+size_t OptHashGroup::next() {
+   using header_t = decltype(ht)::EntryHeader;
+   if (!cont.consumed) {
+      /// ------ phase 1: local preaggregation
+      auto& spill = shared.spillStorage.local();
+      auto entry_size = preAggregation.ht_entry_size;
+
+      auto flushAndClear = [&]() INTERPRET_SEPARATE {
+         assert(offsetof(header_t, next) + sizeof(header_t::next) ==
+                offsetof(header_t, hash));
+         for (auto& alloc : preAggregation.allocations) {
+            for (auto entry = reinterpret_cast<header_t*>(alloc.first),
+                      end = addBytes(entry, alloc.second * entry_size);
+                 entry < end; entry = addBytes(entry, entry_size))
+               spill.push_back(&entry->hash, entry->hash);
+         }
+         preAggregation.allocations.clear();
+         preAggregation.clearHashtable(ht);
+      };
+
+      if (packedKeys.size() != vecSize * totalKeySize) {
+         packedKeys.resize(vecSize * totalKeySize);
+      }
+
+      for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
+         preAggregation.groupsNotFound->clear();
+
+         Concat(n);
+         Hash(n);
+         Lookup(n);
+
+         preAggregation.createMissingGroups(ht, false);
+         updateGroups.evaluate(n);
+         if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
+      }
+      flushAndClear();
+      barrier();
+
+      cont.consumed = true;
+      cont.partition = shared.partition.fetch_add(1);
+      cont.partitionNeedsAggregation = true;
+   }
+
+   /// ------ phase 2: global aggregation
+   for (; cont.partition < nrPartitions;) {
+      if (cont.partitionNeedsAggregation) {
+         auto partNr = cont.partition;
+         for (auto& threadPartitions : shared.spillStorage.threadData) {
+            auto& partition = threadPartitions.second.getPartitions()[partNr];
+            for (auto chunk = partition.first; chunk; chunk = chunk->next) {
+               auto elementSize = threadPartitions.second.entrySize;
+               auto nPart = partition.size(chunk, elementSize);
+               for (size_t n = std::min(nPart, vecSize), pos = 0; n;
+                    nPart -= n, pos += n, n = std::min(nPart, vecSize)) {
+                  auto data = addBytes(chunk->data<void>(), pos * elementSize);
+                  globalAggregation.rowData = data;
+                  findGroupsFromPartition(data, n);
+                  auto cGroups = [&]() INTERPRET_SEPARATE {
+                     globalAggregation.createMissingGroups(ht, true);
+                  };
+                  cGroups();
+                  updateGroupsFromPartition.evaluate(n);
+               }
+            }
+         }
+         cont.partitionNeedsAggregation = false;
+         cont.iter = globalAggregation.allocations.begin();
+      }
+      if (cont.iter != globalAggregation.allocations.end()) {
+         auto& block = *cont.iter;
+         *globalAggregation.htMatches =
+             reinterpret_cast<header_t*>(block.first);
+         auto n = block.second;
+         gatherGroups.evaluate(n);
+         cont.iter++;
+         return n;
+      } else {
+         auto htClear = [&]() INTERPRET_SEPARATE {
+            globalAggregation.clearHashtable(ht);
+         };
+         htClear();
+         cont.partitionNeedsAggregation = true;
+         cont.partition = shared.partition.fetch_add(1);
+      }
+   }
+   return EndOfStream;
 }
 
 // HASH

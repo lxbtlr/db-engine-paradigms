@@ -476,6 +476,14 @@ class HashGroup : public UnaryOperator {
    void clearHashtable();
 };
 
+/// Optimized HashGroup using Concat/Hash/Lookup key-packing path.
+/// Requires all addKey calls to supply a selection vector.
+class OptHashGroup : public HashGroup {
+ public:
+   using HashGroup::HashGroup;
+   virtual size_t next() override;
+};
+
 /// LUT-based group-by for small, dense keyspaces (e.g. Q1's packed uint16_t).
 /// Replaces HashGroup when the key can be used as a direct array index.
 /// No hashing, no hash table, no chain walking — O(1) group lookup per tuple.
