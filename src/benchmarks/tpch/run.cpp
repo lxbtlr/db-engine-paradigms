@@ -63,6 +63,7 @@ using namespace runtime;
 
 static void escape(void* p) { asm volatile("" : : "g"(p) : "memory"); }
 
+/*
 static void dumpQ1Result(const char* label, runtime::Query* query) {
    if (!query || !query->result) return;
    auto& rel = *query->result;
@@ -95,6 +96,7 @@ static void dumpQ1Result(const char* label, runtime::Query* query) {
    }
    fprintf(stderr, "=== END ===\n\n");
 }
+*/
 
 size_t nrTuples(Database& db, std::vector<std::string> tables) {
    size_t sum = 0;
@@ -315,13 +317,8 @@ int main(int argc, char* argv[]) {
       e.timeAndProfile(label("q1 v ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-#ifdef VW_SPLIT_HASHGROUP
-                          auto result =
-                              q1_vectorwise_split(tpch, nrThreads, vectorSize);
-#else
                           auto result =
                               q1_vectorwise(tpch, nrThreads, vectorSize);
-#endif
                           escape(&result);
                        },
                        repetitions);

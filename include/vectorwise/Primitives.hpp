@@ -18,10 +18,13 @@ template <typename T, template <typename> class Op>
 pos_t sel_col_val(pos_t n, pos_t* RES result, T* RES param1, T* RES param2)
 /// select with column and constant
 {
-   uint64_t found = 0;
-   const auto& con = *param2;
-   for (uint64_t i = 0; i < n; ++i)
-      if (Op<T>()(param1[i], con)) result[found++] = i;
+   const auto con = *param2;
+   pos_t found = 0;
+   for (pos_t i = 0; i < n; i++) {
+      if (Op<T>()(param1[i], con)) {
+         result[found++] = i;
+      }
+   }
    return found;
 }
 
@@ -84,13 +87,12 @@ pos_t sel_col_val_bf(pos_t n, pos_t* RES result, T* RES param1, T* RES param2)
 /// select with column and constant
 {
    const auto con = *param2;
-   auto rStart = result;
-   for (uint64_t i = 0; i < n; ++i) {
-      bool decision = Op<T>()(param1[i], con);
-      *result = i;
-      result += decision;
+   pos_t found = 0;
+   for (pos_t i = 0; i < n; i++) {
+      result[found] = i;
+      found += Op<T>()(param1[i], con);
    }
-   return result - rStart;
+   return found;
 }
 
 template <typename T, template <typename> class Op>
@@ -144,7 +146,9 @@ pos_t proj_col_val(pos_t n, T* RES result, T* RES param1, T* RES param2)
 /// project with column and constant
 {
    const auto constant = *param2;
-   for (uint64_t i = 0; i < n; ++i) result[i] = Op<T>()(param1[i], constant);
+   for (pos_t i = 0; i < n; i++) {
+      result[i] = Op<T>()(param1[i], constant);
+   }
    return n;
 }
 
@@ -153,7 +157,9 @@ pos_t proj_val_col(pos_t n, T* RES result, T* RES param1, T* RES param2)
 /// project with constant and column
 {
    const auto constant = *param1;
-   for (uint64_t i = 0; i < n; ++i) result[i] = Op<T>()(constant, param2[i]);
+   for (pos_t i = 0; i < n; i++) {
+      result[i] = Op<T>()(constant, param2[i]);
+   }
    return n;
 }
 
@@ -161,7 +167,9 @@ template <typename T, template <typename> class Op>
 pos_t proj_col_col(pos_t n, T* RES result, T* RES param1, T* RES param2)
 /// project with two columns
 {
-   for (uint64_t i = 0; i < n; ++i) result[i] = Op<T>()(param1[i], param2[i]);
+   for (pos_t i = 0; i < n; i++) {
+      result[i] = Op<T>()(param1[i], param2[i]);
+   }
    return n;
 }
 
@@ -171,7 +179,7 @@ pos_t proj_sel_col_val(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
 /// project with input selection vector and column and constant
 {
    const auto constant = *param2;
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[idx], constant);
    }
@@ -184,7 +192,7 @@ pos_t proj_sel_val_col(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
 /// project with input selection vector and constant and column
 {
    const auto constant = *param1;
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(constant, param2[idx]);
    }
@@ -196,7 +204,7 @@ pos_t proj_sel_both_col_col(pos_t n, pos_t* RES inSel, T* RES result,
                             T* RES param1, T* RES param2)
 /// project with input selection vector for both of two columns
 {
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[idx], param2[idx]);
    }
@@ -208,7 +216,7 @@ pos_t proj_sel_col_col(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
                        T* RES param2)
 /// project with input selection vector first of two columns
 {
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[idx], param2[i]);
    }
@@ -220,7 +228,7 @@ pos_t proj_col_sel_col(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
                        T* RES param2)
 /// project with input selection vector for second of two columns
 {
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[i], param2[idx]);
    }
@@ -232,7 +240,7 @@ pos_t proj_sel_col_sel_col(pos_t n, pos_t* RES inSel1, pos_t* RES inSel2,
                            T* RES result, T* RES param1, T* RES param2)
 /// project with separate input selection vector for each of two columns
 {
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx1 = inSel1[i];
       const auto idx2 = inSel2[i];
       result[i] = Op<T>()(param1[idx1], param2[idx2]);
@@ -266,7 +274,9 @@ pos_t aggr_static_col(pos_t n, T* RES result, T* RES param1)
 /// aggregate column into single value
 {
    auto aggregator = *result;
-   for (uint64_t i = 0; i < n; ++i) aggregator = Op<T>()(param1[i], aggregator);
+   for (pos_t i = 0; i < n; i++) {
+      aggregator = Op<T>()(param1[i], aggregator);
+   }
    *result = aggregator;
    return n > 0;
 }
@@ -277,7 +287,7 @@ pos_t aggr_static_sel_col(pos_t n, pos_t* RES inSel, T* RES result,
 /// aggregate with input selection vector and column into single value
 {
    auto aggregator = *result;
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       aggregator = Op<T>()(param1[idx], aggregator);
    }
@@ -286,33 +296,31 @@ pos_t aggr_static_sel_col(pos_t n, pos_t* RES inSel, T* RES result,
 }
 
 template <typename T, template <typename> class Op>
-pos_t aggr_col(pos_t n, T* RES entries[], T* RES param1, size_t offset)
+pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
 /// aggregate into multiple aggregators given by result
 {
-   auto p1 = param1;
-   for (auto e = entries, end = e + n; e < end; ++e, ++p1) {
-      auto aggregate = addBytes(*e, offset);
-      *aggregate = Op<T>()(*p1, *aggregate);
+   for (pos_t i = 0; i < n; i++) {
+      T* aggregate = addBytes(entries[i], offset);
+      *aggregate = Op<T>()(param1[i], *aggregate);
    }
    return n;
 }
 
 template <typename T, template <typename> class Op>
-pos_t aggr_sel_col(pos_t n, T* RES entries[], pos_t* selParam1, T* RES param1,
+pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* selParam1, T* RES param1,
                    size_t offset)
 /// aggregate into multiple aggregators given by result, param1 has selection
 /// vector
 {
-   auto s = selParam1;
-   for (auto e = entries, end = e + n; e < end; ++e, ++s) {
-      auto aggregate = addBytes(*e, offset);
-      *aggregate = Op<T>()(param1[*s], *aggregate);
+   for (pos_t i = 0; i < n; i++) {
+      T* aggregate = addBytes(entries[i], offset);
+      *aggregate = Op<T>()(param1[selParam1[i]], *aggregate);
    }
    return n;
 }
 
 template <typename T, template <typename> class Op>
-pos_t aggr_row(pos_t n, T* RES entries[], size_t offset, T** RES dataPtr,
+pos_t aggr_row(pos_t n, T** RES entries, size_t offset, T** RES dataPtr,
                size_t* inSizePtr, size_t inOffset)
 /// aggregate into multiple aggregators given by result
 {

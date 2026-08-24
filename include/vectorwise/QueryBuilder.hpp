@@ -189,6 +189,7 @@ class QueryBuilder {
    HashJoin(DS probeMatches,
             pos_t (Hashjoin::*join)() = &Hashjoin::joinAllParallel);
    HashGroupBuilder HashGroup();
+   HashGroupBuilder OptHashGroup();
    LUTGroupBuilder LUTGroup();
 
    ~QueryBuilder();
