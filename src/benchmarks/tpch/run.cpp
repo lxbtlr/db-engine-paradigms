@@ -325,6 +325,14 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
+      // Correctness dump
+#ifdef VW_SPLIT_HASHGROUP
+      auto vResult = q1_vectorwise_split(tpch, nrThreads, vectorSize);
+#else
+      auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
+#endif
+// dumpQ1Result("vectorwise", vResult.get());
+   }
    if (q.count("3h"))
       e.timeAndProfile(label("q3 h ", nrThreads),
                        nrTuples(tpch, {"customer", "orders", "lineitem"}),

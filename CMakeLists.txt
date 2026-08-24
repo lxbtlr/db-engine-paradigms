@@ -14,7 +14,7 @@ else()
 set(CMAKE_C_COMPILER gcc)
 set(CMAKE_CXX_COMPILER g++)
 endif()
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 OPTION(VECTORWISE_BRANCHING "Use branching vectorwise primitives" OFF)
@@ -40,10 +40,22 @@ OPTION(HYPER_FLOAT "Let TBB hyper-engine threads float (no pinning)" OFF)
 IF(NUMA_ALLOC AND NUMA_SHARD)
   message(FATAL_ERROR "NUMA_ALLOC and NUMA_SHARD are mutually exclusive. Pick one.")
 ENDIF()
+OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise" OFF)
 
+if (VW_USE_CRC32)
+  ADD_DEFINITIONS(-DVW_USE_CRC32=1)
+  message(STATUS "Building with CRC32Hash ")
+else ()
+  message(STATUS "Building with MurMurHash")
+endif (VW_USE_CRC32)
+
+
+#set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
+#message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
+# add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
 
 # Compiler flags for the different targets
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -mtune=native -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -fPIC -Wall -Wextra -fno-omit-frame-pointer -march=native -fdiagnostics-color ")
 
 

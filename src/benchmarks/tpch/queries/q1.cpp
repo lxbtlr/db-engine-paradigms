@@ -36,6 +36,41 @@ using vectorwise::primitives::hash_t;
 //    l_returnflag,
 //    l_linestatus
 
+static void dumpQ1Result(const char* label, runtime::Query* query) {
+   if (!query || !query->result) return;
+   auto& rel = *query->result;
+   auto retAttr = rel.getAttribute("l_returnflag");
+   auto statusAttr = rel.getAttribute("l_linestatus");
+   auto qtyAttr = rel.getAttribute("sum_qty");
+   auto basePriceAttr = rel.getAttribute("sum_base_price");
+   auto discPriceAttr = rel.getAttribute("sum_disc_price");
+   auto chargeAttr = rel.getAttribute("sum_charge");
+   auto countAttr = rel.getAttribute("count_order");
+
+   fprintf(stderr, "\n=== Q1 Results [%s] ===\n", label);
+   fprintf(stderr, "%-4s %-4s %20s %20s %20s %20s %15s\n",
+           "ret", "stat", "sum_qty", "sum_base_price", "sum_disc_price",
+           "sum_charge", "count_order");
+   for (auto& block : rel) {
+      auto n = block.size();
+      auto ret = reinterpret_cast<types::Char<1>*>(block.data(retAttr));
+      auto status = reinterpret_cast<types::Char<1>*>(block.data(statusAttr));
+      auto qty = reinterpret_cast<int64_t*>(block.data(qtyAttr));
+      auto basePrice = reinterpret_cast<int64_t*>(block.data(basePriceAttr));
+      auto discPrice = reinterpret_cast<int64_t*>(block.data(discPriceAttr));
+      auto charge = reinterpret_cast<int64_t*>(block.data(chargeAttr));
+      auto count = reinterpret_cast<int64_t*>(block.data(countAttr));
+      for (size_t i = 0; i < n; ++i) {
+         fprintf(stderr, "%-4c %-4c %20ld %20ld %20ld %20ld %15ld\n",
+                 ret[i].value, status[i].value,
+                 qty[i], basePrice[i], discPrice[i], charge[i], count[i]);
+      }
+   }
+   fprintf(stderr, "=== END ===\n\n");
+}
+
+
+
 NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
                                                      size_t nrThreads) {
    using namespace types;
@@ -336,6 +371,6 @@ std::unique_ptr<runtime::Query> q1_vectorwise(Database& db, size_t nrThreads,
          result = move(
              dynamic_cast<ResultWriter*>(query->rootOp.get())->shared.result);
    });
-
+   //dumpQ1Result("vectorwise", result.get());
    return result;
 }
