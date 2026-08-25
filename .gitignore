@@ -54,3 +54,6 @@ plot/*.tex
 
 # transient config->binary maps (regenerated per build)
 *_map.txt
+
+# helper scripts: not part of the build
+scripts/
