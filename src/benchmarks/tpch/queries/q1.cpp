@@ -9,7 +9,9 @@
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/QueryBuilder.hpp"
 #include "vectorwise/VectorAllocator.hpp"
+#include <array>
 #include <deque>
+#include <mutex>
 #include <iostream>
 
 using namespace runtime;
@@ -126,6 +128,120 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
          }
       block.addedElements(n);
    });
+
+   leaveQuery(nrThreads);
+   return move(resources.query);
+}
+
+NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper_lut(Database& db,
+                                                          size_t nrThreads) {
+   using namespace types;
+   using namespace std;
+   types::Date c1 = types::Date::castString("1998-09-02");
+   types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
+   auto& li = db["lineitem"];
+   auto l_returnflag = li["l_returnflag"].data<types::Char<1>>();
+   auto l_linestatus = li["l_linestatus"].data<types::Char<1>>();
+   auto l_extendedprice = li["l_extendedprice"].data<types::Numeric<12, 2>>();
+   auto l_discount = li["l_discount"].data<types::Numeric<12, 2>>();
+   auto l_tax = li["l_tax"].data<types::Numeric<12, 2>>();
+   auto l_quantity = li["l_quantity"].data<types::Numeric<12, 2>>();
+   auto l_shipdate = li["l_shipdate"].data<types::Date>();
+
+   auto resources = initQuery(nrThreads);
+
+   constexpr size_t LUT_SIZE = 256;
+   // Values: sum_qty, sum_base_price, sum_disc_price, sum_charge, count_order
+   constexpr size_t N_VALUES = 5;
+
+   std::mutex mergeMutex;
+   std::array<std::array<int64_t, LUT_SIZE>, N_VALUES> globalLUT{};
+   std::array<bool, LUT_SIZE> globalOccupied{};
+   std::array<uint8_t, LUT_SIZE> keyA{};
+   std::array<uint8_t, LUT_SIZE> keyB{};
+
+   tbb::parallel_for(
+       tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
+       [&](const tbb::blocked_range<size_t>& r) {
+          std::array<std::array<int64_t, LUT_SIZE>, N_VALUES> localLUT{};
+          std::array<bool, LUT_SIZE> localOccupied{};
+          std::array<uint8_t, LUT_SIZE> localKeyA{};
+          std::array<uint8_t, LUT_SIZE> localKeyB{};
+
+          for (size_t i = r.begin(), end = r.end(); i != end; ++i) {
+             if (l_shipdate[i] <= c1) {
+                uint8_t key = (l_returnflag[i].value & 0xF)
+                            | ((l_linestatus[i].value & 0xF) << 4);
+
+                if (!localOccupied[key]) {
+                   localOccupied[key] = true;
+                   localKeyA[key] = l_returnflag[i].value;
+                   localKeyB[key] = l_linestatus[i].value;
+                }
+
+                localLUT[0][key] += l_quantity[i].value;
+                localLUT[1][key] += l_extendedprice[i].value;
+                auto disc_price = l_extendedprice[i] * (one - l_discount[i]);
+                localLUT[2][key] += disc_price.value;
+                auto charge = disc_price * (one + l_tax[i]);
+                localLUT[3][key] += charge.value;
+                localLUT[4][key] += 1;
+             }
+          }
+
+          std::lock_guard<std::mutex> lock(mergeMutex);
+          for (size_t k = 0; k < LUT_SIZE; ++k) {
+             if (localOccupied[k]) {
+                if (!globalOccupied[k]) {
+                   globalOccupied[k] = true;
+                   keyA[k] = localKeyA[k];
+                   keyB[k] = localKeyB[k];
+                }
+                for (size_t v = 0; v < N_VALUES; ++v)
+                   globalLUT[v][k] += localLUT[v][k];
+             }
+          }
+       });
+
+   // Count occupied groups
+   size_t nGroups = 0;
+   for (size_t k = 0; k < LUT_SIZE; ++k)
+      if (globalOccupied[k]) ++nGroups;
+
+   auto& result = resources.query->result;
+   auto retAttr = result->addAttribute("l_returnflag", sizeof(Char<1>));
+   auto statusAttr = result->addAttribute("l_linestatus", sizeof(Char<1>));
+   auto qtyAttr = result->addAttribute("sum_qty", sizeof(Numeric<12, 2>));
+   auto base_priceAttr =
+       result->addAttribute("sum_base_price", sizeof(Numeric<12, 2>));
+   auto disc_priceAttr =
+       result->addAttribute("sum_disc_price", sizeof(Numeric<12, 2>));
+   auto chargeAttr = result->addAttribute("sum_charge", sizeof(Numeric<12, 2>));
+   auto count_orderAttr = result->addAttribute("count_order", sizeof(int64_t));
+
+   auto block = result->createBlock(nGroups);
+   auto ret = reinterpret_cast<Char<1>*>(block.data(retAttr));
+   auto status = reinterpret_cast<Char<1>*>(block.data(statusAttr));
+   auto qty = reinterpret_cast<Numeric<12, 2>*>(block.data(qtyAttr));
+   auto base_price =
+       reinterpret_cast<Numeric<12, 2>*>(block.data(base_priceAttr));
+   auto disc_price =
+       reinterpret_cast<Numeric<12, 4>*>(block.data(disc_priceAttr));
+   auto charge = reinterpret_cast<Numeric<12, 6>*>(block.data(chargeAttr));
+   auto count_order = reinterpret_cast<int64_t*>(block.data(count_orderAttr));
+
+   for (size_t k = 0; k < LUT_SIZE; ++k) {
+      if (globalOccupied[k]) {
+         ret->value = keyA[k]; ++ret;
+         status->value = keyB[k]; ++status;
+         qty->value = globalLUT[0][k]; ++qty;
+         base_price->value = globalLUT[1][k]; ++base_price;
+         disc_price->value = globalLUT[2][k]; ++disc_price;
+         charge->value = globalLUT[3][k]; ++charge;
+         *count_order++ = globalLUT[4][k];
+      }
+   }
+   block.addedElements(nGroups);
 
    leaveQuery(nrThreads);
    return move(resources.query);

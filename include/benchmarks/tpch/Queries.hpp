@@ -51,6 +51,9 @@ std::unique_ptr<runtime::Query>
 q1_vectorwise_packed(runtime::Database& db,
                      size_t nrThreads = std::thread::hardware_concurrency(),
                      size_t vectorSize = 1024);
+std::unique_ptr<runtime::Query>
+q1_hyper_lut(runtime::Database& db,
+             size_t nrThreads = std::thread::hardware_concurrency());
 
 struct Q3Builder : private vectorwise::QueryBuilder {
    enum {

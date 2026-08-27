@@ -115,7 +115,7 @@ int main(int argc, char* argv[]) {
     importTPCH(tpchPath, tpch);
 
     // Now, filter the master query set
-    std::unordered_set<std::string> allQueries = {"1h", "1v", "1p", "3h", "3v", "5h", "5v", "6h", "6v" ,"18h", "18v", "9h", "9v"};
+    std::unordered_set<std::string> allQueries = {"1h", "1v", "1p", "1l", "3h", "3v", "5h", "5v", "6h", "6v" ,"18h", "18v", "9h", "9v"};
     std::unordered_set<std::string> q;
 
     if (!selectedQuery.empty() && !selectedEngine.empty()) {
@@ -194,6 +194,17 @@ int main(int argc, char* argv[]) {
       // Correctness dump
       auto pResult = q1_vectorwise_packed(tpch, nrThreads, vectorSize);
       dumpQ1Result("packed", pResult.get());
+   }
+   if (q.count("1l")) {
+      e.timeAndProfile("q1 hyper lut ", nrTuples(tpch, {"lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          auto result = q1_hyper_lut(tpch, nrThreads);
+                          escape(&result);
+                       },
+                       repetitions);
+      auto lResult = q1_hyper_lut(tpch, nrThreads);
+      dumpQ1Result("hyper lut", lResult.get());
    }
    if (q.count("3h"))
       e.timeAndProfile("q3 hyper     ",
