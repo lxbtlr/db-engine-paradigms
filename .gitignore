@@ -57,3 +57,6 @@ plot/*.tex
 
 # helper scripts: not part of the build
 scripts/
+
+# offline machine registration notes (not tracked)
+OFFLINE_MACHINE_REGISTRATION.md
