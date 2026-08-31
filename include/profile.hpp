@@ -285,8 +285,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    startAll();
    double totalStart = gettime();
    size_t performedRep = 0;
-   for (; performedRep < repetitions || gettime() - totalStart < 0.5;
-        ++performedRep) {
+   for (; performedRep < repetitions; ++performedRep) {
       double t0 = gettime();
       fn();
       double t1 = gettime();
