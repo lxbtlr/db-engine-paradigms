@@ -254,6 +254,7 @@ add_library(common
   )
 target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
 target_link_libraries(common ${TCMALLOC_LIB} ${NUMA_LIB})
