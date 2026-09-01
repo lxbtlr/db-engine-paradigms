@@ -113,38 +113,22 @@ struct PerfEvents {
       add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
       add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
 
+      // PERF_COUNT_HW_CACHE_LL via PERF_TYPE_HW_CACHE is unreliable on ARM —
+      // many PMU drivers don't map it. Use generic PERF_COUNT_HW_CACHE_MISSES
+      // for LLC-misses on all ARM targets.
+      add("LLC-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
+      add("l1-misses", PERF_TYPE_HW_CACHE,
+          PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+              (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+
       if (armPart == "0x41-0xd49" || armPart == "0x41-0xd0c") {
          // Cortex-A77 / Neoverse N1 (Graviton 2)
-         add("LLC-misses", PERF_TYPE_HW_CACHE,
-             PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
-         add("l1-misses", PERF_TYPE_HW_CACHE,
-             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
          add("mem_stall", PERF_TYPE_HARDWARE,
              PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
       } else if (armPart == "0x41-0xd40" || armPart == "0x41-0xd4f") {
          // Neoverse V1/V2 (Graviton 3/4)
-         add("LLC-misses", PERF_TYPE_HW_CACHE,
-             PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
-         add("l1-misses", PERF_TYPE_HW_CACHE,
-             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
          add("mem_stall", PERF_TYPE_HARDWARE,
              PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
-      } else if (armPart == "0xc0-0xac3") {
-         // Ampere Altra — no PERF_COUNT_HW_CACHE_LL support, use generic
-         add("LLC-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
-         add("l1-misses", PERF_TYPE_HW_CACHE,
-             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
-      } else {
-         // Unknown ARM — use generic cache-misses (universally supported)
-         add("LLC-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
-         add("l1-misses", PERF_TYPE_HW_CACHE,
-             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
       }
       }
 #else
