@@ -68,6 +68,21 @@ struct PerfEvents {
          counters = std::thread::hardware_concurrency();
       }
 #ifdef __linux__
+#ifdef __aarch64__
+      // ARM64 (burrata, Cortex-A77) -- 7 raw counters (fits the hw limit)
+      add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+      add("LLC-misses", "arm_dsu_0/l3d_cache_refill/");
+      add("loads", PERF_TYPE_HW_CACHE,
+          PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+              (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+      add("stores", PERF_TYPE_HW_CACHE,
+          PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_WRITE << 8) |
+              (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+      add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+      add("mem_stall", PERF_TYPE_HARDWARE,
+          PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
+      add("all_rd", "arm_dmc620_10008c000/clk_request/");
+#else
       char* cpustr = get_cpu_str();
       std::string cpu(cpustr);
       // see https://download.01.org/perfmon/mapfile.csv for cpu strings
@@ -111,6 +126,7 @@ struct PerfEvents {
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
       }
+#endif // __aarch64__
       add("task-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK);
 #endif
 
