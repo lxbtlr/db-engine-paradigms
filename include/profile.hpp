@@ -134,18 +134,14 @@ struct PerfEvents {
          add("mem_stall", PERF_TYPE_HARDWARE,
              PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
       } else if (armPart == "0xc0-0xac3") {
-         // Ampere Altra
-         add("LLC-misses", PERF_TYPE_HW_CACHE,
-             PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         // Ampere Altra — no PERF_COUNT_HW_CACHE_LL support, use generic
+         add("LLC-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
          add("l1-misses", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
                  (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
       } else {
-         // Unknown ARM — generic fallback
-         add("LLC-misses", PERF_TYPE_HW_CACHE,
-             PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         // Unknown ARM — use generic cache-misses (universally supported)
+         add("LLC-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
          add("l1-misses", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
                  (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
