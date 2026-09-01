@@ -6,13 +6,18 @@ else()
   set(LINUX )
 endif()
 
-if(LINUX)
-set(CMAKE_C_COMPILER gcc)
-set(CMAKE_CXX_COMPILER g++)
-ADD_DEFINITIONS(-D_LIBCPP_VERSION=1) # tbb clang compatibility
+OPTION(USE_CLANG "Use clang/clang++ instead of gcc/g++" OFF)
+
+if(USE_CLANG)
+  set(CMAKE_C_COMPILER clang)
+  set(CMAKE_CXX_COMPILER clang++)
 else()
-set(CMAKE_C_COMPILER gcc)
-set(CMAKE_CXX_COMPILER g++)
+  set(CMAKE_C_COMPILER gcc)
+  set(CMAKE_CXX_COMPILER g++)
+endif()
+
+if(LINUX)
+  ADD_DEFINITIONS(-D_LIBCPP_VERSION=1) # tbb clang compatibility
 endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,22 +60,68 @@ endif (VW_USE_CRC32)
 # add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
 
 # Compiler flags for the different targets
-# Architecture-specific march/mcpu flags
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-  set(ARCH_FLAGS "-mcpu=native")
+# TARGET_ARCH selects a machine-specific flag profile.
+# "native" (default) auto-detects via -march=native / -mcpu=native.
+# Set to a known profile for cross-compilation or reproducible builds.
+set(TARGET_ARCH "native" CACHE STRING
+    "Target architecture profile: native, skylake-x, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, armv8.2-generic, armv9-generic")
+
+if(TARGET_ARCH STREQUAL "native")
+  # Auto-detect: -mcpu=native on ARM, -march=native on x86
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    set(ARCH_FLAGS "-mcpu=native")
+  else()
+    set(ARCH_FLAGS "-march=native")
+  endif()
+# --- x86 profiles ---
+elseif(TARGET_ARCH STREQUAL "skylake-x")
+  set(ARCH_FLAGS "-march=skylake-avx512 -mtune=skylake-avx512")
+elseif(TARGET_ARCH STREQUAL "icelake")
+  set(ARCH_FLAGS "-march=icelake-server -mtune=icelake-server")
+elseif(TARGET_ARCH STREQUAL "sapphirerapids")
+  set(ARCH_FLAGS "-march=sapphirerapids -mtune=sapphirerapids")
+# --- ARM profiles ---
+elseif(TARGET_ARCH STREQUAL "neoverse-n1")
+  # AWS Graviton 2, Ampere eMAG2
+  set(ARCH_FLAGS "-mcpu=neoverse-n1 -march=armv8.2-a+simd+crypto")
+elseif(TARGET_ARCH STREQUAL "neoverse-v1")
+  # AWS Graviton 3
+  set(ARCH_FLAGS "-mcpu=neoverse-v1 -march=armv8.4-a+sve+crypto")
+elseif(TARGET_ARCH STREQUAL "neoverse-v2")
+  # AWS Graviton 4, Microsoft Cobalt 100
+  set(ARCH_FLAGS "-mcpu=neoverse-v2 -march=armv9-a+sve2+crypto")
+elseif(TARGET_ARCH STREQUAL "ampere-altra")
+  set(ARCH_FLAGS "-mcpu=neoverse-n1 -march=armv8.2-a+simd+crypto")
+elseif(TARGET_ARCH STREQUAL "armv8.2-generic")
+  set(ARCH_FLAGS "-march=armv8.2-a+simd+crypto")
+elseif(TARGET_ARCH STREQUAL "armv9-generic")
+  set(ARCH_FLAGS "-march=armv9-a+sve2+crypto")
 else()
-  set(ARCH_FLAGS "-march=native")
+  message(FATAL_ERROR "Unknown TARGET_ARCH: ${TARGET_ARCH}. See CMakeLists.txt for valid profiles.")
 endif()
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 ${ARCH_FLAGS} -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
+
+message(STATUS "TARGET_ARCH=${TARGET_ARCH}  =>  ARCH_FLAGS=${ARCH_FLAGS}")
+
+# Compiler-specific warning flags
+if(USE_CLANG)
+  # clang doesn't have -Wno-psabi (GCC-specific ABI warning)
+  set(WARN_FLAGS "-Wall -Wextra -Wno-unknown-pragmas")
+else()
+  set(WARN_FLAGS "-Wall -Wextra -Wno-psabi -Wno-unknown-pragmas")
+endif()
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 ${ARCH_FLAGS} -std=c++17 -fPIC ${WARN_FLAGS} -fno-omit-frame-pointer ")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -fPIC -Wall -Wextra -fno-omit-frame-pointer ${ARCH_FLAGS} -fdiagnostics-color ")
 
-
+# Debug sanitizer flags (compiler-specific)
 if(LINUX)
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address -static-libasan")
-  # set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ")
+  if(USE_CLANG)
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address -static-libsan")
+  else()
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address -static-libasan")
+  endif()
 else()
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -fsanitize=address")
-  # set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ")
 endif(LINUX)
 
 
@@ -153,6 +204,9 @@ IF(AUTOVECTORIZE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
 ELSE(AUTOVECTORIZE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
+  if(USE_CLANG)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-vectorize -fno-slp-vectorize")
+  endif()
 ENDIF(AUTOVECTORIZE)
 
 
