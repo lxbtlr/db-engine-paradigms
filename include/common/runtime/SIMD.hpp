@@ -157,7 +157,7 @@
     // Gather: i32 indices -> 64-bit values
     #ifndef _mm512_i32gather_epi64
     static inline simde__m512i _mm512_i32gather_epi64_polyfill(simde__m256i idxs, void const* base_addr, int scale) {
-        simde__m512i idxs64 = simde_mm512_cvtepi32_epi64(idxs);
+        simde__m512i idxs64 = _mm512_cvtepi32_epi64(idxs);
         switch (scale) {
             case 1: return simde_mm512_i64gather_epi64(idxs64, base_addr, 1);
             case 2: return simde_mm512_i64gather_epi64(idxs64, base_addr, 2);
