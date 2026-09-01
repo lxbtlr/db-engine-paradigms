@@ -19,9 +19,39 @@
 #ifdef __linux__
 #include <asm/unistd.h>
 #include <linux/perf_event.h>
+#if !defined(__aarch64__) && !defined(__arm__)
 extern "C" {
 #include "jevents.h"
 }
+#else
+// Stubs for ARM — jevents is x86-only
+inline char* get_cpu_str() {
+   static char buf[] = "ARM";
+   return buf;
+}
+inline int resolve_event(const char*, struct perf_event_attr*) { return -1; }
+#endif
+
+// ARM CPU part identification (from /proc/cpuinfo)
+#ifdef __aarch64__
+#include <fstream>
+inline std::string get_arm_part() {
+   std::ifstream cpuinfo("/proc/cpuinfo");
+   std::string line;
+   std::string implementer, part;
+   while (std::getline(cpuinfo, line)) {
+      if (line.find("CPU implementer") != std::string::npos) {
+         auto pos = line.find(':');
+         if (pos != std::string::npos) implementer = line.substr(pos + 2);
+      }
+      if (line.find("CPU part") != std::string::npos) {
+         auto pos = line.find(':');
+         if (pos != std::string::npos) { part = line.substr(pos + 2); break; }
+      }
+   }
+   return implementer + "-" + part;
+}
+#endif
 #endif
 
 #define GLOBAL 1
@@ -69,19 +99,58 @@ struct PerfEvents {
       }
 #ifdef __linux__
 #ifdef __aarch64__
-      // ARM64 (burrata, Cortex-A77) -- 7 raw counters (fits the hw limit)
+      {
+      // ARM CPU implementer-part pairs:
+      //   0x41-0xd49 = Cortex-A77 (Neoverse N1 family, e.g. Graviton 2)
+      //   0x41-0xd0c = Neoverse N1
+      //   0x41-0xd40 = Neoverse V1 (Graviton 3)
+      //   0x41-0xd4f = Neoverse V2 (Graviton 4)
+      //   0xc0-0xac3 = Ampere Altra (ARMv8.2)
+      std::string armPart = get_arm_part();
+
+      // Common counters available on all ARMv8+
       add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
-      add("LLC-misses", "arm_dsu_0/l3d_cache_refill/");
-      add("loads", PERF_TYPE_HW_CACHE,
-          PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
-              (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
-      add("stores", PERF_TYPE_HW_CACHE,
-          PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_WRITE << 8) |
-              (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
       add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
-      add("mem_stall", PERF_TYPE_HARDWARE,
-          PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
-      add("all_rd", "arm_dmc620_10008c000/clk_request/");
+      add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+
+      if (armPart == "0x41-0xd49" || armPart == "0x41-0xd0c") {
+         // Cortex-A77 / Neoverse N1 (Graviton 2)
+         add("LLC-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("l1-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("mem_stall", PERF_TYPE_HARDWARE,
+             PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
+      } else if (armPart == "0x41-0xd40" || armPart == "0x41-0xd4f") {
+         // Neoverse V1/V2 (Graviton 3/4)
+         add("LLC-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("l1-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("mem_stall", PERF_TYPE_HARDWARE,
+             PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
+      } else if (armPart == "0xc0-0xac3") {
+         // Ampere Altra
+         add("LLC-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("l1-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+      } else {
+         // Unknown ARM — generic fallback
+         add("LLC-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_LL | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("l1-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+      }
+      }
 #else
       char* cpustr = get_cpu_str();
       std::string cpu(cpustr);

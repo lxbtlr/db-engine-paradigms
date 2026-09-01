@@ -202,12 +202,12 @@ find_package(TBB)
 include_directories(${TBB_INCLUDE_DIRS})
 
 
-IF(LINUX)
+IF(LINUX AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
   add_subdirectory(3rdparty/jevents)
   set(JEVENTSLIB "jevents")
-ELSE(LINUX)
+ELSE()
   set(JEVENTSLIB "")
-ENDIF(LINUX)
+ENDIF()
 
 # tcmalloc from gperftools (built out-of-tree to avoid target name collisions)
 IF(USE_TCMALLOC)
