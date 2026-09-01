@@ -1,6 +1,9 @@
 #pragma once
 #include <algorithm>
-#include <immintrin.h>
+#ifndef SIMDE_ENABLE_NATIVE_ALIASES
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#endif
+#include <simde/x86/avx512.h>
 #include <iostream>
 #include <ostream>
 #include <vector>

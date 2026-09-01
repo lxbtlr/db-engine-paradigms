@@ -55,8 +55,14 @@ endif (VW_USE_CRC32)
 # add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
 
 # Compiler flags for the different targets
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -fPIC -Wall -Wextra -fno-omit-frame-pointer -march=native -fdiagnostics-color ")
+# Architecture-specific march/mcpu flags
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  set(ARCH_FLAGS "-mcpu=native")
+else()
+  set(ARCH_FLAGS "-march=native")
+endif()
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 ${ARCH_FLAGS} -std=c++17 -fPIC -Wall -Wextra -Wno-psabi -fno-omit-frame-pointer -Wno-unknown-pragmas ")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -fPIC -Wall -Wextra -fno-omit-frame-pointer ${ARCH_FLAGS} -fdiagnostics-color ")
 
 
 if(LINUX)
@@ -281,8 +287,8 @@ target_include_directories(vectorwise PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-# Set architecture if AVX512 exerperiments are requested
-if(AVX512EXPERIMENTS)
+# Set architecture if AVX512 experiments are requested (x86 only)
+if(AVX512EXPERIMENTS AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
   SET_TARGET_PROPERTIES(vectorwise PROPERTIES
     COMPILE_FLAGS "-march=skylake-avx512"
   )
@@ -391,9 +397,15 @@ endif()
 
 
 if(AVX512EXPERIMENTS)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    set(AVX512_COMPILE_FLAGS "-mcpu=native")
+  else()
+    set(AVX512_COMPILE_FLAGS "-march=skylake-avx512")
+  endif()
+
   add_executable(simdJoin src/benchmarks/simdJoin.cpp)
   SET_TARGET_PROPERTIES(simdJoin PROPERTIES
-    COMPILE_FLAGS "-march=skylake-avx512"
+    COMPILE_FLAGS "${AVX512_COMPILE_FLAGS}"
     )
   target_include_directories(simdJoin PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -406,7 +418,7 @@ if(AVX512EXPERIMENTS)
     src/benchmarks/primitives/simdselection.cpp
     )
   SET_TARGET_PROPERTIES(run_simd PROPERTIES
-    COMPILE_FLAGS "-march=skylake-avx512"
+    COMPILE_FLAGS "${AVX512_COMPILE_FLAGS}"
     )
   target_include_directories(run_simd PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -418,7 +430,7 @@ if(AVX512EXPERIMENTS)
     src/benchmarks/primitives/joinmicrobench.cpp
     )
   SET_TARGET_PROPERTIES(run_join PROPERTIES
-    COMPILE_FLAGS "-march=skylake-avx512"
+    COMPILE_FLAGS "${AVX512_COMPILE_FLAGS}"
     )
   target_include_directories(run_join PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

@@ -12,6 +12,26 @@
 namespace vectorwise {
 namespace primitives {
 
+// Portable masked gather: AVX512VL on x86, AVX2+SIMDE fallback otherwise.
+// AVX512VL _mm256_mmask_i32gather_epi32 takes a scalar __mmask8.
+// AVX2 _mm256_mask_i32gather_epi32 takes a __m256i where each lane's high bit
+// controls the gather.  We expand the bitmask to a vector mask for the fallback.
+static inline __m256i gather_i32_masked(__m256i src, const void* base,
+                                        __m256i idx, unsigned mask) {
+#if defined(__AVX512VL__) && (defined(__x86_64__) || defined(__i386__))
+   return _mm256_mmask_i32gather_epi32(src, (__mmask8)mask, idx, base, 4);
+#else
+   // Expand each bit of mask into a 32-bit lane: bit set → 0xFFFFFFFF
+   __m256i bits = _mm256_set1_epi32(mask);
+   __m256i shift = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+   __m256i shifted = _mm256_srlv_epi32(bits, shift);
+   __m256i vmask = _mm256_slli_epi32(
+       _mm256_and_si256(shifted, _mm256_set1_epi32(1)), 31);
+   return _mm256_mask_i32gather_epi32(
+       src, static_cast<const int*>(base), idx, vmask, 4);
+#endif
+}
+
 //------------------------------------------------------------------------------
 //--- selection templates
 template <typename T, template <typename> class Op>
@@ -612,7 +632,7 @@ pos_t hash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
    for (uint64_t i = 0; i < n - rest; i += 8) {
       auto inSels = _mm256_loadu_si256((const __m256i*)(inSel + i));
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, all, inSels, input, 4));
+          gather_i32_masked(inSels, input, inSels, (unsigned)all));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       _mm512_mask_storeu_epi64(result + i, all, hashes);
@@ -622,7 +642,7 @@ pos_t hash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       auto inSels = _mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, remaining, inSels, input, 4));
+          gather_i32_masked(inSels, input, inSels, (unsigned)remaining));
       auto hashes = Op().hashKey(in, seeds);
       _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
@@ -663,7 +683,7 @@ pos_t rehash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       Vec8u seeds(result + i);
       auto inSels = _mm256_loadu_si256((const __m256i*)(inSel + i));
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, ~0, inSels, input, 4));
+          gather_i32_masked(inSels, input, inSels, (unsigned)~0));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       _mm512_mask_storeu_epi64(result + i, ~0, hashes); // ??
@@ -674,7 +694,7 @@ pos_t rehash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       auto inSels = _mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, remaining, inSels, input, 4));
+          gather_i32_masked(inSels, input, inSels, (unsigned)remaining));
       auto hashes = Op().hashKey(in, seeds);
       _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes); // ??
    }
