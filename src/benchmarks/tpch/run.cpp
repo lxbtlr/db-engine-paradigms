@@ -296,10 +296,22 @@ int main(int argc, char* argv[]) {
 
    for (size_t nrThreads : threadCounts) {
     tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
-    tbb::task_arena arena(static_cast<int>(nrThreads));
+
+    // Helper: run a hyper query inside a scoped TBB arena that is destroyed
+    // immediately after, so lingering TBB worker threads don't interfere with
+    // subsequent VW execution. Each invocation creates a fresh arena with its
+    // own pinning observer, ensuring correct thread affinity.
+    auto runHyper = [&](auto queryFn) {
+       tbb::task_arena arena(static_cast<int>(nrThreads));
 #ifndef HYPER_FLOAT
-    PinningObserver pinner(arena);
+       PinningObserver pinner(arena);
 #endif
+       arena.execute([&] {
+          auto result = queryFn();
+          escape(&result);
+       });
+       // arena + pinner destroyed here — TBB workers released
+    };
     fprintf(stderr, "--- threads: %zu ---\n", nrThreads);
     writeHeader = true;
 
@@ -307,10 +319,7 @@ int main(int argc, char* argv[]) {
       e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          arena.execute([&] {
-                             auto result = q1_hyper(tpch, nrThreads);
-                             escape(&result);
-                          });
+                          runHyper([&] { return q1_hyper(tpch, nrThreads); });
                        },
                        repetitions);
    if (q.count("1v"))
@@ -327,10 +336,7 @@ int main(int argc, char* argv[]) {
                        nrTuples(tpch, {"customer", "orders", "lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          arena.execute([&] {
-                             auto result = q3_hyper(tpch, nrThreads);
-                             escape(&result);
-                          });
+                          runHyper([&] { return q3_hyper(tpch, nrThreads); });
                        },
                        repetitions);
    if (q.count("3v"))
@@ -348,10 +354,7 @@ int main(int argc, char* argv[]) {
                                        "customer", "orders", "lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          arena.execute([&] {
-                             auto result = q5_hyper(tpch, nrThreads);
-                             escape(&result);
-                          });
+                          runHyper([&] { return q5_hyper(tpch, nrThreads); });
                        },
                        repetitions);
    if (q.count("5v"))
@@ -369,10 +372,7 @@ int main(int argc, char* argv[]) {
       e.timeAndProfile(label("q6 h ", nrThreads), tpch["lineitem"].nrTuples,
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          arena.execute([&] {
-                             auto result = q6_hyper(tpch, nrThreads);
-                             escape(&result);
-                          });
+                          runHyper([&] { return q6_hyper(tpch, nrThreads); });
                        },
                        repetitions);
    if (q.count("6v"))
@@ -390,10 +390,7 @@ int main(int argc, char* argv[]) {
                                        "lineitem", "orders"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          arena.execute([&] {
-                             auto result = q9_hyper(tpch, nrThreads);
-                             escape(&result);
-                          });
+                          runHyper([&] { return q9_hyper(tpch, nrThreads); });
                        },
                        repetitions);
    if (q.count("9v"))
@@ -413,10 +410,7 @@ int main(int argc, char* argv[]) {
           nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
           [&]() {
              if (clearCaches) clearOsCaches();
-             arena.execute([&] {
-                auto result = q18_hyper(tpch, nrThreads);
-                escape(&result);
-             });
+             runHyper([&] { return q18_hyper(tpch, nrThreads); });
           },
           repetitions);
    if (q.count("18v"))
