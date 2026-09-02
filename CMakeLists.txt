@@ -9,8 +9,8 @@ endif()
 OPTION(USE_CLANG "Use clang/clang++ instead of gcc/g++" OFF)
 
 if(USE_CLANG)
-  set(CMAKE_C_COMPILER clang)
-  set(CMAKE_CXX_COMPILER clang++)
+  set(CMAKE_C_COMPILER clang-18) # clang 18 is leagues better for arm
+  set(CMAKE_CXX_COMPILER clang++-18)
 else()
   set(CMAKE_C_COMPILER gcc)
   set(CMAKE_CXX_COMPILER g++)
