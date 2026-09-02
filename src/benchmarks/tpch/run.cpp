@@ -253,6 +253,12 @@ int main(int argc, char* argv[]) {
                     q.insert(aq);
             }
         }
+    } else if (!selectedEngine.empty()) {
+        // Run all queries for specified engine
+        for (auto& aq : allQueries) {
+            if (aq.back() == selectedEngine[0])
+                q.insert(aq);
+        }
     } else {
         // Default: Run everything
         q = allQueries;
@@ -295,22 +301,27 @@ int main(int argc, char* argv[]) {
     };
 
    for (size_t nrThreads : threadCounts) {
-    tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
 
-    // Helper: run a hyper query inside a scoped TBB arena that is destroyed
-    // immediately after, so lingering TBB worker threads don't interfere with
-    // subsequent VW execution. Each invocation creates a fresh arena with its
-    // own pinning observer, ensuring correct thread affinity.
+    // Helper: run a hyper query inside a scoped TBB arena + global_control.
+    // When the scope exits, the arena is destroyed and global_control is
+    // reduced to 1, which forces TBB to terminate its worker threads.
+    // This prevents lingering TBB threads from interfering with VW's
+    // pthread-pinned workers on the same cores.
     auto runHyper = [&](auto queryFn) {
-       tbb::task_arena arena(static_cast<int>(nrThreads));
+       {
+          tbb::global_control gc(tbb::global_control::max_allowed_parallelism, nrThreads);
+          tbb::task_arena arena(static_cast<int>(nrThreads));
 #ifndef HYPER_FLOAT
-       PinningObserver pinner(arena);
+          PinningObserver pinner(arena);
 #endif
-       arena.execute([&] {
-          auto result = queryFn();
-          escape(&result);
-       });
-       // arena + pinner destroyed here — TBB workers released
+          arena.execute([&] {
+             auto result = queryFn();
+             escape(&result);
+          });
+       }
+       // gc, arena, pinner all destroyed — TBB threads terminated
+       // Brief pause to let OS reclaim thread resources
+       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     };
     fprintf(stderr, "--- threads: %zu ---\n", nrThreads);
     writeHeader = true;
