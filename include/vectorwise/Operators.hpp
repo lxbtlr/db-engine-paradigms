@@ -163,20 +163,19 @@ class Scan : public Operator {
          size_t tupleBegin = 0;
          size_t tupleEnd = 0;
       };
-      std::vector<SliceState> slices;
+      std::unique_ptr<SliceState[]> slices;
       std::once_flag initFlag;
       size_t numThreads = 0;
 
       void init(size_t nrTuples, size_t nThreads) {
          std::call_once(initFlag, [&]() {
             numThreads = nThreads;
-            slices.resize(nThreads);
+            slices = std::make_unique<SliceState[]>(nThreads);
             size_t sliceSize = nrTuples / nThreads;
             size_t remainder = nrTuples % nThreads;
             size_t offset = 0;
             for (size_t i = 0; i < nThreads; ++i) {
                slices[i].tupleBegin = offset;
-               // Distribute remainder across first 'remainder' slices
                size_t thisSlice = sliceSize + (i < remainder ? 1 : 0);
                offset += thisSlice;
                slices[i].tupleEnd = offset;
