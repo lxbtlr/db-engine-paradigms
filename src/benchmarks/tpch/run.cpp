@@ -301,38 +301,10 @@ int main(int argc, char* argv[]) {
     };
 
    for (size_t nrThreads : threadCounts) {
-
-    // Helper: run a hyper query inside a scoped TBB arena + global_control.
-    // When the scope exits, the arena is destroyed and global_control is
-    // reduced to 1, which forces TBB to terminate its worker threads.
-    // This prevents lingering TBB threads from interfering with VW's
-    // pthread-pinned workers on the same cores.
-    auto runHyper = [&](auto queryFn) {
-       {
-          tbb::global_control gc(tbb::global_control::max_allowed_parallelism, nrThreads);
-          tbb::task_arena arena(static_cast<int>(nrThreads));
-#ifndef HYPER_FLOAT
-          PinningObserver pinner(arena);
-#endif
-          arena.execute([&] {
-             auto result = queryFn();
-             escape(&result);
-          });
-       }
-       // gc, arena, pinner all destroyed — TBB threads terminated
-       // Brief pause to let OS reclaim thread resources
-       std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    };
     fprintf(stderr, "--- threads: %zu ---\n", nrThreads);
     writeHeader = true;
 
-   if (q.count("1h"))
-      e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          runHyper([&] { return q1_hyper(tpch, nrThreads); });
-                       },
-                       repetitions);
+    // --- VW queries first (no TBB thread pool interference) ---
    if (q.count("1v"))
       e.timeAndProfile(label("q1 v ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
@@ -340,14 +312,6 @@ int main(int argc, char* argv[]) {
                           auto result =
                               q1_vectorwise(tpch, nrThreads, vectorSize);
                           escape(&result);
-                       },
-                       repetitions);
-   if (q.count("3h"))
-      e.timeAndProfile(label("q3 h ", nrThreads),
-                       nrTuples(tpch, {"customer", "orders", "lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          runHyper([&] { return q3_hyper(tpch, nrThreads); });
                        },
                        repetitions);
    if (q.count("3v"))
@@ -359,15 +323,6 @@ int main(int argc, char* argv[]) {
              escape(&result);
           },
           repetitions);
-   if (q.count("5h"))
-      e.timeAndProfile(label("q5 h ", nrThreads),
-                       nrTuples(tpch, {"supplier", "region", "nation",
-                                       "customer", "orders", "lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          runHyper([&] { return q5_hyper(tpch, nrThreads); });
-                       },
-                       repetitions);
    if (q.count("5v"))
       e.timeAndProfile(label("q5 v ", nrThreads),
                        nrTuples(tpch, {"supplier", "region", "nation",
@@ -379,13 +334,6 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
-   if (q.count("6h"))
-      e.timeAndProfile(label("q6 h ", nrThreads), tpch["lineitem"].nrTuples,
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          runHyper([&] { return q6_hyper(tpch, nrThreads); });
-                       },
-                       repetitions);
    if (q.count("6v"))
       e.timeAndProfile(label("q6 v ", nrThreads), tpch["lineitem"].nrTuples,
                        [&]() {
@@ -393,15 +341,6 @@ int main(int argc, char* argv[]) {
                           auto result =
                               q6_vectorwise(tpch, nrThreads, vectorSize);
                           escape(&result);
-                       },
-                       repetitions);
-   if (q.count("9h"))
-      e.timeAndProfile(label("q9 h ", nrThreads),
-                       nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
-                                       "lineitem", "orders"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          runHyper([&] { return q9_hyper(tpch, nrThreads); });
                        },
                        repetitions);
    if (q.count("9v"))
@@ -415,15 +354,6 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
-   if (q.count("18h"))
-      e.timeAndProfile(
-          label("q18 h", nrThreads),
-          nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
-          [&]() {
-             if (clearCaches) clearOsCaches();
-             runHyper([&] { return q18_hyper(tpch, nrThreads); });
-          },
-          repetitions);
    if (q.count("18v"))
       e.timeAndProfile(
           label("q18 v", nrThreads),
@@ -434,6 +364,84 @@ int main(int argc, char* argv[]) {
              escape(&result);
           },
           repetitions);
+
+    // --- Hyper queries after VW (TBB threads can't interfere) ---
+    {
+    tbb::global_control gc(tbb::global_control::max_allowed_parallelism, nrThreads);
+    tbb::task_arena arena(static_cast<int>(nrThreads));
+#ifndef HYPER_FLOAT
+    PinningObserver pinner(arena);
+#endif
+
+   if (q.count("1h"))
+      e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q1_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("3h"))
+      e.timeAndProfile(label("q3 h ", nrThreads),
+                       nrTuples(tpch, {"customer", "orders", "lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q3_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("5h"))
+      e.timeAndProfile(label("q5 h ", nrThreads),
+                       nrTuples(tpch, {"supplier", "region", "nation",
+                                       "customer", "orders", "lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q5_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("6h"))
+      e.timeAndProfile(label("q6 h ", nrThreads), tpch["lineitem"].nrTuples,
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q6_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("9h"))
+      e.timeAndProfile(label("q9 h ", nrThreads),
+                       nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
+                                       "lineitem", "orders"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q9_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("18h"))
+      e.timeAndProfile(
+          label("q18 h", nrThreads),
+          nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
+          [&]() {
+             if (clearCaches) clearOsCaches();
+             arena.execute([&] {
+                auto result = q18_hyper(tpch, nrThreads);
+                escape(&result);
+             });
+          },
+          repetitions);
+    } // TBB arena + global_control destroyed here
+
    } // end thread count loop
    return 0;
 }
