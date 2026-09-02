@@ -41,9 +41,13 @@ OPTION(HUGE_1GB_MALLOC_NUMA "Use 1GB huge pages for malloc_numa" OFF)
 OPTION(WARM_PAGES "Touch all relation pages before measurement to warm page tables" OFF)
 OPTION(INTERLEAVE_HT "Interleave hash table pages across NUMA nodes" OFF)
 OPTION(HYPER_FLOAT "Let TBB hyper-engine threads float (no pinning)" OFF)
+OPTION(SCAN_STATIC_PARTITION "Static per-thread slice partitioning in Scan::next()" OFF)
 
 IF(NUMA_ALLOC AND NUMA_SHARD)
   message(FATAL_ERROR "NUMA_ALLOC and NUMA_SHARD are mutually exclusive. Pick one.")
+ENDIF()
+IF(SCAN_STATIC_PARTITION AND NUMA_SHARD)
+  message(FATAL_ERROR "SCAN_STATIC_PARTITION and NUMA_SHARD are mutually exclusive. Pick one.")
 ENDIF()
 OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise" OFF)
 
@@ -192,6 +196,10 @@ ENDIF()
 
 IF(HYPER_FLOAT)
   ADD_DEFINITIONS(-DHYPER_FLOAT)
+ENDIF()
+
+IF(SCAN_STATIC_PARTITION)
+  ADD_DEFINITIONS(-DSCAN_STATIC_PARTITION)
 ENDIF()
 
 IF(NUMA_ALLOC OR NUMA_DEBUG OR NUMA_SHARD OR INTERLEAVE_HT)

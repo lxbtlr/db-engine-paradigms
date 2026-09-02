@@ -155,6 +155,36 @@ class Scan : public Operator {
       };
       std::array<NodeRange, runtime::NUM_NUMA_REGIONS> ranges;
    };
+#elif defined(SCAN_STATIC_PARTITION)
+   struct Shared : public SharedState {
+      struct alignas(64) SliceState {
+         std::atomic<size_t> pos{0};
+         std::atomic<bool> exhausted{false};
+         size_t tupleBegin = 0;
+         size_t tupleEnd = 0;
+      };
+      std::vector<SliceState> slices;
+      std::once_flag initFlag;
+      size_t numThreads = 0;
+
+      void init(size_t nrTuples, size_t nThreads) {
+         std::call_once(initFlag, [&]() {
+            numThreads = nThreads;
+            slices.resize(nThreads);
+            size_t sliceSize = nrTuples / nThreads;
+            size_t remainder = nrTuples % nThreads;
+            size_t offset = 0;
+            for (size_t i = 0; i < nThreads; ++i) {
+               slices[i].tupleBegin = offset;
+               // Distribute remainder across first 'remainder' slices
+               size_t thisSlice = sliceSize + (i < remainder ? 1 : 0);
+               offset += thisSlice;
+               slices[i].tupleEnd = offset;
+            }
+         });
+      }
+      Shared() = default;
+   };
 #else
    struct Shared : public SharedState {
       std::atomic<size_t> pos;
@@ -185,6 +215,16 @@ class Scan : public Operator {
    size_t homeNode;
    std::array<size_t, runtime::NUM_NUMA_REGIONS> stealOrder;
    size_t currentStealIdx;  // index into stealOrder for current node
+#elif defined(SCAN_STATIC_PARTITION)
+   struct PartConsumer {
+      void** location;   // pointer-to-pointer updated each batch
+      size_t elemSize;   // bytes per tuple element
+      size_t vecBytes;   // vecSize * elemSize
+      void* base;        // column base pointer for absolute positioning
+   };
+   std::vector<PartConsumer> consumers;
+   size_t homeSlice;
+   size_t currentStealIdx;
 #else
    std::vector<std::pair<void**, size_t>> consumers;
 #endif

@@ -56,7 +56,11 @@ Scan::Scan(Shared& s, size_t n, size_t v)
    if (vecSize < scanMorselSize) scanChunkSize = scanMorselSize / vecSize + 1;
    vecInChunk = scanChunkSize;
 
-#ifdef NUMA_SHARD
+#ifdef SCAN_STATIC_PARTITION
+   homeSlice = runtime::this_worker->worker_id;
+   currentStealIdx = 0;
+   shared.init(n, runtime::this_worker->group->size);
+#elif defined(NUMA_SHARD)
    // Compute steal order from this worker's identity
 #ifdef NUMA_DEBUG
    fprintf(stderr, "[SCAN_CTOR] this_worker=%p worker_id=%zu nrTuples=%zu vecSize=%zu\n",
@@ -144,6 +148,76 @@ size_t Scan::next() {
             *cons.location = static_cast<char*>(cons.shardBases[node]) +
                              localOffset * cons.elemSize;
          lastOffset = localOffset;
+         return nextBatchSize;
+      }
+   }
+
+   return EndOfStream;
+}
+#elif defined(SCAN_STATIC_PARTITION)
+void Scan::addConsumer(void** colPtr, size_t typeSize) {
+   PartConsumer c;
+   c.location = colPtr;
+   c.elemSize = typeSize;
+   c.vecBytes = vecSize * typeSize;
+   c.base = *colPtr; // capture column base pointer
+   consumers.push_back(c);
+}
+
+size_t Scan::next() {
+   size_t morselTuples = scanChunkSize * vecSize;
+   size_t numThreads = shared.numThreads;
+
+   // Try to continue within the current chunk (intra-chunk advance)
+   if (vecInChunk < scanChunkSize) {
+      size_t sliceIdx = (currentStealIdx == 0) ? homeSlice
+                        : ((homeSlice + currentStealIdx) % numThreads);
+      auto& slice = shared.slices[sliceIdx];
+      size_t sliceTuples = slice.tupleEnd - slice.tupleBegin;
+      size_t nextLocalOffset = currentChunk * morselTuples + vecInChunk * vecSize;
+      if (nextLocalOffset < sliceTuples) {
+         auto nextBatchSize = std::min(sliceTuples - nextLocalOffset, vecSize);
+         size_t absOffset = slice.tupleBegin + nextLocalOffset;
+         for (auto& cons : consumers)
+            *cons.location = static_cast<char*>(cons.base) +
+                             absOffset * cons.elemSize;
+         lastOffset = absOffset;
+         vecInChunk++;
+         return nextBatchSize;
+      }
+      // Chunk extends past slice end — fall through to get a new chunk
+      vecInChunk = scanChunkSize;
+   }
+
+   // Need a new chunk — try home slice first, then steal from others
+   for (; currentStealIdx < numThreads; ++currentStealIdx) {
+      size_t sliceIdx = (currentStealIdx == 0) ? homeSlice
+                        : ((homeSlice + currentStealIdx) % numThreads);
+      auto& slice = shared.slices[sliceIdx];
+
+      // Check exhausted flag before paying for fetch_add
+      if (slice.exhausted.load(std::memory_order_acquire)) continue;
+
+      size_t sliceTuples = slice.tupleEnd - slice.tupleBegin;
+      if (sliceTuples == 0) continue;
+
+      while (true) {
+         size_t chunk = slice.pos.fetch_add(1, std::memory_order_relaxed);
+         size_t localOffset = chunk * morselTuples;
+         if (localOffset >= sliceTuples) {
+            slice.exhausted.store(true, std::memory_order_release);
+            break;
+         }
+
+         currentChunk = chunk;
+         vecInChunk = 1;
+
+         size_t nextBatchSize = std::min(sliceTuples - localOffset, vecSize);
+         size_t absOffset = slice.tupleBegin + localOffset;
+         for (auto& cons : consumers)
+            *cons.location = static_cast<char*>(cons.base) +
+                             absOffset * cons.elemSize;
+         lastOffset = absOffset;
          return nextBatchSize;
       }
    }
