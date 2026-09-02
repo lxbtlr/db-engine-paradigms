@@ -378,6 +378,10 @@ class HashGroup : public UnaryOperator {
 
    template <typename T> class GroupLookup {
 
+#ifndef ORIGINAL_GROUPLOOKUP
+      /// Pass 1: prefetch + load chain heads into htMatches
+      void htProbe(pos_t n, decltype(ht) & ht);
+#endif
       /// Find entries in ht for groupHashes.
       /// Found entries are written to htMatches, missing entries
       /// are added to groupsNotFound
@@ -581,6 +585,7 @@ class LUTGroup : public UnaryOperator {
    virtual size_t next() override;
 };
 
+#ifdef ORIGINAL_GROUPLOOKUP
 template <typename T>
 pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
@@ -607,6 +612,50 @@ HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
    }
    return found;
 }
+#else
+template <typename T>
+void HashGroup::GroupLookup<T>::htProbe(pos_t n, runtime::Hashmap& ht) {
+   static constexpr pos_t PREFETCH_DIST = 16;
+
+   const pos_t primeEnd = std::min(n, PREFETCH_DIST);
+   for (pos_t j = 0; j < primeEnd; ++j) {
+      __builtin_prefetch(&ht.entries[self()->hashForTuple(j) & ht.mask], 0, 1);
+   }
+
+   for (pos_t i = 0; i < n; ++i) {
+      if (i + PREFETCH_DIST < n)
+         __builtin_prefetch(&ht.entries[self()->hashForTuple(i + PREFETCH_DIST) & ht.mask], 0, 1);
+      htMatches[i] = ht.find_chain(self()->hashForTuple(i));
+      groupsFound[i] = i;
+   }
+}
+
+template <typename T>
+pos_t INTERPRET_SEPARATE
+HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
+   pos_t found = 0;
+   for (pos_t i = 0; i < n; ++i) {
+      auto hash = self()->hashForTuple(i);
+      auto el = htMatches[i];
+      if (el != ht.end()) {
+         if (el->hash == hash) {
+            htMatches[i] = el;
+            groupsFound[found++] = i;
+            goto nextChain;
+         }
+         for (el = el->next; el != ht.end(); el = el->next)
+            if (el->hash == hash) {
+               htMatches[i] = el;
+               groupsFound[found++] = i;
+               goto nextChain;
+            }
+      }
+      groupsNotFound->push_back(i);
+   nextChain:;
+   }
+   return found;
+}
+#endif
 
 template <typename T>
 pos_t HashGroup::GroupLookup<T>::htFollow(runtime::Hashmap& ht)
@@ -635,6 +684,9 @@ pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    keysNEq->clear();
    groupsNotFound->clear();
+#ifndef ORIGINAL_GROUPLOOKUP
+   htProbe(n, ht);
+#endif
    auto found = htLookup(n, ht);
    auto keysEqual = keyEquality.evaluate(found);
    while (keysNEq->size()) {
