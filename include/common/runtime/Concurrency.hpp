@@ -17,9 +17,21 @@
 
 namespace runtime {
 
-constexpr size_t SOCKETS_COUNT = 4;
-constexpr size_t CORES_PER_SOCKET = 22;
-constexpr size_t SMT_PER_CORE = 2;
+// Topology constants — set via -DCFG_SOCKETS_COUNT etc. from CMake
+// (TARGET_MACHINE or manual cache variables).  Defaults for standalone builds.
+#ifndef CFG_SOCKETS_COUNT
+#define CFG_SOCKETS_COUNT 4
+#endif
+#ifndef CFG_CORES_PER_SOCKET
+#define CFG_CORES_PER_SOCKET 22
+#endif
+#ifndef CFG_SMT_PER_CORE
+#define CFG_SMT_PER_CORE 2
+#endif
+
+constexpr size_t SOCKETS_COUNT = CFG_SOCKETS_COUNT;
+constexpr size_t CORES_PER_SOCKET = CFG_CORES_PER_SOCKET;
+constexpr size_t SMT_PER_CORE = CFG_SMT_PER_CORE;
 constexpr size_t NUM_NUMA_REGIONS = SOCKETS_COUNT;
 
 inline size_t regionOf(size_t tid) {

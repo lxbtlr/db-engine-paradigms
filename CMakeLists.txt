@@ -34,6 +34,30 @@ OPTION(NUMA_ALLOC "Replicate base-table columns per NUMA region" OFF)
 OPTION(NUMA_SHARD "Shard base-table columns across NUMA regions" OFF)
 OPTION(THREAD_PIN_PACKED "Pack threads per socket (vs spread round-robin)" OFF)
 OPTION(NUMA_DEBUG "Enable NUMA allocation debug logging and placement verification" OFF)
+
+# ── Machine topology ─────────────────────────────────────────────────────
+# TARGET_MACHINE selects a preset for SOCKETS_COUNT, CORES_PER_SOCKET,
+# SMT_PER_CORE, and THREAD_PIN_PACKED.  Use "custom" to set them manually.
+set(TARGET_MACHINE "custom" CACHE STRING
+    "Machine topology preset: custom, dubliner")
+
+set(SOCKETS_COUNT 4 CACHE STRING "Number of sockets/chiplets/memory domains")
+set(CORES_PER_SOCKET 22 CACHE STRING "Physical cores per socket/chiplet")
+set(SMT_PER_CORE 2 CACHE STRING "Hardware threads per physical core")
+
+if(TARGET_MACHINE STREQUAL "dubliner")
+  # 4-socket Xeon, 22 cores/socket, 2-way SMT, interleaved CPU numbering
+  set(SOCKETS_COUNT 4)
+  set(CORES_PER_SOCKET 22)
+  set(SMT_PER_CORE 2)
+elseif(NOT TARGET_MACHINE STREQUAL "custom")
+  message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner")
+endif()
+
+ADD_DEFINITIONS(-DCFG_SOCKETS_COUNT=${SOCKETS_COUNT})
+ADD_DEFINITIONS(-DCFG_CORES_PER_SOCKET=${CORES_PER_SOCKET})
+ADD_DEFINITIONS(-DCFG_SMT_PER_CORE=${SMT_PER_CORE})
+message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T")
 OPTION(NO_HUGE_PAGES "Disable huge pages for malloc_huge" OFF)
 OPTION(HUGE_2MB_MALLOC_HUGE "Use 2MB hugetlb pages for malloc_huge" OFF)
 OPTION(HUGE_1GB_MALLOC_HUGE "Use 1GB huge pages for malloc_huge" OFF)
