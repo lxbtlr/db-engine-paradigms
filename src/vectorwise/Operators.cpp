@@ -2,12 +2,18 @@
 #include "common/Compat.hpp"
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/SIMD.hpp"
+#if defined(NUMA_DEBUG) && defined(NUMA_SHARD)
+#include <cstdio>
+#endif
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <tuple>
 #include <type_traits>
-#include <x86intrin.h>
+#ifndef SIMDE_ENABLE_NATIVE_ALIASES
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#endif
+#include <simde/x86/avx512.h>
 
 namespace vectorwise {
 
@@ -49,8 +55,176 @@ Scan::Scan(Shared& s, size_t n, size_t v)
    size_t scanMorselSize = 1024 * 10;
    if (vecSize < scanMorselSize) scanChunkSize = scanMorselSize / vecSize + 1;
    vecInChunk = scanChunkSize;
+
+#ifdef SCAN_STATIC_PARTITION
+   homeSlice = runtime::this_worker->worker_id;
+   currentStealIdx = 0;
+   shared.init(n, runtime::this_worker->group->size);
+#elif defined(NUMA_SHARD)
+   // Compute steal order from this worker's identity
+#ifdef NUMA_DEBUG
+   fprintf(stderr, "[SCAN_CTOR] this_worker=%p worker_id=%zu nrTuples=%zu vecSize=%zu\n",
+           (void*)runtime::this_worker,
+           runtime::this_worker ? runtime::this_worker->worker_id : 999999,
+           n, v);
+#endif
+   homeNode = runtime::regionOf(runtime::this_worker->worker_id);
+#ifdef NUMA_DEBUG
+   fprintf(stderr, "[SCAN_CTOR] homeNode=%zu\n", homeNode);
+#endif
+   constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+
+   // Intra-node rank: how many workers with lower worker_id map to the same node
+   size_t myId = runtime::this_worker->worker_id;
+   size_t rank = 0;
+#ifdef THREAD_PIN_PACKED
+   rank = myId % runtime::THREADS_PER_SOCKET;
+#else
+   rank = myId / runtime::SOCKETS_COUNT;
+#endif
+
+   // ring[k] = (home + 1 + ((rank + k) % (N-1))) % N
+   stealOrder[0] = homeNode;
+   for (size_t k = 0; k < N - 1; ++k)
+      stealOrder[k + 1] = (homeNode + 1 + ((rank + k) % (N - 1))) % N;
+   currentStealIdx = 0;
+#endif
 }
 
+#ifdef NUMA_SHARD
+void Scan::addConsumer(void** colPtr, size_t typeSize,
+                       std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases) {
+   Consumer c;
+   c.location = colPtr;
+   c.vecBytes = vecSize * typeSize;
+   c.elemSize = typeSize;
+   c.shardBases = shardBases;
+   consumers.push_back(c);
+}
+
+size_t Scan::next() {
+   constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+   size_t morselTuples = scanChunkSize * vecSize;
+
+   // Try to continue within current chunk (intra-chunk relative advance)
+   if (vecInChunk < scanChunkSize && currentStealIdx < N) {
+      size_t node = stealOrder[currentStealIdx];
+      size_t nodeTuples = shared.ranges[node].tupleEnd -
+                          shared.ranges[node].tupleBegin;
+      size_t nextLocalOffset = currentChunk * morselTuples + vecInChunk * vecSize;
+      if (nextLocalOffset < nodeTuples) {
+         auto nextBatchSize = std::min(nodeTuples - nextLocalOffset, vecSize);
+         for (auto& cons : consumers)
+            *cons.location =
+                (void*)(*(uint8_t**)cons.location + cons.vecBytes);
+         lastOffset = nextLocalOffset;
+         vecInChunk++;
+         return nextBatchSize;
+      }
+      // Chunk extends past shard end — fall through to get a new chunk
+      vecInChunk = scanChunkSize;
+   }
+
+   // Need a new chunk — try nodes in steal order
+   for (; currentStealIdx < N; ++currentStealIdx) {
+      size_t node = stealOrder[currentStealIdx];
+      size_t nodeTuples = shared.ranges[node].tupleEnd -
+                          shared.ranges[node].tupleBegin;
+      if (nodeTuples == 0) continue;
+
+      while (true) {
+         size_t chunk =
+             shared.nodePos[node].pos.fetch_add(1, std::memory_order_relaxed);
+         size_t localOffset = chunk * morselTuples;
+         if (localOffset >= nodeTuples) break;
+
+         currentChunk = chunk;
+         vecInChunk = 1;
+
+         size_t nextBatchSize =
+             std::min(nodeTuples - localOffset, vecSize);
+
+         for (auto& cons : consumers)
+            *cons.location = static_cast<char*>(cons.shardBases[node]) +
+                             localOffset * cons.elemSize;
+         lastOffset = localOffset;
+         return nextBatchSize;
+      }
+   }
+
+   return EndOfStream;
+}
+#elif defined(SCAN_STATIC_PARTITION)
+void Scan::addConsumer(void** colPtr, size_t typeSize) {
+   PartConsumer c;
+   c.location = colPtr;
+   c.elemSize = typeSize;
+   c.vecBytes = vecSize * typeSize;
+   c.base = *colPtr; // capture column base pointer
+   consumers.push_back(c);
+}
+
+size_t Scan::next() {
+   size_t morselTuples = scanChunkSize * vecSize;
+   size_t numThreads = shared.numThreads;
+
+   // Try to continue within the current chunk (intra-chunk advance)
+   if (vecInChunk < scanChunkSize) {
+      size_t sliceIdx = (currentStealIdx == 0) ? homeSlice
+                        : ((homeSlice + currentStealIdx) % numThreads);
+      auto& slice = shared.slices[sliceIdx];
+      size_t sliceTuples = slice.tupleEnd - slice.tupleBegin;
+      size_t nextLocalOffset = currentChunk * morselTuples + vecInChunk * vecSize;
+      if (nextLocalOffset < sliceTuples) {
+         auto nextBatchSize = std::min(sliceTuples - nextLocalOffset, vecSize);
+         size_t absOffset = slice.tupleBegin + nextLocalOffset;
+         for (auto& cons : consumers)
+            *cons.location = static_cast<char*>(cons.base) +
+                             absOffset * cons.elemSize;
+         lastOffset = absOffset;
+         vecInChunk++;
+         return nextBatchSize;
+      }
+      // Chunk extends past slice end — fall through to get a new chunk
+      vecInChunk = scanChunkSize;
+   }
+
+   // Need a new chunk — try home slice first, then steal from others
+   for (; currentStealIdx < numThreads; ++currentStealIdx) {
+      size_t sliceIdx = (currentStealIdx == 0) ? homeSlice
+                        : ((homeSlice + currentStealIdx) % numThreads);
+      auto& slice = shared.slices[sliceIdx];
+
+      // Check exhausted flag before paying for fetch_add
+      if (slice.exhausted.load(std::memory_order_acquire)) continue;
+
+      size_t sliceTuples = slice.tupleEnd - slice.tupleBegin;
+      if (sliceTuples == 0) continue;
+
+      while (true) {
+         size_t chunk = slice.pos.fetch_add(1, std::memory_order_relaxed);
+         size_t localOffset = chunk * morselTuples;
+         if (localOffset >= sliceTuples) {
+            slice.exhausted.store(true, std::memory_order_release);
+            break;
+         }
+
+         currentChunk = chunk;
+         vecInChunk = 1;
+
+         size_t nextBatchSize = std::min(sliceTuples - localOffset, vecSize);
+         size_t absOffset = slice.tupleBegin + localOffset;
+         for (auto& cons : consumers)
+            *cons.location = static_cast<char*>(cons.base) +
+                             absOffset * cons.elemSize;
+         lastOffset = absOffset;
+         return nextBatchSize;
+      }
+   }
+
+   return EndOfStream;
+}
+#else
 void Scan::addConsumer(void** colPtr, size_t typeSize) {
    consumers.emplace_back(colPtr, vecSize * typeSize);
 }
@@ -81,6 +255,7 @@ size_t Scan::next() {
    vecInChunk++;
    return nextBatchSize;
 }
+#endif
 
 ResultWriter::Input::Input(void* d, size_t size,
                            runtime::BlockRelation::Attribute attr)
@@ -829,14 +1004,13 @@ size_t HashGroup::next() {
    using header_t = decltype(ht)::EntryHeader;
    if (!cont.consumed) {
       /// ------ phase 1: local preaggregation
-      /// aggregate all incoming tuples into local hashtable
+      size_t groups = 0;
       auto& spill = shared.spillStorage.local();
       auto entry_size = preAggregation.ht_entry_size;
 
       auto flushAndClear = [&]() INTERPRET_SEPARATE {
          assert(offsetof(header_t, next) + sizeof(header_t::next) ==
                 offsetof(header_t, hash));
-         // flush ht entries into spillStorage
          for (auto& alloc : preAggregation.allocations) {
             for (auto entry = reinterpret_cast<header_t*>(alloc.first),
                       end = addBytes(entry, alloc.second * entry_size);
@@ -847,23 +1021,16 @@ size_t HashGroup::next() {
          preAggregation.clearHashtable(ht);
       };
 
-      if (packedKeys.size() != vecSize * totalKeySize) {
-         packedKeys.resize(vecSize * totalKeySize);
-      }
-
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         preAggregation.groupsNotFound->clear();
-
-         Concat(n);
-         Hash(n);
-         Lookup(n);
-
-         preAggregation.createMissingGroups(ht, false);
+         groupHash.evaluate(n);
+         preAggregation.findGroups(n, ht);
+         auto groupsCreated = preAggregation.createMissingGroups(ht, false);
          updateGroups.evaluate(n);
-         if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
+         groups += groupsCreated;
+         if (groups >= maxFill) flushAndClear();
       }
-      flushAndClear(); // flush remaining entries into spillStorage
-      barrier();       // Wait until all workers have finished phase 1
+      flushAndClear();
+      barrier();
 
       cont.consumed = true;
       cont.partition = shared.partition.fetch_add(1);
@@ -871,22 +1038,16 @@ size_t HashGroup::next() {
    }
 
    /// ------ phase 2: global aggregation
-   // get a partition
    for (; cont.partition < nrPartitions;) {
       if (cont.partitionNeedsAggregation) {
          auto partNr = cont.partition;
-         // for all thread local partitions
          for (auto& threadPartitions : shared.spillStorage.threadData) {
-            // aggregate data from thread local partition
             auto& partition = threadPartitions.second.getPartitions()[partNr];
             for (auto chunk = partition.first; chunk; chunk = chunk->next) {
                auto elementSize = threadPartitions.second.entrySize;
                auto nPart = partition.size(chunk, elementSize);
                for (size_t n = std::min(nPart, vecSize), pos = 0; n;
                     nPart -= n, pos += n, n = std::min(nPart, vecSize)) {
-
-                  // communicate data position of current chunk to primitives
-                  // for group lookup and creation
                   auto data = addBytes(chunk->data<void>(), pos * elementSize);
                   globalAggregation.rowData = data;
                   findGroupsFromPartition(data, n);
@@ -901,12 +1062,8 @@ size_t HashGroup::next() {
          cont.partitionNeedsAggregation = false;
          cont.iter = globalAggregation.allocations.begin();
       }
-      // send aggregation result to parent operator
-      // TODO: refill result instead of sending all allocations separately
       if (cont.iter != globalAggregation.allocations.end()) {
          auto& block = *cont.iter;
-         // write current block start to htMatches so the the gather primitives
-         // can read the offset from there
          *globalAggregation.htMatches =
              reinterpret_cast<header_t*>(block.first);
          auto n = block.second;
@@ -923,6 +1080,117 @@ size_t HashGroup::next() {
       }
    }
    return EndOfStream;
+}
+
+// ---------------------------------------------------------------------------
+// LUTGroup: direct-index aggregation for small dense keyspaces
+// ---------------------------------------------------------------------------
+LUTGroup::LUTGroup(Shared& s) : shared(s) {}
+
+size_t LUTGroup::next() {
+   if (!cont.consumed) {
+      // Phase 1: consume all input, aggregate into thread-local LUT
+      //
+      // Transposed layout: one contiguous LUT_SIZE array per value.
+      // accum[v][key] — each value's accumulators are contiguous so
+      // the inner loop is just base_ptr[key] += val, no multiply.
+      localAccumStorage.resize(LUT_SIZE * nValues, 0);
+      localAccum.resize(nValues);
+      for (size_t v = 0; v < nValues; ++v)
+         localAccum[v] = localAccumStorage.data() + v * LUT_SIZE;
+      localOccupied.resize(LUT_SIZE, false);
+
+      // Pre-resolve column pointers so the hot loop has no indirection
+      // through valueSpecs (which is a deque with pointer chasing).
+      struct ResolvedVal {
+         int64_t* acc;
+         int64_t* col;
+         bool hasSel;
+         bool isCount;
+      };
+      auto resolved = std::vector<ResolvedVal>(nValues);
+      for (size_t v = 0; v < nValues; ++v) {
+         resolved[v].acc = localAccum[v];
+         resolved[v].col = reinterpret_cast<int64_t*>(valueSpecs[v].colData);
+         resolved[v].hasSel = valueSpecs[v].hasSel;
+         resolved[v].isCount = valueSpecs[v].isCount;
+      }
+
+      for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
+         // Separate tight loops per value — no branches in inner loop.
+         // Each loop reads packedKeys once (stays in L1) and touches
+         // only its own accumulator array (4 hot cache lines).
+         for (size_t v = 0; v < nValues; ++v) {
+            auto* acc = resolved[v].acc;
+            if (resolved[v].isCount) {
+               for (pos_t i = 0; i < n; ++i)
+                  acc[packedKeys[i]] += 1;
+            } else if (resolved[v].hasSel) {
+               auto* col = resolved[v].col;
+               for (pos_t i = 0; i < n; ++i)
+                  acc[packedKeys[i]] += col[selVec[i]];
+            } else {
+               auto* col = resolved[v].col;
+               for (pos_t i = 0; i < n; ++i)
+                  acc[packedKeys[i]] += col[i];
+            }
+         }
+         for (pos_t i = 0; i < n; ++i)
+            localOccupied[packedKeys[i]] = true;
+      }
+
+      // Merge thread-local into global
+      {
+         std::lock_guard<std::mutex> lock(shared.mergeMutex);
+         if (!shared.globalInitialized) {
+            shared.nValues = nValues;
+            shared.globalAccum.resize(nValues);
+            for (size_t v = 0; v < nValues; ++v)
+               shared.globalAccum[v].resize(LUT_SIZE, 0);
+            shared.globalOccupied.resize(LUT_SIZE, false);
+            shared.globalInitialized = true;
+         }
+         for (size_t v = 0; v < nValues; ++v) {
+            auto* src = localAccum[v];
+            auto* dst = shared.globalAccum[v].data();
+            for (size_t k = 0; k < LUT_SIZE; ++k)
+               dst[k] += src[k];
+         }
+         for (size_t k = 0; k < LUT_SIZE; ++k) {
+            if (localOccupied[k])
+               shared.globalOccupied[k] = true;
+         }
+      }
+      localAccumStorage.clear();
+      localAccum.clear();
+      localOccupied.clear();
+
+      runtime::barrier();
+      cont.consumed = true;
+      cont.lutPos = 0;
+      // Only one thread produces output
+      if (shared.producerClaimed.fetch_add(1) != 0)
+         return EndOfStream;
+   }
+
+   // Phase 2: produce result vectors from global LUT
+   auto* retOut = reinterpret_cast<types::Char<1>*>(outReturnflag);
+   auto* statOut = reinterpret_cast<types::Char<1>*>(outLinestatus);
+
+   pos_t produced = 0;
+   for (; cont.lutPos < LUT_SIZE && produced < vecSize; ++cont.lutPos) {
+      if (!shared.globalOccupied[cont.lutPos]) continue;
+      uint16_t key = cont.lutPos;
+      retOut[produced].value = static_cast<char>(key & 0xFF);
+      statOut[produced].value = static_cast<char>((key >> 8) & 0xFF);
+      for (size_t v = 0; v < nValues; ++v) {
+         auto* dst = reinterpret_cast<int64_t*>(outValues[v]);
+         dst[produced] = shared.globalAccum[v][cont.lutPos];
+      }
+      ++produced;
+   }
+   if (produced == 0) return EndOfStream;
+   return produced;
 }
 
 // CONCAT
@@ -954,6 +1222,97 @@ template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
          std::memcpy(dest + i * keySize, src + i * colSize, colSize);
       }
    }
+}
+
+// ---------------------------------------------------------------------------
+// OptHashGroup — Concat/Hash/Lookup key-packing path
+// ---------------------------------------------------------------------------
+size_t OptHashGroup::next() {
+   using header_t = decltype(ht)::EntryHeader;
+   if (!cont.consumed) {
+      /// ------ phase 1: local preaggregation
+      auto& spill = shared.spillStorage.local();
+      auto entry_size = preAggregation.ht_entry_size;
+
+      auto flushAndClear = [&]() INTERPRET_SEPARATE {
+         assert(offsetof(header_t, next) + sizeof(header_t::next) ==
+                offsetof(header_t, hash));
+         for (auto& alloc : preAggregation.allocations) {
+            for (auto entry = reinterpret_cast<header_t*>(alloc.first),
+                      end = addBytes(entry, alloc.second * entry_size);
+                 entry < end; entry = addBytes(entry, entry_size))
+               spill.push_back(&entry->hash, entry->hash);
+         }
+         preAggregation.allocations.clear();
+         preAggregation.clearHashtable(ht);
+      };
+
+      if (packedKeys.size() != vecSize * totalKeySize) {
+         packedKeys.resize(vecSize * totalKeySize);
+      }
+
+      for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
+         preAggregation.groupsNotFound->clear();
+
+         Concat(n);
+         Hash(n);
+         Lookup(n);
+
+         preAggregation.createMissingGroups(ht, false);
+         updateGroups.evaluate(n);
+         if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
+      }
+      flushAndClear();
+      barrier();
+
+      cont.consumed = true;
+      cont.partition = shared.partition.fetch_add(1);
+      cont.partitionNeedsAggregation = true;
+   }
+
+   /// ------ phase 2: global aggregation
+   for (; cont.partition < nrPartitions;) {
+      if (cont.partitionNeedsAggregation) {
+         auto partNr = cont.partition;
+         for (auto& threadPartitions : shared.spillStorage.threadData) {
+            auto& partition = threadPartitions.second.getPartitions()[partNr];
+            for (auto chunk = partition.first; chunk; chunk = chunk->next) {
+               auto elementSize = threadPartitions.second.entrySize;
+               auto nPart = partition.size(chunk, elementSize);
+               for (size_t n = std::min(nPart, vecSize), pos = 0; n;
+                    nPart -= n, pos += n, n = std::min(nPart, vecSize)) {
+                  auto data = addBytes(chunk->data<void>(), pos * elementSize);
+                  globalAggregation.rowData = data;
+                  findGroupsFromPartition(data, n);
+                  auto cGroups = [&]() INTERPRET_SEPARATE {
+                     globalAggregation.createMissingGroups(ht, true);
+                  };
+                  cGroups();
+                  updateGroupsFromPartition.evaluate(n);
+               }
+            }
+         }
+         cont.partitionNeedsAggregation = false;
+         cont.iter = globalAggregation.allocations.begin();
+      }
+      if (cont.iter != globalAggregation.allocations.end()) {
+         auto& block = *cont.iter;
+         *globalAggregation.htMatches =
+             reinterpret_cast<header_t*>(block.first);
+         auto n = block.second;
+         gatherGroups.evaluate(n);
+         cont.iter++;
+         return n;
+      } else {
+         auto htClear = [&]() INTERPRET_SEPARATE {
+            globalAggregation.clearHashtable(ht);
+         };
+         htClear();
+         cont.partitionNeedsAggregation = true;
+         cont.partition = shared.partition.fetch_add(1);
+      }
+   }
+   return EndOfStream;
 }
 
 // HASH

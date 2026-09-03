@@ -201,9 +201,15 @@ size_t inline Hashmap::setSize(size_t nrEntries) {
    if (((size_t)1 << exp) < nrEntries / loadFactor) exp++;
    capacity = ((size_t)1) << exp;
    mask = capacity - 1;
+#ifdef INTERLEAVE_HT
+   entries = static_cast<std::atomic<EntryHeader*>*>(
+       mem::malloc_huge_interleaved(capacity * sizeof(std::atomic<EntryHeader*>)));
+#else
    entries = static_cast<std::atomic<EntryHeader*>*>(
        mem::malloc_huge(capacity * sizeof(std::atomic<EntryHeader*>)));
-   //clear();
+#endif
+   mem::populate_pages(entries, capacity * sizeof(std::atomic<EntryHeader*>));
+   clear();
    return capacity * loadFactor;
 }
 

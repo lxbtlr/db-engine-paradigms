@@ -2,7 +2,14 @@
 #include "common/Compat.hpp"
 #include <cassert>
 #include <cstring>
+#if __has_include(<string_view>)
+#include <string_view>
+namespace std { namespace experimental { using string_view = std::string_view; } }
+#elif __has_include(<experimental/string_view>)
 #include <experimental/string_view>
+#else
+#error "No string_view implementation found. Requires C++17 or experimental TS."
+#endif
 #include <fcntl.h>
 #include <iostream>
 #include <stdexcept>

@@ -11,9 +11,36 @@
 
 #include "benchmarks/tpch/Queries.hpp"
 #include "common/runtime/Import.hpp"
+#include "common/runtime/Concurrency.hpp"
 #include "profile.hpp"
 #include "tbb/tbb.h"
 #include <tbb/global_control.h>
+#include <tbb/task_arena.h>
+#include <tbb/task_scheduler_observer.h>
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+#include "common/runtime/NumaAlloc.hpp"
+#endif
+
+#ifndef HYPER_FLOAT
+/// Pins each TBB worker thread to a CPU using the same policy as
+/// WorkerGroup::run (spread by default, packed with THREAD_PIN_PACKED).
+class PinningObserver : public tbb::task_scheduler_observer {
+public:
+   explicit PinningObserver(tbb::task_arena& arena)
+       : tbb::task_scheduler_observer(arena) {
+      observe(true);
+   }
+   void on_scheduler_entry(bool /*is_worker*/) override {
+      int slot = tbb::this_task_arena::current_thread_index();
+      if (slot < 0) return;
+      cpu_set_t cpuset;
+      CPU_ZERO(&cpuset);
+      CPU_SET(runtime::cpuOfThread(static_cast<size_t>(slot)), &cpuset);
+      pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+   }
+   ~PinningObserver() override { observe(false); }
+};
+#endif // !HYPER_FLOAT
 
 // NOTE: this was helpful for debuging, but breaks if we dont use the thread arg, disable for now
 // lets force this thing to use one thread
@@ -28,6 +55,7 @@ using namespace runtime;
 
 static void escape(void* p) { asm volatile("" : : "g"(p) : "memory"); }
 
+/*
 static void dumpQ1Result(const char* label, runtime::Query* query) {
    if (!query || !query->result) return;
    auto& rel = *query->result;
@@ -60,6 +88,7 @@ static void dumpQ1Result(const char* label, runtime::Query* query) {
    }
    fprintf(stderr, "=== END ===\n\n");
 }
+*/
 
 size_t nrTuples(Database& db, std::vector<std::string> tables) {
    size_t sum = 0;
@@ -87,26 +116,40 @@ int main(int argc, char* argv[]) {
     // Defaults
     int repetitions = 1;
     std::string tpchPath = "";
-    size_t nrThreads = std::thread::hardware_concurrency();
+    std::string threadArg = "";
     size_t vectorSize = 1024;
-    std::string selectedQuery = "";  // e.g., "1"
+    int settleSeconds = 10;
+    std::string selectedQuery = "";  // e.g., "1" or "1,3,6"
     std::string selectedEngine = ""; // e.g., "h" or "v"
 
     int opt;
-    // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize
-    while ((opt = getopt(argc, argv, "q:e:r:p:t:v:")) != -1) {
+    // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize, s: settle
+    while ((opt = getopt(argc, argv, "q:e:r:p:t:v:s:")) != -1) {
         switch (opt) {
             case 'q': selectedQuery = optarg; break;
             case 'e': selectedEngine = optarg; break;
             case 'r': repetitions = atoi(optarg); break;
             case 'p': tpchPath = optarg; break;
-            case 't': nrThreads = atoi(optarg); break;
+            case 't': threadArg = optarg; break;
             case 'v': vectorSize = atoi(optarg); break;
+            case 's': settleSeconds = atoi(optarg); break;
             default:
-                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize]\n";
+                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds]\n";
                 exit(1);
         }
     }
+
+    // Parse comma-separated thread counts (e.g. "1,4,12,44" or just "44")
+    std::vector<size_t> threadCounts;
+    if (!threadArg.empty()) {
+        std::istringstream ts(threadArg);
+        std::string tok;
+        while (std::getline(ts, tok, ',')) {
+            if (!tok.empty()) threadCounts.push_back(std::atoi(tok.c_str()));
+        }
+    }
+    if (threadCounts.empty())
+        threadCounts.push_back(std::thread::hardware_concurrency());
 
     if (tpchPath.empty()) {
         std::cerr << "Error: Path to TPC-H directory (-p) is required.\n";
@@ -114,26 +157,127 @@ int main(int argc, char* argv[]) {
     }
     importTPCH(tpchPath, tpch);
 
+#ifdef NUMA_ALLOC
+    runtime::assertTopology();
+    runtime::numaReplicateRelation(tpch["lineitem"]);
+    fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
+            runtime::NUM_NUMA_REGIONS);
+#endif
+
+#ifdef NUMA_SHARD
+    runtime::assertTopology();
+    runtime::numaShardRelation(tpch["lineitem"]);
+    fprintf(stderr, "NUMA sharding: lineitem sharded across %zu regions\n",
+            runtime::NUM_NUMA_REGIONS);
+    for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
+       auto& s = tpch["lineitem"].numaShards[r];
+       fprintf(stderr, "  shard %zu: tuples [%zu, %zu)\n",
+               r, s.tupleBegin, s.tupleEnd);
+    }
+#endif
+
+#ifdef WARM_PAGES
+    // Touch every page of every relation to warm page tables and TLB caches.
+    // Equalizes page-walk costs across configs (sharding/replication does this
+    // implicitly via memcpy; baseline does not).
+    {
+        volatile char sink = 0;
+        const char* tables[] = {"lineitem", "orders", "customer", "part",
+                                "supplier", "partsupp", "nation", "region"};
+        for (auto& name : tables) {
+            if (!tpch.hasRelation(name)) continue;
+            auto& rel = tpch[name];
+            for (auto& attrKv : rel.attributes) {
+                auto& attr = attrKv.second;
+                const char* p = static_cast<const char*>(attr.data());
+                size_t bytes = rel.nrTuples * attr.type->rt_size();
+                for (size_t off = 0; off < bytes; off += 4096)
+                    sink += p[off];
+            }
+        }
+        fprintf(stderr, "Page warmup complete.\n");
+    }
+#endif
+
+    // Settle: let THP compaction / khugepaged finish before measurement
+    if (settleSeconds > 0) {
+        fprintf(stderr, "Settling for %d seconds...\n", settleSeconds);
+        std::this_thread::sleep_for(std::chrono::seconds(settleSeconds));
+        fprintf(stderr, "Done settling.\n");
+    }
+
+#if defined(NUMA_DEBUG) && (defined(NUMA_ALLOC) || defined(NUMA_SHARD))
+    fprintf(stderr, "--- NUMA placement verification ---\n");
+    runtime::verifyNumaPlacement(tpch["lineitem"]);
+    fprintf(stderr, "--- end verification ---\n");
+#endif
+
     // Now, filter the master query set
-    std::unordered_set<std::string> allQueries = {"1h", "1v", "3h", "3v", "5h", "5v", "6h", "6v" ,"18h", "18v", "9h", "9v"};
+    std::unordered_set<std::string> allQueries = {"1h", "1v", "3h", "3v", "5h", "5v", "6h", "6v", "18h", "18v", "9h", "9v"};
     std::unordered_set<std::string> q;
 
-    if (!selectedQuery.empty() && !selectedEngine.empty()) {
-        // Run specific pair, e.g., "1" + "h" -> "1h"
-        std::string target = selectedQuery + selectedEngine;
-        if (allQueries.count(target)) q.insert(target);
-    } else if (!selectedQuery.empty()) {
-        // Run all engines for one query, e.g., "1h" and "1v"
-        if (allQueries.count(selectedQuery + "h")) q.insert(selectedQuery + "h");
-        if (allQueries.count(selectedQuery + "v")) q.insert(selectedQuery + "v");
+    // Parse comma-separated query list (e.g. "1,3,6" or just "1")
+    std::vector<std::string> queryNumbers;
+    if (!selectedQuery.empty()) {
+        std::istringstream ss(selectedQuery);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            if (!token.empty()) queryNumbers.push_back(token);
+        }
+    }
+
+    // Extract the query number from a key like "18h" -> "18"
+    auto queryNum = [](const std::string& key) {
+        return key.substr(0, key.size() - 1);
+    };
+
+    if (!queryNumbers.empty() && !selectedEngine.empty()) {
+        // Run specific query+engine pairs
+        for (auto& qn : queryNumbers) {
+            std::string target = qn + selectedEngine;
+            if (allQueries.count(target)) q.insert(target);
+        }
+    } else if (!queryNumbers.empty()) {
+        // Run all engines for specified queries
+        for (auto& qn : queryNumbers) {
+            for (auto& aq : allQueries) {
+                if (queryNum(aq) == qn)
+                    q.insert(aq);
+            }
+        }
+    } else if (!selectedEngine.empty()) {
+        // Run all queries for specified engine
+        for (auto& aq : allQueries) {
+            if (aq.back() == selectedEngine[0])
+                q.insert(aq);
+        }
     } else {
         // Default: Run everything
         q = allQueries;
     }
 
     // Diagnostics
-    fprintf(stderr, "Engine: %s | Query: %s | Threads: %ld | VectorSize: %ld\n", 
-            selectedEngine.c_str(), selectedQuery.c_str(), nrThreads, vectorSize);
+    const char* numaMode = "baseline";
+#ifdef NUMA_ALLOC
+    numaMode = "NUMA_ALLOC";
+#endif
+#ifdef NUMA_SHARD
+    numaMode = "NUMA_SHARD";
+#endif
+    {
+        std::string tcStr;
+        for (size_t i = 0; i < threadCounts.size(); ++i) {
+            if (i > 0) tcStr += ",";
+            tcStr += std::to_string(threadCounts[i]);
+        }
+        fprintf(stderr, "Config: %s | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds"
+#ifdef NUMA_DEBUG
+                " | NUMA_DEBUG"
+#endif
+                "\n",
+                numaMode, selectedEngine.c_str(), selectedQuery.c_str(),
+                tcStr.c_str(), vectorSize, settleSeconds);
+    }
 
     if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
     if (auto v = std::getenv("SIMDjoin")) conf.useSimdJoin = atoi(v);
@@ -141,72 +285,38 @@ int main(int argc, char* argv[]) {
     if (auto v = std::getenv("SIMDproj")) conf.useSimdProj = atoi(v);
     if (auto v = std::getenv("clearCaches")) clearCaches = atoi(v);
 
-    tbb::global_control scheduler(tbb::global_control::max_allowed_parallelism, nrThreads);
+    // Helper to build query label with thread count suffix
+    auto label = [](const char* base, size_t t) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%s t%-3zu", base, t);
+        return std::string(buf);
+    };
 
-   if (q.count("1h")) {
-      e.timeAndProfile("q1 hyper     ", nrTuples(tpch, {"lineitem"}),
+   for (size_t nrThreads : threadCounts) {
+    fprintf(stderr, "--- threads: %zu ---\n", nrThreads);
+    writeHeader = true;
+
+    // --- VW queries first (no TBB thread pool interference) ---
+   if (q.count("1v"))
+      e.timeAndProfile(label("q1 v ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
-                          auto result = q1_hyper(tpch, nrThreads);
-                          escape(&result);
-                       },
-                       repetitions);
-      // Correctness dump
-      auto hResult = q1_hyper(tpch, nrThreads);
-      dumpQ1Result("hyper", hResult.get());
-   }
-   if (q.count("1v")) {
-      e.timeAndProfile("q1 vectorwise", nrTuples(tpch, {"lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-#ifdef VW_SPLIT_HASHGROUP
-                          auto result =
-                              q1_vectorwise_split(tpch, nrThreads, vectorSize);
-#else
                           auto result =
                               q1_vectorwise(tpch, nrThreads, vectorSize);
-#endif
-                          escape(&result);
-                       },
-                       repetitions);
-      // Correctness dump
-#ifdef VW_SPLIT_HASHGROUP
-      auto vResult = q1_vectorwise_split(tpch, nrThreads, vectorSize);
-#else
-      auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
-#endif
-// dumpQ1Result("vectorwise", vResult.get());
-   }
-   if (q.count("3h"))
-      e.timeAndProfile("q3 hyper     ",
-                       nrTuples(tpch, {"customer", "orders", "lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result = q3_hyper(tpch, nrThreads);
                           escape(&result);
                        },
                        repetitions);
    if (q.count("3v"))
       e.timeAndProfile(
-          "q3 vectorwise", nrTuples(tpch, {"customer", "orders", "lineitem"}),
+          label("q3 v ", nrThreads), nrTuples(tpch, {"customer", "orders", "lineitem"}),
           [&]() {
              if (clearCaches) clearOsCaches();
              auto result = q3_vectorwise(tpch, nrThreads, vectorSize);
              escape(&result);
           },
           repetitions);
-   if (q.count("5h"))
-      e.timeAndProfile("q5 hyper     ",
-                       nrTuples(tpch, {"supplier", "region", "nation",
-                                       "customer", "orders", "lineitem"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result = q5_hyper(tpch, nrThreads);
-                          escape(&result);
-                       },
-                       repetitions);
    if (q.count("5v"))
-      e.timeAndProfile("q5 vectorwise",
+      e.timeAndProfile(label("q5 v ", nrThreads),
                        nrTuples(tpch, {"supplier", "region", "nation",
                                        "customer", "orders", "lineitem"}),
                        [&]() {
@@ -216,16 +326,8 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
-   if (q.count("6h"))
-      e.timeAndProfile("q6 hyper     ", tpch["lineitem"].nrTuples,
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result = q6_hyper(tpch, nrThreads);
-                          escape(&result);
-                       },
-                       repetitions);
    if (q.count("6v"))
-      e.timeAndProfile("q6 vectorwise", tpch["lineitem"].nrTuples,
+      e.timeAndProfile(label("q6 v ", nrThreads), tpch["lineitem"].nrTuples,
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           auto result =
@@ -233,18 +335,8 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
-   if (q.count("9h"))
-      e.timeAndProfile("q9 hyper     ",
-                       nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
-                                       "lineitem", "orders"}),
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          auto result = q9_hyper(tpch, nrThreads);
-                          escape(&result);
-                       },
-                       repetitions);
    if (q.count("9v"))
-      e.timeAndProfile("q9 vectorwise",
+      e.timeAndProfile(label("q9 v ", nrThreads),
                        nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
                                        "lineitem", "orders"}),
                        [&]() {
@@ -254,19 +346,9 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
-   if (q.count("18h"))
-      e.timeAndProfile(
-          "q18 hyper     ",
-          nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
-          [&]() {
-             if (clearCaches) clearOsCaches();
-             auto result = q18_hyper(tpch, nrThreads);
-             escape(&result);
-          },
-          repetitions);
    if (q.count("18v"))
       e.timeAndProfile(
-          "q18 vectorwise",
+          label("q18 v", nrThreads),
           nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
           [&]() {
              if (clearCaches) clearOsCaches();
@@ -274,6 +356,85 @@ int main(int argc, char* argv[]) {
              escape(&result);
           },
           repetitions);
+
+    // --- Hyper queries after VW (TBB threads can't interfere) ---
+    {
+    tbb::global_control gc(tbb::global_control::max_allowed_parallelism, nrThreads);
+    tbb::task_arena arena(static_cast<int>(nrThreads));
+#ifndef HYPER_FLOAT
+    PinningObserver pinner(arena);
+#endif
+
+   if (q.count("1h"))
+      e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q1_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("3h"))
+      e.timeAndProfile(label("q3 h ", nrThreads),
+                       nrTuples(tpch, {"customer", "orders", "lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q3_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("5h"))
+      e.timeAndProfile(label("q5 h ", nrThreads),
+                       nrTuples(tpch, {"supplier", "region", "nation",
+                                       "customer", "orders", "lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q5_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("6h"))
+      e.timeAndProfile(label("q6 h ", nrThreads), tpch["lineitem"].nrTuples,
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q6_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("9h"))
+      e.timeAndProfile(label("q9 h ", nrThreads),
+                       nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
+                                       "lineitem", "orders"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q9_hyper(tpch, nrThreads);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   if (q.count("18h"))
+      e.timeAndProfile(
+          label("q18 h", nrThreads),
+          nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
+          [&]() {
+             if (clearCaches) clearOsCaches();
+             arena.execute([&] {
+                auto result = q18_hyper(tpch, nrThreads);
+                escape(&result);
+             });
+          },
+          repetitions);
+    } // TBB arena + global_control destroyed here
+
+   } // end thread count loop
    return 0;
 }
 
