@@ -65,8 +65,11 @@ BUILD_TYPES = ["Release", "RelWithDebInfo", "Debug"]
 # Each entry: (SOCKETS_COUNT, CORES_PER_SOCKET, SMT_PER_CORE, THREAD_PIN_PACKED)
 
 MACHINE_PRESETS = {
-    "custom":   None,  # user sets values manually
-    "dubliner": (4, 22, 2, False),  # 4-socket Xeon, interleaved CPU numbering
+    "custom":    None,  # user sets values manually
+    "dubliner":  (4, 22, 2, False),   # 4-socket Xeon, interleaved CPU numbering
+    "roquefort": (1, 24, 2, False),   # 1-socket AMD EPYC 7443P (Zen3)
+    "manchego":  (2, 8, 2, False),    # 2-socket Xeon Silver 4509Y (SPR), interleaved
+    "burrata":   (1, 128, 1, False),  # 1-socket ARM Neoverse-N1
 }
 
 # ── Preset configurations ─────────────────────────────────────────────────

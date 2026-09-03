@@ -39,7 +39,7 @@ OPTION(NUMA_DEBUG "Enable NUMA allocation debug logging and placement verificati
 # TARGET_MACHINE selects a preset for SOCKETS_COUNT, CORES_PER_SOCKET,
 # SMT_PER_CORE, and THREAD_PIN_PACKED.  Use "custom" to set them manually.
 set(TARGET_MACHINE "custom" CACHE STRING
-    "Machine topology preset: custom, dubliner")
+    "Machine topology preset: custom, dubliner, roquefort, manchego, burrata")
 
 set(SOCKETS_COUNT 4 CACHE STRING "Number of sockets/chiplets/memory domains")
 set(CORES_PER_SOCKET 22 CACHE STRING "Physical cores per socket/chiplet")
@@ -50,8 +50,24 @@ if(TARGET_MACHINE STREQUAL "dubliner")
   set(SOCKETS_COUNT 4)
   set(CORES_PER_SOCKET 22)
   set(SMT_PER_CORE 2)
+elseif(TARGET_MACHINE STREQUAL "roquefort")
+  # 1-socket AMD EPYC 7443P (Zen3), 24 cores, 2-way SMT, 1 NUMA node
+  set(SOCKETS_COUNT 1)
+  set(CORES_PER_SOCKET 24)
+  set(SMT_PER_CORE 2)
+elseif(TARGET_MACHINE STREQUAL "manchego")
+  # 2-socket Intel Xeon Silver 4509Y (Sapphire Rapids), 8 cores/socket,
+  # 2-way SMT, interleaved CPU numbering (even=node0, odd=node1)
+  set(SOCKETS_COUNT 2)
+  set(CORES_PER_SOCKET 8)
+  set(SMT_PER_CORE 2)
+elseif(TARGET_MACHINE STREQUAL "burrata")
+  # 1-socket ARM Neoverse-N1, 128 cores, no SMT, 1 NUMA node
+  set(SOCKETS_COUNT 1)
+  set(CORES_PER_SOCKET 128)
+  set(SMT_PER_CORE 1)
 elseif(NOT TARGET_MACHINE STREQUAL "custom")
-  message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner")
+  message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner, roquefort, manchego, burrata")
 endif()
 
 ADD_DEFINITIONS(-DCFG_SOCKETS_COUNT=${SOCKETS_COUNT})
