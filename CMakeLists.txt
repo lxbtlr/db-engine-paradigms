@@ -68,14 +68,14 @@ elseif(TARGET_MACHINE STREQUAL "burrata")
   set(CORES_PER_SOCKET 128)
   set(SMT_PER_CORE 1)
 elseif(TARGET_MACHINE STREQUAL "kafir")
-  # 8-node, 24 cores/node, 2-way SMT, contiguous CPU numbering
+  # 8-node Skylake-SP, 24 cores/node, 2-way SMT, contiguous CPU numbering
   set(SOCKETS_COUNT 8)
   set(CORES_PER_SOCKET 24)
   set(SMT_PER_CORE 2)
   set(CPU_LAYOUT_CONTIGUOUS ON)
+  set(TARGET_ARCH "skylake-x")
 elseif(NOT TARGET_MACHINE STREQUAL "custom")
-  message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner, roquefort, manchego, burrata")
-  set(CPU_LAYOUT_CONTIGUOUS OFF)
+  message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner, roquefort, manchego, burrata, kafir")
 endif()
 
 IF(CPU_LAYOUT_CONTIGUOUS)
