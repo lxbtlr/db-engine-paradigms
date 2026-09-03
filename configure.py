@@ -62,19 +62,20 @@ TARGET_ARCH_CHOICES = [
 BUILD_TYPES = ["Release", "RelWithDebInfo", "Debug"]
 
 # ── Machine topology presets ──────────────────────────────────────────────
-# Each entry: (SOCKETS_COUNT, CORES_PER_SOCKET, SMT_PER_CORE, THREAD_PIN_PACKED)
+# Each entry: (SOCKETS_COUNT, CORES_PER_SOCKET, SMT_PER_CORE, CPU_LAYOUT_CONTIGUOUS)
 
 MACHINE_PRESETS = {
-    "custom":    None,  # user sets values manually
     "dubliner":  (4, 22, 2, False),   # 4-socket Xeon, interleaved CPU numbering
     "roquefort": (1, 24, 2, False),   # 1-socket AMD EPYC 7443P (Zen3)
     "manchego":  (2, 8, 2, False),    # 2-socket Xeon Silver 4509Y (SPR), interleaved
     "burrata":   (1, 128, 1, False),  # 1-socket ARM Neoverse-N1
+    "kafir":    (8, 24, 2, True),   # 8-node, contiguous CPU numbering
+    "custom":   None,  # user sets values manually
 }
 
 # ── Preset configurations ─────────────────────────────────────────────────
 
-PRESETS = {
+PRESETS = { # untested
     "ARM baseline": {
         "USE_CLANG": True,
         "TARGET_ARCH": "neoverse-n1",
@@ -139,6 +140,7 @@ def configure():
     opts["SOCKETS_COUNT"] = "4"
     opts["CORES_PER_SOCKET"] = "22"
     opts["SMT_PER_CORE"] = "2"
+    opts["CPU_LAYOUT_CONTIGUOUS"] = False
     opts["BUILD_TYPE"] = "Release"
     opts["DATADIR"] = ""
     opts["BUILD_DIR"] = "build"
@@ -184,7 +186,7 @@ def configure():
             opts["SOCKETS_COUNT"] = str(mp[0])
             opts["CORES_PER_SOCKET"] = str(mp[1])
             opts["SMT_PER_CORE"] = str(mp[2])
-            opts["THREAD_PIN_PACKED"] = mp[3]
+            opts["CPU_LAYOUT_CONTIGUOUS"] = mp[3]
         else:
             opts["SOCKETS_COUNT"] = questionary.text(
                 "Sockets / chiplets / memory domains:", default=opts["SOCKETS_COUNT"]).ask()
@@ -192,6 +194,8 @@ def configure():
                 "Cores per socket / chiplet:", default=opts["CORES_PER_SOCKET"]).ask()
             opts["SMT_PER_CORE"] = questionary.text(
                 "Hardware threads per core (SMT):", default=opts["SMT_PER_CORE"]).ask()
+            opts["CPU_LAYOUT_CONTIGUOUS"] = questionary.confirm(
+                "Contiguous CPU numbering per node? (vs interleaved)", default=False).ask()
 
         # Compiler & optimization group
         compiler_opts = questionary.checkbox(
@@ -276,6 +280,8 @@ def build_cmake_args(opts):
         args.append(f"-DSOCKETS_COUNT={opts['SOCKETS_COUNT']}")
         args.append(f"-DCORES_PER_SOCKET={opts['CORES_PER_SOCKET']}")
         args.append(f"-DSMT_PER_CORE={opts['SMT_PER_CORE']}")
+        val = "ON" if opts.get("CPU_LAYOUT_CONTIGUOUS", False) else "OFF"
+        args.append(f"-DCPU_LAYOUT_CONTIGUOUS={val}")
     if opts["DATADIR"]:
         args.append(f"-DDATADIR={opts['DATADIR']}")
     for name, _, _ in BOOL_OPTIONS:

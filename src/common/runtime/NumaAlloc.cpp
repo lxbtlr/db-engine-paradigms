@@ -17,13 +17,15 @@
 
 namespace runtime {
 
-// Pin the calling thread to a specific CPU on NUMA region r.
-// CPU topology: CPU c is on NUMA node (c % SOCKETS_COUNT).
-// logical index j on socket r -> CPU = j * SOCKETS_COUNT + r
+// Pin the calling thread to logical thread j on NUMA region r.
 static void pinToRegion(size_t r, size_t j = 0) {
    cpu_set_t cpuset;
    CPU_ZERO(&cpuset);
+#ifdef CPU_LAYOUT_CONTIGUOUS
+   CPU_SET(r * THREADS_PER_SOCKET + j, &cpuset);
+#else
    CPU_SET(j * SOCKETS_COUNT + r, &cpuset);
+#endif
    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
 }
 

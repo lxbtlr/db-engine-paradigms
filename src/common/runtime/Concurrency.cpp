@@ -32,7 +32,7 @@ void assertTopology() {
    size_t nCpus = SOCKETS_COUNT * CORES_PER_SOCKET * SMT_PER_CORE;
    for (size_t c = 0; c < nCpus; ++c) {
       int node = numa_node_of_cpu(static_cast<int>(c));
-      size_t expected = c % SOCKETS_COUNT;
+      size_t expected = nodeOfCpu(c);
       if (node < 0 || static_cast<size_t>(node) != expected) {
          fprintf(stderr,
                  "assertTopology: cpu %zu on node %d, expected node %zu\n",

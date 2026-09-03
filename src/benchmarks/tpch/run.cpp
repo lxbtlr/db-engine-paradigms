@@ -35,15 +35,7 @@ public:
       if (slot < 0) return;
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
-#ifdef THREAD_PIN_PACKED
-      size_t tps = runtime::CORES_PER_SOCKET * runtime::SMT_PER_CORE;
-      size_t socket = static_cast<size_t>(slot) / tps;
-      size_t j = static_cast<size_t>(slot) % tps;
-      size_t cpu = j * runtime::SOCKETS_COUNT + socket;
-      CPU_SET(cpu, &cpuset);
-#else
-      CPU_SET(slot, &cpuset);
-#endif
+      CPU_SET(runtime::cpuOfThread(static_cast<size_t>(slot)), &cpuset);
       pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
    }
    ~PinningObserver() override { observe(false); }

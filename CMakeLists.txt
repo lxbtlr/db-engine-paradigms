@@ -39,7 +39,8 @@ OPTION(NUMA_DEBUG "Enable NUMA allocation debug logging and placement verificati
 # TARGET_MACHINE selects a preset for SOCKETS_COUNT, CORES_PER_SOCKET,
 # SMT_PER_CORE, and THREAD_PIN_PACKED.  Use "custom" to set them manually.
 set(TARGET_MACHINE "custom" CACHE STRING
-    "Machine topology preset: custom, dubliner, roquefort, manchego, burrata")
+    "Machine topology preset: custom, dubliner, roquefort, manchego, burrata, kafir")
+OPTION(CPU_LAYOUT_CONTIGUOUS "Contiguous CPU numbering per node (vs interleaved)" OFF)
 
 set(SOCKETS_COUNT 4 CACHE STRING "Number of sockets/chiplets/memory domains")
 set(CORES_PER_SOCKET 22 CACHE STRING "Physical cores per socket/chiplet")
@@ -66,14 +67,24 @@ elseif(TARGET_MACHINE STREQUAL "burrata")
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 128)
   set(SMT_PER_CORE 1)
+elseif(TARGET_MACHINE STREQUAL "kafir")
+  # 8-node, 24 cores/node, 2-way SMT, contiguous CPU numbering
+  set(SOCKETS_COUNT 8)
+  set(CORES_PER_SOCKET 24)
+  set(SMT_PER_CORE 2)
+  set(CPU_LAYOUT_CONTIGUOUS ON)
 elseif(NOT TARGET_MACHINE STREQUAL "custom")
   message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner, roquefort, manchego, burrata")
+  set(CPU_LAYOUT_CONTIGUOUS OFF)
 endif()
 
+IF(CPU_LAYOUT_CONTIGUOUS)
+  ADD_DEFINITIONS(-DCPU_LAYOUT_CONTIGUOUS)
+ENDIF()
 ADD_DEFINITIONS(-DCFG_SOCKETS_COUNT=${SOCKETS_COUNT})
 ADD_DEFINITIONS(-DCFG_CORES_PER_SOCKET=${CORES_PER_SOCKET})
 ADD_DEFINITIONS(-DCFG_SMT_PER_CORE=${SMT_PER_CORE})
-message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T")
+message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T  contiguous=${CPU_LAYOUT_CONTIGUOUS}")
 OPTION(NO_HUGE_PAGES "Disable huge pages for malloc_huge" OFF)
 OPTION(HUGE_2MB_MALLOC_HUGE "Use 2MB hugetlb pages for malloc_huge" OFF)
 OPTION(HUGE_1GB_MALLOC_HUGE "Use 1GB huge pages for malloc_huge" OFF)

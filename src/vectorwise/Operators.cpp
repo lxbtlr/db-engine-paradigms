@@ -78,7 +78,7 @@ Scan::Scan(Shared& s, size_t n, size_t v)
    size_t myId = runtime::this_worker->worker_id;
    size_t rank = 0;
 #ifdef THREAD_PIN_PACKED
-   rank = myId % (runtime::CORES_PER_SOCKET * runtime::SMT_PER_CORE);
+   rank = myId % runtime::THREADS_PER_SOCKET;
 #else
    rank = myId / runtime::SOCKETS_COUNT;
 #endif
