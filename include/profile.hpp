@@ -159,6 +159,32 @@ struct PerfEvents {
          add("loads", "mem_inst_retired.all_loads");
          add("mem_stall", "cycle_activity.stalls_mem_any");
          //add("page-faults", "page-faults");
+      } else if (cpu == "AuthenticAMD-25-1-core" ||
+                 cpu == "AuthenticAMD-25-11-core") {
+         // AMD Zen3 (25-1) / Zen4 (25-11)
+         // Core-side counters that actually open on AMD. The generic L1D
+         // cache events and PERF_COUNT_HW_CACHE_MISSES work; the Intel-only
+         // cpu/mem-loads|stores (PEBS) and the PERF_TYPE_HW_CACHE LL-miss
+         // generic do NOT open on AMD (LL generic unsupported, L3 events are
+         // on the L3PMC uncore PMU). All named events resolve via the AMD
+         // perfmon JSON through jevents and were verified to open.
+         add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+         add("LLC-misses", "cpu/cache-misses/");
+         add("l1-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("l1-hits", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+         add("stores", "ls_dispatch.store_dispatch");
+         add("loads", "ls_dispatch.ld_dispatch");
+         // Loads that miss L1 (off-core read requests) as a bandwidth proxy
+         // (64B/request assumption in the bandwidth formula). Closest core-side
+         // analog to Intel's offcore_requests.all_data_rd. True DRAM bandwidth
+         // needs the amd_df uncore PMU, which is out of scope here.
+         add("all_rd", "ls_mab_alloc.loads");
+         add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+         add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
       } else {
          add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
          add("LLC-misses", PERF_TYPE_HW_CACHE,
