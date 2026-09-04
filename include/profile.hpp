@@ -194,6 +194,10 @@ struct PerfEvents {
          add("all_rd", "ls_mab_alloc.loads");
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+         // Generic STALLED_CYCLES_BACKEND; perf maps it on AMD Zen3/Zen4 as a
+         // backend stall proxy. Verified to open and count on roquefort.
+         add("mem_stall", PERF_TYPE_HARDWARE,
+             PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
       } else if (cpu == "GenuineIntel-6-8F-core") {
          // Sapphire Rapids (SPR): Xeon Silver 4509Y (manchego).  Lean, proven
          // set: keep the generic PERF_TYPE_HARDWARE/HW_CACHE forms for the
