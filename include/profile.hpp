@@ -161,7 +161,7 @@ struct PerfEvents {
          // (GenuineIntel-6-55-core.json) in ~/.cache/pmu-events/ to resolve;
          // without it they read 0 (readCounter guard).
          add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
-         add("LLC-misses", "cpu/cache-misses/");
+         add("LLC-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
          add("l1-misses", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
                  (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
