@@ -154,20 +154,26 @@ struct PerfEvents {
          add("loads", "MEM_UOPS_RETIRED.ALL_LOADS");
          add("instr.", "instructions");
       } else if (cpu == "GenuineIntel-6-55-core") {
-         // Skylake X
-         add("cycles", "cpu/cpu-cycles/");
+         // Skylake-X / Cascade Lake (model 0x55; covers dubliner, Xeon Gold
+         // 6238L). Generic PERF_TYPE_HARDWARE/HW_CACHE forms for the base
+         // counters resolve with no perfmon JSON. The store/load/bandwidth/
+         // stall counters need the skylakex perfmon JSON
+         // (GenuineIntel-6-55-core.json) in ~/.cache/pmu-events/ to resolve;
+         // without it they read 0 (readCounter guard).
+         add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
          add("LLC-misses", "cpu/cache-misses/");
-         add("LLC-misses2", "mem_load_retired.l3_miss");
          add("l1-misses", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
                  (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
-         add("instr.", "instructions");
-         add("br. misses", "cpu/branch-misses/");
+         add("l1-hits", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+         add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+         add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
          add("all_rd", "offcore_requests.all_data_rd");
          add("stores", "mem_inst_retired.all_stores");
          add("loads", "mem_inst_retired.all_loads");
          add("mem_stall", "cycle_activity.stalls_mem_any");
-         //add("page-faults", "page-faults");
       } else if (cpu == "AuthenticAMD-25-1-core" ||
                  cpu == "AuthenticAMD-25-11-core") {
          // AMD Zen3 (25-1) / Zen4 (25-11)
