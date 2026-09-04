@@ -80,9 +80,18 @@ struct PerfEvents {
       double readCounter() {
 
 #ifdef __linux__
-         return (data.value - prev.value) *
+         // Scale the raw count by (enabled/running) to correct for counter
+         // multiplexing.  If the counter never ran (time_running delta == 0),
+         // e.g. a per-CPU counter on a CPU no thread used, it counted nothing
+         // and must read as 0 -- otherwise 0/0 yields NaN and poisons the
+         // per-CPU aggregate.
+         auto deltaRunning =
+             (double)(data.time_running - prev.time_running);
+         if (deltaRunning <= 0.0)
+            return 0;
+         return (double)(data.value - prev.value) *
                 (double)(data.time_enabled - prev.time_enabled) /
-                (data.time_running - prev.time_running);
+                deltaRunning;
 #else
          return 0;
 #endif
@@ -183,6 +192,30 @@ struct PerfEvents {
          // analog to Intel's offcore_requests.all_data_rd. True DRAM bandwidth
          // needs the amd_df uncore PMU, which is out of scope here.
          add("all_rd", "ls_mab_alloc.loads");
+         add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+         add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+      } else if (cpu == "GenuineIntel-6-8F-core") {
+         // Sapphire Rapids (SPR): Xeon Silver 4509Y (manchego).  Lean, proven
+         // set: keep the generic PERF_TYPE_HARDWARE/HW_CACHE forms for the
+         // basic counters, and use perfmon JSON events only where the generic
+         // form doesn't work (stores/loads on SPR need the JSON; all_rd is the
+         // 64B/request bandwidth proxy).  SPR has no offcore_requests.all_data_rd
+         // (SKX); closest completed-request analog is OFFCORE_REQUESTS.DATA_RD
+         // (all data reads incl. prefetch).  On SPR, per-CPU counters for a very
+         // short measured window (a single short rep) can be left unscheduled
+         // (time_running=0); readCounter() guards against the resulting 0/0 NaN,
+         // and normal multi-rep runs (-r 5) schedule all counters correctly.
+         add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+         add("LLC-misses", "cpu/cache-misses/");
+         add("l1-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("l1-hits", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+         add("stores", "mem_inst_retired.all_stores");
+         add("loads", "mem_inst_retired.all_loads");
+         add("all_rd", "offcore_requests.data_rd");
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
       } else {
