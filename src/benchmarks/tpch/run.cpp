@@ -100,16 +100,18 @@ int main(int argc, char* argv[]) {
     std::string threadArg = "";
     size_t vectorSize = 1024;
     int settleSeconds = 10;
+    int w = 0;                    // data-dependency width (Test 1); 0 = disabled
     std::string selectedQuery = "";  // e.g., "1" or "1,3,6"
     std::string selectedEngine = ""; // e.g., "h" or "v"
 
     int opt;
 #ifdef CANARY_IN_BENCH
-    const char* optstring = "q:e:r:p:t:v:s:cC";
+    const char* optstring = "q:e:r:p:t:v:s:w:cC";
 #else
-    const char* optstring = "q:e:r:p:t:v:s:";
+    const char* optstring = "q:e:r:p:t:v:s:w:";
 #endif
-    // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize, s: settle
+    // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize, s: settle,
+    // w: data-dependency width (Test 1)
     while ((opt = getopt(argc, argv, optstring)) != -1) {
         switch (opt) {
             case 'q': selectedQuery = optarg; break;
@@ -119,15 +121,16 @@ int main(int argc, char* argv[]) {
             case 't': threadArg = optarg; break;
             case 'v': vectorSize = atoi(optarg); break;
             case 's': settleSeconds = atoi(optarg); break;
+            case 'w': w = atoi(optarg); break;
 #ifdef CANARY_IN_BENCH
             case 'c': canary::g_enabled = true; break;
             case 'C': canaryOnly = true; break;
 #endif
             default:
 #ifdef CANARY_IN_BENCH
-                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-c canary] [-C canary-only]\n";
+                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-w W] [-c canary] [-C canary-only]\n";
 #else
-                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds]\n";
+                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-w W]\n";
 #endif
                 exit(1);
         }
@@ -222,9 +225,9 @@ int main(int argc, char* argv[]) {
             if (i > 0) tcStr += ",";
             tcStr += std::to_string(threadCounts[i]);
         }
-        fprintf(stderr, "Config: baseline | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds\n",
+        fprintf(stderr, "Config: baseline | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds | W: %d\n",
                 selectedEngine.c_str(), selectedQuery.c_str(),
-                tcStr.c_str(), vectorSize, settleSeconds);
+                tcStr.c_str(), vectorSize, settleSeconds, w);
     }
 
     if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
@@ -256,6 +259,18 @@ int main(int argc, char* argv[]) {
                        repetitions);
       auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
       dumpQ1Result("vectorwise", vResult.get());
+   }
+   if (q.count("1v") && w > 0) {
+      char wlabel[64];
+      snprintf(wlabel, sizeof(wlabel), "q1dd v W%d ", w);
+      e.timeAndProfile(label(wlabel, nrThreads), nrTuples(tpch, {"lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          auto result =
+                              q1_dd_vectorwise(tpch, nrThreads, vectorSize, w);
+                          escape(&result);
+                       },
+                       repetitions);
    }
    if (q.count("3v"))
       e.timeAndProfile(
@@ -327,6 +342,19 @@ int main(int argc, char* argv[]) {
       std::unique_ptr<runtime::Query> hResult;
       arena.execute([&] { hResult = q1_hyper(tpch, nrThreads); });
       dumpQ1Result("hyper", hResult.get());
+   }
+   if (q.count("1h") && w > 0) {
+      char wlabel[64];
+      snprintf(wlabel, sizeof(wlabel), "q1dd h W%d ", w);
+      e.timeAndProfile(label(wlabel, nrThreads), nrTuples(tpch, {"lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q1_dd_hyper(tpch, nrThreads, w);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
    }
    if (q.count("3h"))
       e.timeAndProfile(label("q3 h ", nrThreads),
