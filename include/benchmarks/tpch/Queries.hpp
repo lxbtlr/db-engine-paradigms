@@ -26,11 +26,21 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
       sum_disc_price,
       sum_charge,
       count_order,
-      packed_key
+      packed_key,
+      // Data-dependency-width (Test 1) synthetic-work buffers. W is a runtime
+      // count on the vectorized side, so these use a high numeric base to avoid
+      // colliding with the enum ids above.
+      dd_buf_base = 64,      // dd_buf_base + 0 .. +W-1 : the W intermediates
+      dd_scratch = 64 + 40,  // scratch between multiply and add per step
+      dd_sink = 64 + 41,     // running sum of all W intermediates (dense)
+      dd_sink_out = 64 + 42  // per-group aggregation of the sink (live-out)
    };
    struct Q1 {
       types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
       types::Date c1 = types::Date::castString("1998-09-02");
+      // Data-dependency-width constants + sink zero (vectorized variant).
+      int64_t ddC[32] = {};
+      int64_t ddZero = 0;
       std::unique_ptr<vectorwise::Operator> rootOp;
    };
    Q1Builder(runtime::Database& db, vectorwise::SharedStateManager& shared,
@@ -38,6 +48,9 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
        : QueryBuilder(db, shared, size) {}
    std::unique_ptr<Q1> getQuery();
    std::unique_ptr<Q1> getQueryPacked();
+   /// Q1 pipeline with W synthetic data-dependency intermediates injected into
+   /// the projection chain and routed to a dedicated (separate) escaped sink.
+   std::unique_ptr<Q1> getQueryDd(int W);
 };
 
 std::unique_ptr<runtime::Query>
@@ -51,6 +64,22 @@ std::unique_ptr<runtime::Query>
 q1_vectorwise_packed(runtime::Database& db,
                      size_t nrThreads = std::thread::hardware_concurrency(),
                      size_t vectorSize = 1024);
+
+// --- Data-dependency-width microbenchmark (Test 1) ---
+/// Compile-time-W Typer (hyper) variant: W is a template constant so the W
+/// intermediates become distinct straight-line scalar SSA values.
+template <int W>
+std::unique_ptr<runtime::Query> q1_dd_hyper_impl(runtime::Database& db,
+                                                 size_t nrThreads);
+/// Runtime dispatcher: maps a runtime W to the correct compile-time
+/// instantiation. Unknown W is a hard error (no silent fallback).
+std::unique_ptr<runtime::Query>
+q1_dd_hyper(runtime::Database& db, size_t nrThreads, int W);
+/// Vectorized (Tectorwise) variant: W may be a runtime count (the vectorized
+/// engine materializes to buffers regardless).
+std::unique_ptr<runtime::Query>
+q1_dd_vectorwise(runtime::Database& db, size_t nrThreads, size_t vectorSize,
+                 int W);
 
 struct Q3Builder : private vectorwise::QueryBuilder {
    enum {
