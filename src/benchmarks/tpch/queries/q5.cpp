@@ -65,6 +65,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
 
    using hash = runtime::CRC32Hash;
 
+   // Dimension tables are tiny — no benefit from sharding; use global pointers
    auto r_name = re["r_name"].data<types::Char<25>>();
    auto r_regionkey = re["r_regionkey"].data<types::Integer>();
    // --- select region and build ht
@@ -98,13 +99,34 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
    parallel_insert(entries2, ht2);
 
    // --- join on nation and build ht
+#ifdef NUMA_SHARD
+   auto c_nationkey = numaShardPtrs<types::Integer>(cu, "c_nationkey");
+   auto c_custkey = numaShardPtrs<types::Integer>(cu, "c_custkey");
+#else
    auto c_nationkey = cu["c_nationkey"].data<types::Integer>();
    auto c_custkey = cu["c_custkey"].data<types::Integer>();
+#endif
    Hashmapx<types::Integer, std::tuple<types::Integer, types::Char<25>>, hash>
        ht3;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht3)::Entry>>
        entries3;
 
+#ifdef NUMA_SHARD
+   auto found3 = numa_parallel_reduce(
+       nrThreads, cu, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries3.local();
+          for (size_t i = begin; i < end; ++i) {
+             decltype(ht2)::value_type* v;
+             if ((v = ht2.findOne(c_nationkey[node][i]))) {
+                entries.emplace_back(ht3.hash(c_custkey[node][i]), c_custkey[node][i],
+                                     make_tuple(c_nationkey[node][i], *v));
+                acc++;
+             }
+          }
+       },
+       [](const size_t& a, const size_t& b) { return a + b; });
+#else
    auto found3 = PARALLEL_SELECT(cu.nrTuples, entries3, {
       decltype(ht2)::value_type* v;
       if ((v = ht2.findOne(c_nationkey[i]))) {
@@ -113,18 +135,41 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
          found++;
       }
    });
+#endif
    ht3.setSize(found3);
    parallel_insert(entries3, ht3);
 
    // --- join on customer and build ht
+#ifdef NUMA_SHARD
+   auto o_orderkey = numaShardPtrs<types::Integer>(ord, "o_orderkey");
+   auto o_orderdate = numaShardPtrs<types::Date>(ord, "o_orderdate");
+   auto o_custkey = numaShardPtrs<types::Integer>(ord, "o_custkey");
+#else
    auto o_orderkey = ord["o_orderkey"].data<types::Integer>();
    auto o_orderdate = ord["o_orderdate"].data<types::Date>();
    auto o_custkey = ord["o_custkey"].data<types::Integer>();
+#endif
    Hashmapx<types::Integer, std::tuple<types::Integer, types::Char<25>>, hash>
        ht4;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht4)::Entry>>
        entries4;
 
+#ifdef NUMA_SHARD
+   auto found4 = numa_parallel_reduce(
+       nrThreads, ord, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries4.local();
+          for (size_t i = begin; i < end; ++i) {
+             decltype(ht3)::value_type* v;
+             if ((o_orderdate[node][i] < c2) & (o_orderdate[node][i] >= c1) &&
+                 (v = ht3.findOne(o_custkey[node][i]))) {
+                entries.emplace_back(ht4.hash(o_orderkey[node][i]), o_orderkey[node][i], *v);
+                acc++;
+             }
+          }
+       },
+       [](const size_t& a, const size_t& b) { return a + b; });
+#else
    auto found4 = PARALLEL_SELECT(ord.nrTuples, entries4, {
       decltype(ht3)::value_type* v;
       if ((o_orderdate[i] < c2) & (o_orderdate[i] >= c1) &&
@@ -133,6 +178,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
          found++;
       }
    });
+#endif
    ht4.setSize(found4);
    parallel_insert(entries4, ht4);
 
@@ -151,11 +197,18 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
    ht5.setSize(su.nrTuples);
    parallel_insert(entries5, ht5);
 
-   // --- join on customer and build ht
+   // --- join lineitem with built HTs
+#ifdef NUMA_SHARD
+   auto l_orderkey = numaShardPtrs<types::Integer>(li, "l_orderkey");
+   auto l_suppkey = numaShardPtrs<types::Integer>(li, "l_suppkey");
+   auto l_extendedprice = numaShardPtrs<types::Numeric<12, 2>>(li, "l_extendedprice");
+   auto l_discount = numaShardPtrs<types::Numeric<12, 2>>(li, "l_discount");
+#else
    auto l_orderkey = li["l_orderkey"].data<types::Integer>();
    auto l_suppkey = li["l_suppkey"].data<types::Integer>();
    auto l_extendedprice = li["l_extendedprice"].data<types::Numeric<12, 2>>();
    auto l_discount = li["l_discount"].data<types::Numeric<12, 2>>();
+#endif
 
    const auto one = types::Numeric<12, 2>::castString("1.00");
    const auto zero = types::Numeric<12, 4>::castString("0.00");
@@ -164,6 +217,22 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
        [](auto& acc, auto&& value) { acc += value; }, zero, nrThreads);
 
    // preaggregation
+#ifdef NUMA_SHARD
+   numa_parallel_scan(nrThreads, li, morselSize,
+       [&](size_t begin, size_t end, size_t node) {
+          auto groupLocals = groupOp.preAggLocals();
+          for (size_t i = begin; i < end; ++i) {
+             auto v = ht4.findOne(l_orderkey[node][i]);
+             if (v) {
+                auto suppkey = make_tuple(l_suppkey[node][i], get<0>(*v));
+                if (ht5.contains(suppkey)) {
+                   groupLocals.consume(get<1>(*v), l_extendedprice[node][i] *
+                                                       (one - l_discount[node][i]));
+                }
+             }
+          }
+       });
+#else
    tbb::parallel_for(
        tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
        [&](const tbb::blocked_range<size_t>& r) {
@@ -180,6 +249,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
              }
           }
        });
+#endif
 
    // --- output
    auto& result = resources.query->result;

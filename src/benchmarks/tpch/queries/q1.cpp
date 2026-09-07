@@ -78,6 +78,15 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
    types::Date c1 = types::Date::castString("1998-09-02");
    types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
    auto& li = db["lineitem"];
+#ifdef NUMA_SHARD
+   auto l_returnflag = numaShardPtrs<types::Char<1>>(li, "l_returnflag");
+   auto l_linestatus = numaShardPtrs<types::Char<1>>(li, "l_linestatus");
+   auto l_extendedprice = numaShardPtrs<types::Numeric<12, 2>>(li, "l_extendedprice");
+   auto l_discount = numaShardPtrs<types::Numeric<12, 2>>(li, "l_discount");
+   auto l_tax = numaShardPtrs<types::Numeric<12, 2>>(li, "l_tax");
+   auto l_quantity = numaShardPtrs<types::Numeric<12, 2>>(li, "l_quantity");
+   auto l_shipdate = numaShardPtrs<types::Date>(li, "l_shipdate");
+#else
    auto l_returnflag = li["l_returnflag"].data<types::Char<1>>();
    auto l_linestatus = li["l_linestatus"].data<types::Char<1>>();
    auto l_extendedprice = li["l_extendedprice"].data<types::Numeric<12, 2>>();
@@ -85,6 +94,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
    auto l_tax = li["l_tax"].data<types::Numeric<12, 2>>();
    auto l_quantity = li["l_quantity"].data<types::Numeric<12, 2>>();
    auto l_shipdate = li["l_shipdate"].data<types::Date>();
+#endif
 
    auto resources = initQuery(nrThreads);
 
@@ -106,6 +116,27 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
        nrThreads);
 
 
+#ifdef NUMA_SHARD
+   numa_parallel_scan(nrThreads, li, morselSize,
+       [&](size_t begin, size_t end, size_t node) {
+          auto locals = groupOp.preAggLocals();
+          for (size_t i = begin; i < end; ++i) {
+             if (l_shipdate[node][i] <= c1) {
+                auto& group = locals.getGroup(
+                    make_tuple(l_returnflag[node][i], l_linestatus[node][i]));
+
+                get<0>(group) += l_quantity[node][i];
+                get<1>(group) += l_extendedprice[node][i];
+                auto disc_price =
+                    l_extendedprice[node][i] * (one - l_discount[node][i]);
+                get<2>(group) += disc_price;
+                auto charge = disc_price * (one + l_tax[node][i]);
+                get<3>(group) += charge;
+                get<4>(group) += 1;
+             }
+          }
+       });
+#else
    tbb::parallel_for(
        tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
        [&](const tbb::blocked_range<size_t>& r) {
@@ -124,6 +155,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
              }
           }
        });
+#endif
 
    auto& result = resources.query->result;
    auto retAttr = result->addAttribute("l_returnflag", sizeof(Char<1>));

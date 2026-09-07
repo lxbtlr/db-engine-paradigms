@@ -53,6 +53,18 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
    auto& ord = db["orders"];
    auto& li = db["lineitem"];
 
+#ifdef NUMA_SHARD
+   auto c_mktsegment = numaShardPtrs<types::Char<10>>(cu, "c_mktsegment");
+   auto c_custkey = numaShardPtrs<types::Integer>(cu, "c_custkey");
+   auto o_custkey = numaShardPtrs<types::Integer>(ord, "o_custkey");
+   auto o_orderkey = numaShardPtrs<types::Integer>(ord, "o_orderkey");
+   auto o_orderdate = numaShardPtrs<types::Date>(ord, "o_orderdate");
+   auto o_shippriority = numaShardPtrs<types::Integer>(ord, "o_shippriority");
+   auto l_orderkey = numaShardPtrs<types::Integer>(li, "l_orderkey");
+   auto l_shipdate = numaShardPtrs<types::Date>(li, "l_shipdate");
+   auto l_extendedprice = numaShardPtrs<types::Numeric<12, 2>>(li, "l_extendedprice");
+   auto l_discount = numaShardPtrs<types::Numeric<12, 2>>(li, "l_discount");
+#else
    auto c_mktsegment = cu["c_mktsegment"].data<types::Char<10>>();
    auto c_custkey = cu["c_custkey"].data<types::Integer>();
    auto o_custkey = ord["o_custkey"].data<types::Integer>();
@@ -64,6 +76,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
    auto l_extendedprice =
        li["l_extendedprice"].data<types::Numeric<12, 2>>();
    auto l_discount = li["l_discount"].data<types::Numeric<12, 2>>();
+#endif
 
    using hash = runtime::CRC32Hash;
    using range = tbb::blocked_range<size_t>;
@@ -75,6 +88,20 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
    Hashset<types::Integer, hash> ht1;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
        entries1;
+#ifdef NUMA_SHARD
+   auto found1 = numa_parallel_reduce(
+       nrThreads, cu, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries1.local();
+          for (size_t i = begin; i < end; ++i) {
+             if (c_mktsegment[node][i] == c3) {
+                entries.emplace_back(ht1.hash(c_custkey[node][i]), c_custkey[node][i]);
+                acc++;
+             }
+          }
+       },
+       add);
+#else
    auto found1 = tbb::parallel_reduce(
        range(0, cu.nrTuples, morselSize), 0,
        [&](const tbb::blocked_range<size_t>& r, const size_t& f) {
@@ -89,6 +116,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
           return found;
        },
        add);
+#endif
    ht1.setSize(found1);
    parallel_insert(entries1, ht1);
 
@@ -96,6 +124,21 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
    Hashmapx<types::Integer, std::tuple<types::Date, types::Integer>, hash> ht2;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht2)::Entry>>
        entries2;
+#ifdef NUMA_SHARD
+   auto found2 = numa_parallel_reduce(
+       nrThreads, ord, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries2.local();
+          for (size_t i = begin; i < end; ++i)
+             if (o_orderdate[node][i] < c1 && ht1.contains(o_custkey[node][i])) {
+                entries.emplace_back(
+                    ht2.hash(o_orderkey[node][i]), o_orderkey[node][i],
+                    make_tuple(o_orderdate[node][i], o_shippriority[node][i]));
+                acc++;
+             }
+       },
+       add);
+#else
    auto found2 = tbb::parallel_reduce(
        range(0, ord.nrTuples, morselSize), 0,
        [&](const tbb::blocked_range<size_t>& r, const size_t& f) {
@@ -111,6 +154,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
           return found;
        },
        add);
+#endif
    ht2.setSize(found2);
    parallel_insert(entries2, ht2);
 
@@ -128,6 +172,20 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
            [](auto& acc, auto&& value) { acc += value; }, zero, nrThreads);
 
    // preaggregation
+#ifdef NUMA_SHARD
+   numa_parallel_scan(nrThreads, li, morselSize,
+       [&](size_t begin, size_t end, size_t node) {
+          auto locals = groupOp.preAggLocals();
+          for (size_t i = begin; i < end; ++i) {
+             decltype(ht2)::value_type* v;
+             if (l_shipdate[node][i] > c2 && (v = ht2.findOne(l_orderkey[node][i]))) {
+                locals.consume(
+                    make_tuple(l_orderkey[node][i], get<0>(*v), get<1>(*v)),
+                    l_extendedprice[node][i] * (one - l_discount[node][i]));
+             }
+          }
+       });
+#else
    tbb::parallel_for(
        tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
        [&](const tbb::blocked_range<size_t>& r) {
@@ -142,6 +200,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
              }
           }
        });
+#endif
 
    // --- output
    auto& result = resources.query->result;
