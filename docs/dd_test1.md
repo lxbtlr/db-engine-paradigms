@@ -90,33 +90,56 @@ Effective flags: `-O3 -march=native -fno-omit-frame-pointer` (set globally), plu
 
 ## Structural asm gate
 
-`scripts/dd_verify_asm.sh [binary]` disassembles the per-tuple scan loop of
-`q1_dd_hyper_impl<W>` (the `{lambda(blocked_range)#2}::operator()` weak symbol
-that carries the `DdKernel`, since the loop lives there rather than in the
-NOVECTORIZE impl function) for W ∈ {2, 8, 16, 18} and reports, per W:
+`scripts/dd_verify_asm.sh [binary]` analyzes the per-tuple scan loop of
+`q1_dd_hyper_impl<W>`. The per-tuple compute is inlined into the TBB morsel lambda
+(`q1_dd_hyper_impl<W>(...)::{lambda(blocked_range<unsigned long> const&)#2}::operator()`),
+NOT the NOVECTORIZE impl function. Within that lambda the inner per-tuple loop is
+located by a structural signature: its loop-closer (backward jump) is immediately
+preceded by the tuple bound-check `cmp` and its span contains the DdKernel
+(`movabs $Ck`). The bounded hash-probe sub-loop also ends in `cmp`+`jne` but
+contains no `movabs`, so the signature picks the tuple loop uniquely (verified:
+W=2 loop = `0x116f1c..0x117072`, W=18 loop = `0x119adc..0x119ddb`). Per W it prints
+the symbol analyzed, the loop start/end addresses, the loop instruction count, and
+(`--dump <W>` prints the full disassembly of the identified loop):
 
-| W  | start      | instructions | arith ops | spill/reload | loop closers |
-|----|-----------:|-------------:|----------:|-------------:|-------------:|
-| 2  | 0x116e40   | 282          | 38        | 0            | 10           |
-| 8  | 0x117cf0   | 318          | 61        | 0            | 10           |
-| 16 | 0x119360   | 365          | 93        | 0            | 10           |
-| 18 | 0x119980   | 377          | 101       | 0            | 10           |
+| W  | per-tuple loop         | inst | arith (scalar/vec) | spills store/reload | regs GP/vec | loop closers |
+|----|------------------------|-----:|-------------------:|--------------------:|------------:|-------------:|
+| 2  | 0x116f1c..0x117072    |  90  | 24 (24/0)          | 3 / 0               | 92 / 0      | 5            |
+| 8  | 0x117dfc..0x117ff5    | 126  | 47 (47/0)          | 3 / 0               | 131 / 0     | 5            |
+| 16 | 0x1194ac..0x119775    | 173  | 79 (79/0)          | 3 / 0               | 185 / 0     | 5            |
+| 18 | 0x119adc..0x119ddb    | 185  | 87 (87/0)          | 3 / 0               | 197 / 0     | 5            |
 
-`arith ops` counts `imul|mul|add|sub|xor|shl|shr|sar`; `loop closers` counts
-distinct backward edges. The **primary gate**:
+The **primary gate**:
 
-1. **arith ops rise monotonically with W** (38 → 61 → 93 → 101): the straight-line
+1. **arith ops rise monotonically with W** (24 → 47 → 79 → 87): the straight-line
    SSA-local unrolling adds real per-tuple work (no DCE collapse). **PASS**.
 2. **no W-trip loop over the intermediates**: loop-closer count stays constant
-   (10 = 10 = 10 = 10) while arith ops grow, so the extra work is unrolled, not
-   wrapped in a loop whose trip count is W. **PASS**.
+   (5 = 5 = 5 = 5) while arith ops grow, so the extra work is unrolled, not wrapped
+   in a loop whose trip count is W. **PASS**.
 
-`spill/reload` is reported (0 here) but is not gating.
+The disassembly confirms the kernel is straight-line scalar **GP-register** code:
+W=18 shows exactly 18 `movabs $Ck; imul %rdx,%rdi; lea k(%rcx),%rsi; xor; add`
+steps, all in `%rax/%rbx/%rcx/%rdx/%rsi/%rdi/%r8-%r15`. No vector operands at any W
+(vec = 0), so the allocator is NOT using x86-64/AVX-512 vector registers for the
+scalars (the double-register-budget hypothesis does not apply here).
 
-The disassembly confirms the kernel is straight-line scalar GP code: each
-`gen<k>` is `movabs C_k; imul ep,C_k; lea disc+k; xor ep,(disc+k); add` with no
-vector integer multiply (`vpmullq`/`vpmuldq` count = 0 at every W) — real
-register pressure, no SIMD escape.
+### Spill finding (measurement-corrected)
+
+The earlier flat spill=0 was a **matcher bug**, not a real zero: the spill matcher
+only looked for `%rsp`-based stack operands, but `-fno-omit-frame-pointer` keeps
+`%rbp` as the frame base, so every stack slot (`disp(%rbp)`) was missed. The
+corrected matcher counts ANY opcode with a stack-frame operand (both `%rbp`/`%rsp`,
+both directions) and prints each match verbatim.
+
+With the loop correctly identified and the matcher broadened, the result is:
+**3 fixed stores and 0 reloads, constant across all W**. The three stores are the
+group-key construction bytes in every per-tuple iteration
+(`mov %[sr]i?l,-0x41(%rbp)` returnflag, `mov %r10b,-0x42(%rbp)` linestatus,
+`mov %rdx,-0x40(%rbp)` hash) — fixed overhead, not kernel spills. The W
+intermediates themselves never spill in this build: **the kernel lives entirely in
+GP registers up to W=18 with zero W-scaling spill/reload**. This is a genuine
+finding in the correctly-identified GP inner loop (see the W=18 `--dump`), not a
+failure.
 
 ## Correctness
 
