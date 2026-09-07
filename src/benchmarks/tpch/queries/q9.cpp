@@ -122,6 +122,28 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht4)::Entry>>
        entries4;
    auto& partsupp = db["partsupp"];
+#ifdef NUMA_SHARD
+   auto ps_partkey = numaShardPtrs<types::Integer>(partsupp, "ps_partkey");
+   auto ps_suppkey = numaShardPtrs<types::Integer>(partsupp, "ps_suppkey");
+   auto ps_supplycost = numaShardPtrs<types::Numeric<12, 2>>(partsupp, "ps_supplycost");
+   auto found4 = numa_parallel_reduce(
+       nrThreads, partsupp, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries4.local();
+          for (size_t i = begin; i < end; ++i) {
+             if (ht3.contains(ps_partkey[node][i])) {
+                auto nation = ht2.findOne(ps_suppkey[node][i]);
+                if (nation) {
+                   auto key = make_tuple(ps_partkey[node][i], ps_suppkey[node][i]);
+                   auto value = make_tuple(*nation, ps_supplycost[node][i]);
+                   entries.emplace_back(ht4.hash(key), key, value);
+                   acc++;
+                }
+             }
+          }
+       },
+       [](const size_t& a, const size_t& b) { return a + b; });
+#else
    auto ps_partkey = partsupp["ps_partkey"].data<types::Integer>();
    auto ps_suppkey = partsupp["ps_suppkey"].data<types::Integer>();
    auto ps_supplycost = partsupp["ps_supplycost"].data<types::Numeric<12, 2>>();
@@ -136,6 +158,7 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
          }
       }
    });
+#endif
    ht4.setSize(found4);
    parallel_insert(entries4, ht4);
 
@@ -148,6 +171,31 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht5)::Entry>>
        entries5;
    auto& li = db["lineitem"];
+#ifdef NUMA_SHARD
+   auto l_orderkey = numaShardPtrs<types::Integer>(li, "l_orderkey");
+   auto l_partkey = numaShardPtrs<types::Integer>(li, "l_partkey");
+   auto l_suppkey = numaShardPtrs<types::Integer>(li, "l_suppkey");
+   auto l_extendedprice = numaShardPtrs<types::Numeric<12, 2>>(li, "l_extendedprice");
+   auto l_discount = numaShardPtrs<types::Numeric<12, 2>>(li, "l_discount");
+   auto l_quantity = numaShardPtrs<types::Numeric<12, 2>>(li, "l_quantity");
+   auto found5 = numa_parallel_reduce(
+       nrThreads, li, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries5.local();
+          for (size_t i = begin; i < end; ++i) {
+             auto part = ht4.findOne(make_tuple(l_partkey[node][i], l_suppkey[node][i]));
+             if (part) {
+                auto& key = l_orderkey[node][i];
+                auto value =
+                    make_tuple(l_extendedprice[node][i], l_discount[node][i],
+                               l_quantity[node][i], get<1>(*part), get<0>(*part));
+                entries.emplace_back(ht5.hash(key), key, value);
+                acc++;
+             }
+          }
+       },
+       [](const size_t& a, const size_t& b) { return a + b; });
+#else
    auto l_orderkey = li["l_orderkey"].data<types::Integer>();
    auto l_partkey = li["l_partkey"].data<types::Integer>();
    auto l_suppkey = li["l_suppkey"].data<types::Integer>();
@@ -166,17 +214,46 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
              found++;
           }
        });
+#endif
    ht5.setSize(found5);
    parallel_insert(entries5, ht5);
 
    auto& ord = db["orders"];
+#ifdef NUMA_SHARD
+   auto o_orderkey = numaShardPtrs<types::Integer>(ord, "o_orderkey");
+   auto o_orderdate = numaShardPtrs<types::Date>(ord, "o_orderdate");
+#else
    auto o_orderkey = ord["o_orderkey"].template data<types::Integer>();
    auto o_orderdate = ord["o_orderdate"].template data<types::Date>();
+#endif
    const auto one = types::Numeric<12, 2>::castString("1.00");
    const auto zero = types::Numeric<12, 4>::castString("0.00");
    auto groupOp = make_GroupBy<tuple<types::Char<25>, types::Integer>, types::Numeric<12, 4>, hash>(
        [](auto& acc, auto&& value) { acc += value; }, zero, nrThreads);
    // preaggregation
+#ifdef NUMA_SHARD
+   numa_parallel_scan(nrThreads, ord, morselSize,
+       [&](size_t begin, size_t end, size_t node) {
+          auto groupLocals = groupOp.preAggLocals();
+          for (size_t i = begin; i < end; ++i) {
+             auto h = ht5.hash(o_orderkey[node][i]);
+             auto entry = ht5.findOneEntry(o_orderkey[node][i], h);
+             for (; entry;
+                  entry = reinterpret_cast<decltype(entry)>(entry->h.next)) {
+                if (entry->h.hash != h || entry->k != o_orderkey[node][i]) continue;
+                auto& v = entry->v;
+                auto year = extractYear(o_orderdate[node][i]);
+                auto& extp = get<0>(v);
+                auto& disc = get<1>(v);
+                auto& quant = get<2>(v);
+                auto& supplcost = get<3>(v);
+                auto& name = get<4>(v);
+                auto amount = (extp * (one - disc)) - (supplcost * quant);
+                groupLocals.consume(make_tuple(name, year), amount);
+             }
+          }
+       });
+#else
    tbb::parallel_for(
        tbb::blocked_range<size_t>(0, ord.nrTuples, morselSize),
        [&](const tbb::blocked_range<size_t>& r) {
@@ -201,6 +278,7 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
              }
           }
        });
+#endif
 
    // --- output
    auto& result = resources.query->result;

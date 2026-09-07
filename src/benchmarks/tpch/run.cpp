@@ -166,13 +166,19 @@ int main(int argc, char* argv[]) {
 
 #ifdef NUMA_SHARD
     runtime::assertTopology();
-    runtime::numaShardRelation(tpch["lineitem"]);
-    fprintf(stderr, "NUMA sharding: lineitem sharded across %zu regions\n",
-            runtime::NUM_NUMA_REGIONS);
-    for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
-       auto& s = tpch["lineitem"].numaShards[r];
-       fprintf(stderr, "  shard %zu: tuples [%zu, %zu)\n",
-               r, s.tupleBegin, s.tupleEnd);
+    const char* shardTables[] = {"lineitem", "orders", "customer",
+                                 "supplier", "part", "partsupp",
+                                 "nation", "region"};
+    for (auto& name : shardTables) {
+       if (!tpch.hasRelation(name)) continue;
+       runtime::numaShardRelation(tpch[name]);
+       fprintf(stderr, "NUMA sharding: %s sharded across %zu regions\n",
+               name, runtime::NUM_NUMA_REGIONS);
+       for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
+          auto& s = tpch[name].numaShards[r];
+          fprintf(stderr, "  shard %zu: tuples [%zu, %zu)\n",
+                  r, s.tupleBegin, s.tupleEnd);
+       }
     }
 #endif
 
@@ -206,9 +212,18 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "Done settling.\n");
     }
 
-#if defined(NUMA_DEBUG) && (defined(NUMA_ALLOC) || defined(NUMA_SHARD))
+#if defined(NUMA_DEBUG) && defined(NUMA_ALLOC)
     fprintf(stderr, "--- NUMA placement verification ---\n");
     runtime::verifyNumaPlacement(tpch["lineitem"]);
+    fprintf(stderr, "--- end verification ---\n");
+#endif
+#if defined(NUMA_DEBUG) && defined(NUMA_SHARD)
+    fprintf(stderr, "--- NUMA placement verification ---\n");
+    for (auto& name : shardTables) {
+       if (!tpch.hasRelation(name)) continue;
+       fprintf(stderr, "  verifying %s...\n", name);
+       runtime::verifyNumaPlacement(tpch[name]);
+    }
     fprintf(stderr, "--- end verification ---\n");
 #endif
 

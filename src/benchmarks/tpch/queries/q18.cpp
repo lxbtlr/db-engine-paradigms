@@ -60,8 +60,13 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
 
    auto& li = db["lineitem"];
 
+#ifdef NUMA_SHARD
+   auto l_orderkey = numaShardPtrs<types::Integer>(li, "l_orderkey");
+   auto l_quantity = numaShardPtrs<types::Numeric<12, 2>>(li, "l_quantity");
+#else
    auto l_orderkey = li["l_orderkey"].data<types::Integer>();
    auto l_quantity = li["l_quantity"].data<types::Numeric<12, 2>>();
+#endif
 
    tbb::enumerable_thread_specific<
        Hashmapx<types::Integer, types::Numeric<12, 2>, hash, false>>
@@ -73,6 +78,16 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
        [](auto& acc, auto&& value) { acc += value; }, zero, nrThreads);
 
    // scan lineitem and group by l_orderkey
+#ifdef NUMA_SHARD
+   numa_parallel_scan(nrThreads, li, morselSize,
+       [&](size_t begin, size_t end, size_t node) {
+          auto locals = groupOp.preAggLocals();
+          for (size_t i = begin; i < end; ++i) {
+             auto& group = locals.getGroup(l_orderkey[node][i]);
+             group += l_quantity[node][i];
+          }
+       });
+#else
    tbb::parallel_for(tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
                      [&](const tbb::blocked_range<size_t>& r) {
                         auto locals = groupOp.preAggLocals();
@@ -84,6 +99,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
                            // locals.consume(l_orderkey[i], l_quantity[i]);
                         }
                      });
+#endif
 
    Hashset<types::Integer, hash> ht1;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
@@ -130,6 +146,30 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
        entries3;
 
    auto& ord = db["orders"];
+#ifdef NUMA_SHARD
+   auto o_orderkey = numaShardPtrs<types::Integer>(ord, "o_orderkey");
+   auto o_custkey = numaShardPtrs<types::Integer>(ord, "o_custkey");
+   auto o_orderdate = numaShardPtrs<types::Date>(ord, "o_orderdate");
+   auto o_totalprice = numaShardPtrs<types::Numeric<12, 2>>(ord, "o_totalprice");
+   // scan orders
+   auto found = numa_parallel_reduce(
+       nrThreads, ord, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries3.local();
+          for (size_t i = begin; i < end; ++i) {
+             types::Char<25>* name;
+             if (ht1.contains(o_orderkey[node][i]) &&
+                 (name = ht2.findOne(o_custkey[node][i]))) {
+                entries.emplace_back(
+                    ht3.hash(o_orderkey[node][i]), o_orderkey[node][i],
+                    make_tuple(o_custkey[node][i], o_orderdate[node][i],
+                               o_totalprice[node][i], *name));
+                acc++;
+             }
+          }
+       },
+       [](const size_t& a, const size_t& b) { return a + b; });
+#else
    auto o_orderkey = ord["o_orderkey"].data<types::Integer>();
    auto o_custkey = ord["o_custkey"].data<types::Integer>();
    auto o_orderdate = ord["o_orderdate"].data<types::Date>();
@@ -145,6 +185,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
          found++;
       }
    });
+#endif
    ht3.setSize(found);
    parallel_insert(entries3, ht3);
 
@@ -155,6 +196,21 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
        [](auto& acc, auto&& value) { acc += value; }, zero, nrThreads);
 
    // scan lineitem and group by l_orderkey
+#ifdef NUMA_SHARD
+   numa_parallel_scan(nrThreads, li, morselSize,
+       [&](size_t begin, size_t end, size_t node) {
+          auto locals = finalGroupOp.preAggLocals();
+          for (size_t i = begin; i < end; ++i) {
+             std::tuple<types::Integer, types::Date, types::Numeric<12, 2>,
+                        types::Char<25>>* v;
+             if ((v = ht3.findOne(l_orderkey[node][i]))) {
+                auto& group =
+                    locals.getGroup(tuple_cat(*v, make_tuple(l_orderkey[node][i])));
+                group += l_quantity[node][i];
+             }
+          }
+       });
+#else
    tbb::parallel_for(
        tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
        [&](const tbb::blocked_range<size_t>& r) {
@@ -170,6 +226,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
              }
           }
        });
+#endif
 
    auto& result = resources.query->result;
    auto namAttr = result->addAttribute("c_name", sizeof(types::Char<25>));

@@ -1,5 +1,6 @@
 #include "benchmarks/tpch/Queries.hpp"
 #include "common/runtime/Types.hpp"
+#include "hyper/ParallelHelper.hpp"
 #include "tbb/tbb.h"
 #include "vectorwise/Operations.hpp"
 #include "vectorwise/Operators.hpp"
@@ -10,7 +11,7 @@
 
 using namespace runtime;
 using namespace std;
-NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
+NOVECTORIZE Relation q6_hyper(Database& db, size_t nrThreads) {
    Relation result;
    result.insert("revenue", make_unique<algebra::Numeric>(12, 4));
 
@@ -26,6 +27,33 @@ NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
 
    // --- scan
    auto& rel = db["lineitem"];
+
+#ifdef NUMA_SHARD
+   auto l_shipdate_col = numaShardPtrs<types::Date>(rel, "l_shipdate");
+   auto l_quantity_col = numaShardPtrs<types::Numeric<12, 2>>(rel, "l_quantity");
+   auto l_extendedprice_col = numaShardPtrs<types::Numeric<12, 2>>(rel, "l_extendedprice");
+   auto l_discount_col = numaShardPtrs<types::Numeric<12, 2>>(rel, "l_discount");
+
+   const size_t q6morsel = 10000;
+   revenue = numa_parallel_reduce(
+       nrThreads, rel, q6morsel, types::Numeric<12, 4>(0),
+       [&](size_t begin, size_t end, size_t node, types::Numeric<12, 4>& acc) {
+          for (size_t i = begin; i < end; ++i) {
+             auto& l_shipdate = l_shipdate_col[node][i];
+             auto& l_quantity = l_quantity_col[node][i];
+             auto& l_extendedprice = l_extendedprice_col[node][i];
+             auto& l_discount = l_discount_col[node][i];
+
+             if ((l_shipdate >= c1) & (l_shipdate < c2) & (l_quantity < c5) &
+                 (l_discount >= c3) & (l_discount <= c4)) {
+                acc += l_extendedprice * l_discount;
+             }
+          }
+       },
+       [](const types::Numeric<12, 4>& x, const types::Numeric<12, 4>& y) {
+          return x + y;
+       });
+#else
    auto l_shipdate_col = rel["l_shipdate"].data<types::Date>();
    auto l_quantity_col = rel["l_quantity"].data<types::Numeric<12, 2>>();
    auto l_extendedprice_col =
@@ -54,6 +82,7 @@ NOVECTORIZE Relation q6_hyper(Database& db, size_t /*nrThreads*/) {
        [](const types::Numeric<12, 4>& x, const types::Numeric<12, 4>& y) {
           return x + y;
        });
+#endif
 
    // --- output
    auto& rev = result["revenue"].typedAccessForChange<types::Numeric<12, 4>>();
