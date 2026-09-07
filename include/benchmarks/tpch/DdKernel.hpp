@@ -43,4 +43,63 @@ struct DdKernel {
    }
 };
 
+// ---------------------------------------------------------------------------
+// Test 1b -- the *independent* (wide) kernel.
+//
+// DdKernel above computes every intermediate from the columns but reduces it
+// through a running sum, so each v_k is dead as soon as it is added: live
+// ranges are short and the allocator never spills (Task 1 measured an
+// instruction-count effect, not register pressure).
+//
+// DdKernelIndep is identical in per-intermediate arithmetic (`ep * Ck +
+// (ep ^ (disc + k))`, ~4 scalar ops each -- exactly the same expression as
+// DdKernel, so arith parity is structural). It differs ONLY in live-set width:
+// each v_k is computed into its own named scalar and pinned to a register by a
+// zero-instruction asm scheduling barrier before the single final reduction.
+// The barrier prevents the compiler from folding each value into a running sum
+// as it is produced, so all W values are simultaneously live from their
+// definitions to the reduction -> a WIDE live set -> genuine register pressure
+// -> W-scaling spills once W exceeds the available GP registers.
+// ---------------------------------------------------------------------------
+template <int W>
+struct DdKernelIndep {
+   template <int k>
+   static inline int64_t gen(int64_t extendedprice, int64_t discount) {
+      int64_t v = extendedprice * ddConstant(k) +
+                  (extendedprice ^ (discount + k));
+      // Zero-instruction scheduling barrier: forces v to be materialized and
+      // kept live in a register, and (being volatile) prevents the reduction
+      // from being interleaved with the computation, so all W values stay live
+      // until the final sum. Emits no instruction, so arith count is unchanged.
+      asm volatile("" : "+r"(v));
+      return v;
+   }
+
+   template <int... ks>
+   static inline int64_t reduce(int64_t extendedprice, int64_t discount,
+                                std::integer_sequence<int, ks...>) {
+      // Single final reduction over all W independently-live values.
+      return (gen<ks>(extendedprice, discount) + ...);
+   }
+
+   static inline int64_t run(int64_t extendedprice, int64_t discount) {
+      return reduce(extendedprice, discount,
+                    std::make_integer_sequence<int, W>{});
+   }
+};
+
+// Kernel shape selector: pick the kernel type at compile time from a Shape.
+enum class Shape { Chained, Independent };
+
+template <int W, Shape S>
+struct Kernel;
+template <int W>
+struct Kernel<W, Shape::Chained> {
+   using type = DdKernel<W>;
+};
+template <int W>
+struct Kernel<W, Shape::Independent> {
+   using type = DdKernelIndep<W>;
+};
+
 }  // namespace dd
