@@ -6,6 +6,7 @@
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Database.hpp"
 #include "common/runtime/Types.hpp"
+#include "benchmarks/tpch/DdKernel.hpp"
 #include "vectorwise/Operators.hpp"
 #include "vectorwise/Query.hpp"
 #include "vectorwise/QueryBuilder.hpp"
@@ -50,7 +51,9 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
    std::unique_ptr<Q1> getQueryPacked();
    /// Q1 pipeline with W synthetic data-dependency intermediates injected into
    /// the projection chain and routed to a dedicated (separate) escaped sink.
-   std::unique_ptr<Q1> getQueryDd(int W);
+   /// `shape` selects chained vs independent intermediate structure (both W and
+   /// shape are runtime counts on the vectorized side).
+   std::unique_ptr<Q1> getQueryDd(int W, dd::Shape shape);
 };
 
 std::unique_ptr<runtime::Query>
@@ -65,21 +68,22 @@ q1_vectorwise_packed(runtime::Database& db,
                      size_t nrThreads = std::thread::hardware_concurrency(),
                      size_t vectorSize = 1024);
 
-// --- Data-dependency-width microbenchmark (Test 1) ---
-/// Compile-time-W Typer (hyper) variant: W is a template constant so the W
-/// intermediates become distinct straight-line scalar SSA values.
-template <int W>
+// --- Data-dependency-width microbenchmark (Test 1 / Test 1b) ---
+/// Compile-time-W Typer (hyper) variant: W and the kernel shape are template
+/// constants so the W intermediates become distinct straight-line scalar SSA
+/// values (chained = short live ranges; independent = wide live set).
+template <int W, dd::Shape S>
 std::unique_ptr<runtime::Query> q1_dd_hyper_impl(runtime::Database& db,
                                                  size_t nrThreads);
-/// Runtime dispatcher: maps a runtime W to the correct compile-time
-/// instantiation. Unknown W is a hard error (no silent fallback).
+/// Runtime dispatcher: maps a runtime W and shape to the correct compile-time
+/// instantiation. Unknown W or shape is a hard error (no silent fallback).
 std::unique_ptr<runtime::Query>
-q1_dd_hyper(runtime::Database& db, size_t nrThreads, int W);
-/// Vectorized (Tectorwise) variant: W may be a runtime count (the vectorized
-/// engine materializes to buffers regardless).
+q1_dd_hyper(runtime::Database& db, size_t nrThreads, int W, dd::Shape shape);
+/// Vectorized (Tectorwise) variant: W and shape may be runtime counts (the
+/// vectorized engine materializes to buffers regardless).
 std::unique_ptr<runtime::Query>
 q1_dd_vectorwise(runtime::Database& db, size_t nrThreads, size_t vectorSize,
-                 int W);
+                 int W, dd::Shape shape);
 
 struct Q3Builder : private vectorwise::QueryBuilder {
    enum {
