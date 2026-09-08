@@ -307,7 +307,7 @@ int main(int argc, char* argv[]) {
 
     // Helper to build query label with thread count suffix
     auto label = [](const char* base, size_t t) {
-        char buf[64];
+        char buf[128];
         snprintf(buf, sizeof(buf), "%s t%-3zu", base, t);
         return std::string(buf);
     };
@@ -328,7 +328,8 @@ int main(int argc, char* argv[]) {
                        repetitions);
    if (q.count("1v") && w > 0) {
       char wlabel[64];
-      snprintf(wlabel, sizeof(wlabel), "q1dd v %s W%d ", shapeTag.c_str(), w);
+      snprintf(wlabel, sizeof(wlabel), "q1dd v %s W%d V%d ", shapeTag.c_str(),
+               w, (int)vectorSize);
       e.timeAndProfile(label(wlabel, nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
@@ -409,7 +410,8 @@ int main(int argc, char* argv[]) {
                        repetitions);
    if (q.count("1h") && w > 0) {
       char wlabel[64];
-      snprintf(wlabel, sizeof(wlabel), "q1dd h %s W%d ", shapeTag.c_str(), w);
+      snprintf(wlabel, sizeof(wlabel), "q1dd h %s W%d V%d ", shapeTag.c_str(),
+               w, (int)vectorSize);
       e.timeAndProfile(label(wlabel, nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();

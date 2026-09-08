@@ -32,15 +32,16 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
       // count on the vectorized side, so these use a high numeric base to avoid
       // colliding with the enum ids above.
       dd_buf_base = 64,      // dd_buf_base + 0 .. +W-1 : the W intermediates
-      dd_scratch = 64 + 40,  // scratch between multiply and add per step
-      dd_sink = 64 + 41,     // running sum of all W intermediates (dense)
-      dd_sink_out = 64 + 42  // per-group aggregation of the sink (live-out)
+      dd_scratch = 64 + 64,  // scratch between multiply and add per step
+      dd_sink = 64 + 65,     // running sum of all W intermediates (dense)
+      dd_sink_out = 64 + 66  // per-group aggregation of the sink (live-out)
    };
    struct Q1 {
       types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
       types::Date c1 = types::Date::castString("1998-09-02");
       // Data-dependency-width constants + sink zero (vectorized variant).
-      int64_t ddC[32] = {};
+      // Sized for the widest supported W (64).
+      int64_t ddC[64] = {};
       int64_t ddZero = 0;
       std::unique_ptr<vectorwise::Operator> rootOp;
    };
