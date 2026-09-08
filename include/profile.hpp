@@ -1,9 +1,12 @@
 #include "common/Compat.hpp"
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <string.h>
 #include <string>
 #include <sys/ioctl.h>
@@ -16,9 +19,39 @@
 #ifdef __linux__
 #include <asm/unistd.h>
 #include <linux/perf_event.h>
+#if !defined(__aarch64__) && !defined(__arm__)
 extern "C" {
 #include "jevents.h"
 }
+#else
+// Stubs for ARM — jevents is x86-only
+inline char* get_cpu_str() {
+   static char buf[] = "ARM";
+   return buf;
+}
+inline int resolve_event(const char*, struct perf_event_attr*) { return -1; }
+#endif
+
+// ARM CPU part identification (from /proc/cpuinfo)
+#ifdef __aarch64__
+#include <fstream>
+inline std::string get_arm_part() {
+   std::ifstream cpuinfo("/proc/cpuinfo");
+   std::string line;
+   std::string implementer, part;
+   while (std::getline(cpuinfo, line)) {
+      if (line.find("CPU implementer") != std::string::npos) {
+         auto pos = line.find(':');
+         if (pos != std::string::npos) implementer = line.substr(pos + 2);
+      }
+      if (line.find("CPU part") != std::string::npos) {
+         auto pos = line.find(':');
+         if (pos != std::string::npos) { part = line.substr(pos + 2); break; }
+      }
+   }
+   return implementer + "-" + part;
+}
+#endif
 #endif
 
 #define GLOBAL 1
@@ -47,9 +80,18 @@ struct PerfEvents {
       double readCounter() {
 
 #ifdef __linux__
-         return (data.value - prev.value) *
+         // Scale the raw count by (enabled/running) to correct for counter
+         // multiplexing.  If the counter never ran (time_running delta == 0),
+         // e.g. a per-CPU counter on a CPU no thread used, it counted nothing
+         // and must read as 0 -- otherwise 0/0 yields NaN and poisons the
+         // per-CPU aggregate.
+         auto deltaRunning =
+             (double)(data.time_running - prev.time_running);
+         if (deltaRunning <= 0.0)
+            return 0;
+         return (double)(data.value - prev.value) *
                 (double)(data.time_enabled - prev.time_enabled) /
-                (data.time_running - prev.time_running);
+                deltaRunning;
 #else
          return 0;
 #endif
@@ -65,6 +107,40 @@ struct PerfEvents {
          counters = std::thread::hardware_concurrency();
       }
 #ifdef __linux__
+#ifdef __aarch64__
+      {
+      // ARM CPU implementer-part pairs:
+      //   0x41-0xd49 = Cortex-A77 (Neoverse N1 family, e.g. Graviton 2)
+      //   0x41-0xd0c = Neoverse N1
+      //   0x41-0xd40 = Neoverse V1 (Graviton 3)
+      //   0x41-0xd4f = Neoverse V2 (Graviton 4)
+      //   0xc0-0xac3 = Ampere Altra (ARMv8.2)
+      std::string armPart = get_arm_part();
+
+      // Common counters available on all ARMv8+
+      add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+      add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+      add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+
+      // PERF_COUNT_HW_CACHE_LL via PERF_TYPE_HW_CACHE is unreliable on ARM —
+      // many PMU drivers don't map it. Use generic PERF_COUNT_HW_CACHE_MISSES
+      // for LLC-misses on all ARM targets.
+      add("LLC-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
+      add("l1-misses", PERF_TYPE_HW_CACHE,
+          PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+              (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+
+      if (armPart == "0x41-0xd49" || armPart == "0x41-0xd0c") {
+         // Cortex-A77 / Neoverse N1 (Graviton 2)
+         add("mem_stall", PERF_TYPE_HARDWARE,
+             PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
+      } else if (armPart == "0x41-0xd40" || armPart == "0x41-0xd4f") {
+         // Neoverse V1/V2 (Graviton 3/4)
+         add("mem_stall", PERF_TYPE_HARDWARE,
+             PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
+      }
+      }
+#else
       char* cpustr = get_cpu_str();
       std::string cpu(cpustr);
       // see https://download.01.org/perfmon/mapfile.csv for cpu strings
@@ -78,21 +154,80 @@ struct PerfEvents {
          add("loads", "MEM_UOPS_RETIRED.ALL_LOADS");
          add("instr.", "instructions");
       } else if (cpu == "GenuineIntel-6-55-core") {
-         // Skylake X
-         add("cycles", "cpu/cpu-cycles/");
-         add("LLC-misses", "cpu/cache-misses/");
-         add("LLC-misses2", "mem_load_retired.l3_miss");
+         // Skylake-X / Cascade Lake (model 0x55; covers dubliner, Xeon Gold
+         // 6238L). Generic PERF_TYPE_HARDWARE/HW_CACHE forms for the base
+         // counters resolve with no perfmon JSON. The store/load/bandwidth/
+         // stall counters need the skylakex perfmon JSON
+         // (GenuineIntel-6-55-core.json) in ~/.cache/pmu-events/ to resolve;
+         // without it they read 0 (readCounter guard).
+         add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+         add("LLC-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
          add("l1-misses", PERF_TYPE_HW_CACHE,
              PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
                  (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
-         add("instr.", "instructions");
-         add("br. misses", "cpu/branch-misses/");
+         add("l1-hits", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+         add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+         add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
          add("all_rd", "offcore_requests.all_data_rd");
-         add("br. misses", "cpu/branch-misses/");
          add("stores", "mem_inst_retired.all_stores");
          add("loads", "mem_inst_retired.all_loads");
          add("mem_stall", "cycle_activity.stalls_mem_any");
-         //add("page-faults", "page-faults");
+      } else if (cpu == "AuthenticAMD-25-1-core" ||
+                 cpu == "AuthenticAMD-25-11-core") {
+         // AMD Zen3 (25-1) / Zen4 (25-11)
+         // Core-side counters that actually open on AMD. The generic L1D
+         // cache events and PERF_COUNT_HW_CACHE_MISSES work; the Intel-only
+         // cpu/mem-loads|stores (PEBS) and the PERF_TYPE_HW_CACHE LL-miss
+         // generic do NOT open on AMD (LL generic unsupported, L3 events are
+         // on the L3PMC uncore PMU). All named events resolve via the AMD
+         // perfmon JSON through jevents and were verified to open.
+         add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+         add("LLC-misses", "cpu/cache-misses/");
+         add("l1-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("l1-hits", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+         add("stores", "ls_dispatch.store_dispatch");
+         add("loads", "ls_dispatch.ld_dispatch");
+         // Loads that miss L1 (off-core read requests) as a bandwidth proxy
+         // (64B/request assumption in the bandwidth formula). Closest core-side
+         // analog to Intel's offcore_requests.all_data_rd. True DRAM bandwidth
+         // needs the amd_df uncore PMU, which is out of scope here.
+         add("all_rd", "ls_mab_alloc.loads");
+         add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+         add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+         // Generic STALLED_CYCLES_BACKEND; perf maps it on AMD Zen3/Zen4 as a
+         // backend stall proxy. Verified to open and count on roquefort.
+         add("mem_stall", PERF_TYPE_HARDWARE,
+             PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
+      } else if (cpu == "GenuineIntel-6-8F-core") {
+         // Sapphire Rapids (SPR): Xeon Silver 4509Y (manchego).  Lean, proven
+         // set: keep the generic PERF_TYPE_HARDWARE/HW_CACHE forms for the
+         // basic counters, and use perfmon JSON events only where the generic
+         // form doesn't work (stores/loads on SPR need the JSON; all_rd is the
+         // 64B/request bandwidth proxy).  SPR has no offcore_requests.all_data_rd
+         // (SKX); closest completed-request analog is OFFCORE_REQUESTS.DATA_RD
+         // (all data reads incl. prefetch).  On SPR, per-CPU counters for a very
+         // short measured window (a single short rep) can be left unscheduled
+         // (time_running=0); readCounter() guards against the resulting 0/0 NaN,
+         // and normal multi-rep runs (-r 5) schedule all counters correctly.
+         add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+         add("LLC-misses", "cpu/cache-misses/");
+         add("l1-misses", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+         add("l1-hits", PERF_TYPE_HW_CACHE,
+             PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                 (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
+         add("stores", "mem_inst_retired.all_stores");
+         add("loads", "mem_inst_retired.all_loads");
+         add("all_rd", "offcore_requests.data_rd");
+         add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+         add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
       } else {
          add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
          add("LLC-misses", PERF_TYPE_HW_CACHE,
@@ -109,6 +244,7 @@ struct PerfEvents {
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
       }
+#endif // __aarch64__
       add("task-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK);
 #endif
 
@@ -271,26 +407,49 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                                 std::function<void()> fn, uint64_t repetitions,
                                 bool mem) {
    using namespace std;
-   // warmup round
-   double warumupStart = gettime();
-   while (gettime() - warumupStart < 0.15) fn();
+   // warmup rounds
+   for (int warmup = 0; warmup < 3; ++warmup) fn();
+
+   // Collect per-rep wall times
+   std::vector<double> repTimes;
+   repTimes.reserve(repetitions);
 
    uint64_t memStart = 0;
    if (mem) memStart = getCurrentRSS();
    startAll();
-   double start = gettime();
+   double totalStart = gettime();
    size_t performedRep = 0;
-   for (; performedRep < repetitions || gettime() - start < 0.5;
-        ++performedRep) {
+   for (; performedRep < repetitions; ++performedRep) {
+      double t0 = gettime();
       fn();
+      double t1 = gettime();
+      repTimes.push_back((t1 - t0) * 1e3); // ms
    }
-   double end = gettime();
+   double totalEnd = gettime();
    readAll();
+
+   // Compute statistics
+   std::vector<double> sorted = repTimes;
+   std::sort(sorted.begin(), sorted.end());
+   double minTime = sorted.front();
+   double maxTime = sorted.back();
+   double median = (sorted.size() % 2 == 1)
+       ? sorted[sorted.size() / 2]
+       : (sorted[sorted.size() / 2 - 1] + sorted[sorted.size() / 2]) / 2.0;
+   double mean = std::accumulate(repTimes.begin(), repTimes.end(), 0.0) / repTimes.size();
+   double sq_sum = 0;
+   for (auto t : repTimes) sq_sum += (t - mean) * (t - mean);
+   double stddev = repTimes.size() > 1 ? std::sqrt(sq_sum / (repTimes.size() - 1)) : 0.0;
+
    std::cout.precision(3);
    std::cout.setf(std::ios::fixed, std::ios::floatfield);
    if (writeHeader) {
       std::cout << setw(20) << "name"
-                << "," << setw(printFieldWidth) << " time"
+                << "," << setw(printFieldWidth) << "median"
+                << "," << setw(printFieldWidth) << "mean"
+                << "," << setw(printFieldWidth) << "min"
+                << "," << setw(printFieldWidth) << "max"
+                << "," << setw(printFieldWidth) << "stddev"
                 << "," << setw(printFieldWidth) << " CPUs"
                 << "," << setw(printFieldWidth) << " IPC"
                 << "," << setw(printFieldWidth) << " GHz"
@@ -300,9 +459,14 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
       std::cout << std::endl;
    }
 
-   auto runtime = end - start;
-   std::cout << setw(20) << s << "," << setw(printFieldWidth)
-             << (runtime * 1e3 / performedRep) << ",";
+   auto runtime = totalEnd - totalStart;
+   std::cout << setw(20) << s
+             << "," << setw(printFieldWidth) << median
+             << "," << setw(printFieldWidth) << mean
+             << "," << setw(printFieldWidth) << minTime
+             << "," << setw(printFieldWidth) << maxTime
+             << "," << setw(printFieldWidth) << stddev
+             << ",";
 #ifdef __linux__
    if (!getenv("EXTERNALPROFILE")) {
       std::cout << setw(printFieldWidth)
@@ -316,16 +480,20 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                 << ",";
       std::cout << setw(printFieldWidth)
                 << ((((*this)["all_rd"] * 64.0) / (1024 * 1024)) /
-                    (end - start))
+                    runtime)
                 << ",";
    }
 #endif
-   // std::cout <<
-   // (((e["all_requests"]*64.0)/(1024*1024))/(e.events["cycles"][0].data.time_enabled/1e9))
-   // << " allMB/s,";
 
    printAll(std::cout, count * performedRep);
    if (mem) std::cout << (getCurrentRSS() - memStart) / (1024.0 * 1024) << "MB";
    std::cout << std::endl;
+
+   // Emit per-rep times to stderr for post-processing
+   std::cerr << "per-rep " << s << ":";
+   for (size_t i = 0; i < repTimes.size(); ++i)
+      std::cerr << " " << std::fixed << std::setprecision(3) << repTimes[i];
+   std::cerr << std::endl;
+
    writeHeader = false;
 }

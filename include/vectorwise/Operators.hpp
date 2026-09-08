@@ -10,6 +10,7 @@
 #include "vectorwise/Primitives.hpp"
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <tuple>
@@ -140,10 +141,55 @@ template <typename PAYLOAD> class DebugOperator : public UnaryOperator {
 
 class Scan : public Operator {
  public:
+#ifdef NUMA_SHARD
+   struct Shared : public SharedState {
+      struct PaddedAtomic {
+         std::atomic<size_t> pos{0};
+         char pad_[64 - sizeof(std::atomic<size_t>)];
+      };
+      static_assert(sizeof(PaddedAtomic) == 64, "PaddedAtomic must be 64 bytes");
+      std::array<PaddedAtomic, runtime::NUM_NUMA_REGIONS> nodePos;
+      struct NodeRange {
+         size_t tupleBegin = 0;
+         size_t tupleEnd = 0;
+      };
+      std::array<NodeRange, runtime::NUM_NUMA_REGIONS> ranges;
+   };
+#elif defined(SCAN_STATIC_PARTITION)
+   struct Shared : public SharedState {
+      struct alignas(64) SliceState {
+         std::atomic<size_t> pos{0};
+         std::atomic<bool> exhausted{false};
+         size_t tupleBegin = 0;
+         size_t tupleEnd = 0;
+      };
+      std::unique_ptr<SliceState[]> slices;
+      std::once_flag initFlag;
+      size_t numThreads = 0;
+
+      void init(size_t nrTuples, size_t nThreads) {
+         std::call_once(initFlag, [&]() {
+            numThreads = nThreads;
+            slices = std::make_unique<SliceState[]>(nThreads);
+            size_t sliceSize = nrTuples / nThreads;
+            size_t remainder = nrTuples % nThreads;
+            size_t offset = 0;
+            for (size_t i = 0; i < nThreads; ++i) {
+               slices[i].tupleBegin = offset;
+               size_t thisSlice = sliceSize + (i < remainder ? 1 : 0);
+               offset += thisSlice;
+               slices[i].tupleEnd = offset;
+            }
+         });
+      }
+      Shared() = default;
+   };
+#else
    struct Shared : public SharedState {
       std::atomic<size_t> pos;
       Shared() : pos(0){};
    };
+#endif
 
  private:
    size_t scanChunkSize;
@@ -154,13 +200,44 @@ class Scan : public Operator {
    size_t lastOffset;
    size_t nrTuples;
    size_t vecSize;
+
+#ifdef NUMA_SHARD
+   struct Consumer {
+      void** location;
+      size_t vecBytes;     // vecSize * typeSize
+      size_t elemSize;     // typeSize
+      std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases;
+   };
+   std::vector<Consumer> consumers;
+
+   // Per-worker steal order and state
+   size_t homeNode;
+   std::array<size_t, runtime::NUM_NUMA_REGIONS> stealOrder;
+   size_t currentStealIdx;  // index into stealOrder for current node
+#elif defined(SCAN_STATIC_PARTITION)
+   struct PartConsumer {
+      void** location;   // pointer-to-pointer updated each batch
+      size_t elemSize;   // bytes per tuple element
+      size_t vecBytes;   // vecSize * elemSize
+      void* base;        // column base pointer for absolute positioning
+   };
+   std::vector<PartConsumer> consumers;
+   size_t homeSlice;
+   size_t currentStealIdx;
+#else
    std::vector<std::pair<void**, size_t>> consumers;
+#endif
 
  public:
    Scan(Shared& sm, size_t nrTuples, size_t vecSize);
+#ifdef NUMA_SHARD
+   void addConsumer(void** colPtr, size_t typeSize,
+                    std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases);
+#else
    /// Add consumer to scan operator, typeSize is size of
    /// type pointed to by colPtr
    void addConsumer(void** colPtr, size_t typeSize);
+#endif
    virtual size_t next() override;
 };
 
@@ -268,6 +345,7 @@ class Hashjoin : public BinaryOperator {
 };
 
 class HashGroup : public UnaryOperator {
+ protected:
    runtime::Hashmap ht;
    size_t maxFill;
    const size_t initialMapSize = 1024;
@@ -300,6 +378,10 @@ class HashGroup : public UnaryOperator {
 
    template <typename T> class GroupLookup {
 
+#ifndef ORIGINAL_GROUPLOOKUP
+      /// Pass 1: prefetch + load chain heads into htMatches
+      void htProbe(pos_t n, decltype(ht) & ht);
+#endif
       /// Find entries in ht for groupHashes.
       /// Found entries are written to htMatches, missing entries
       /// are added to groupsNotFound
@@ -438,6 +520,72 @@ class HashGroup : public UnaryOperator {
    void clearHashtable();
 };
 
+/// Optimized HashGroup using Concat/Hash/Lookup key-packing path.
+/// Requires all addKey calls to supply a selection vector.
+class OptHashGroup : public HashGroup {
+ public:
+   using HashGroup::HashGroup;
+   virtual size_t next() override;
+};
+
+/// LUT-based group-by for small, dense keyspaces (e.g. Q1's packed uint16_t).
+/// Replaces HashGroup when the key can be used as a direct array index.
+/// No hashing, no hash table, no chain walking — O(1) group lookup per tuple.
+class LUTGroup : public UnaryOperator {
+ public:
+   static constexpr size_t LUT_SIZE = 65536; // max entries for uint16_t key
+
+   struct Shared : SharedState {
+      std::mutex mergeMutex;
+      /// Global accumulators: transposed layout — accum[valueIdx][key].
+      /// Each value gets its own contiguous LUT_SIZE array.
+      std::vector<std::vector<int64_t>> globalAccum;
+      /// Bitmap: which keys are occupied globally.
+      std::vector<bool> globalOccupied;
+      size_t nValues = 0;
+      bool globalInitialized = false;
+      std::atomic<size_t> producerClaimed{0};
+      Shared() {}
+   } & shared;
+
+   size_t vecSize;
+   /// Number of int64_t aggregate values per group
+   size_t nValues = 0;
+
+   /// Thread-local accumulators: transposed layout — accum[valueIdx][key]
+   std::vector<int64_t*> localAccum; // pointers to per-value arrays
+   std::vector<int64_t> localAccumStorage; // backing storage
+   std::vector<bool> localOccupied;
+
+   /// Packed key buffer (input from Project)
+   uint16_t* packedKeys = nullptr;
+   /// Selection vector (maps packed keys to column positions for sel-based values)
+   pos_t* selVec = nullptr;
+
+   struct ValueSpec {
+      void* colData;       // column data pointer (or buffer pointer)
+      bool hasSel;         // whether this value uses a selection vector
+      bool isCount;        // true = increment by 1, ignore colData
+   };
+   std::deque<ValueSpec> valueSpecs;
+
+   /// Output buffers for result gathering
+   /// First two are for unpacked key columns (returnflag, linestatus)
+   void* outReturnflag = nullptr;
+   void* outLinestatus = nullptr;
+   /// Then one per aggregate value
+   std::vector<void*> outValues;
+
+   struct Continuation {
+      bool consumed = false;
+      size_t lutPos = 0;  // current position in LUT scan
+   } cont;
+
+   LUTGroup(Shared& s);
+   virtual size_t next() override;
+};
+
+#ifdef ORIGINAL_GROUPLOOKUP
 template <typename T>
 pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
@@ -464,6 +612,50 @@ HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
    }
    return found;
 }
+#else
+template <typename T>
+void HashGroup::GroupLookup<T>::htProbe(pos_t n, runtime::Hashmap& ht) {
+   static constexpr pos_t PREFETCH_DIST = 16;
+
+   const pos_t primeEnd = std::min(n, PREFETCH_DIST);
+   for (pos_t j = 0; j < primeEnd; ++j) {
+      __builtin_prefetch(&ht.entries[self()->hashForTuple(j) & ht.mask], 0, 1);
+   }
+
+   for (pos_t i = 0; i < n; ++i) {
+      if (i + PREFETCH_DIST < n)
+         __builtin_prefetch(&ht.entries[self()->hashForTuple(i + PREFETCH_DIST) & ht.mask], 0, 1);
+      htMatches[i] = ht.find_chain(self()->hashForTuple(i));
+      groupsFound[i] = i;
+   }
+}
+
+template <typename T>
+pos_t INTERPRET_SEPARATE
+HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
+   pos_t found = 0;
+   for (pos_t i = 0; i < n; ++i) {
+      auto hash = self()->hashForTuple(i);
+      auto el = htMatches[i];
+      if (el != ht.end()) {
+         if (el->hash == hash) {
+            htMatches[i] = el;
+            groupsFound[found++] = i;
+            goto nextChain;
+         }
+         for (el = el->next; el != ht.end(); el = el->next)
+            if (el->hash == hash) {
+               htMatches[i] = el;
+               groupsFound[found++] = i;
+               goto nextChain;
+            }
+      }
+      groupsNotFound->push_back(i);
+   nextChain:;
+   }
+   return found;
+}
+#endif
 
 template <typename T>
 pos_t HashGroup::GroupLookup<T>::htFollow(runtime::Hashmap& ht)
@@ -492,6 +684,9 @@ pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    keysNEq->clear();
    groupsNotFound->clear();
+#ifndef ORIGINAL_GROUPLOOKUP
+   htProbe(n, ht);
+#endif
    auto found = htLookup(n, ht);
    auto keysEqual = keyEquality.evaluate(found);
    while (keysNEq->size()) {

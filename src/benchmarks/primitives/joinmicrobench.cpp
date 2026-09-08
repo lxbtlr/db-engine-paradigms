@@ -2,7 +2,10 @@
 #include "vectorwise/Operators.hpp"
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/Hash.hpp"
-#include "immintrin.h"
+#ifndef SIMDE_ENABLE_NATIVE_ALIASES
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#endif
+#include <simde/x86/avx512.h>
 #include <algorithm>
 
 using namespace std;

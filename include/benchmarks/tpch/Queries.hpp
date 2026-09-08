@@ -25,7 +25,8 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
       sum_base_price,
       sum_disc_price,
       sum_charge,
-      count_order
+      count_order,
+      packed_key
    };
    struct Q1 {
       types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
@@ -36,6 +37,7 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
              size_t size = 1024)
        : QueryBuilder(db, shared, size) {}
    std::unique_ptr<Q1> getQuery();
+   std::unique_ptr<Q1> getQueryPacked();
 };
 
 std::unique_ptr<runtime::Query>
@@ -45,6 +47,10 @@ std::unique_ptr<runtime::Query>
 q1_vectorwise(runtime::Database& db,
               size_t nrThreads = std::thread::hardware_concurrency(),
               size_t vectorSize = 1024);
+std::unique_ptr<runtime::Query>
+q1_vectorwise_packed(runtime::Database& db,
+                     size_t nrThreads = std::thread::hardware_concurrency(),
+                     size_t vectorSize = 1024);
 
 struct Q3Builder : private vectorwise::QueryBuilder {
    enum {

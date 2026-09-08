@@ -1,5 +1,11 @@
 #include "vectorwise/QueryBuilder.hpp"
 #include <cstddef>
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+#include "common/runtime/Concurrency.hpp"
+#endif
+#if defined(NUMA_DEBUG) && (defined(NUMA_ALLOC) || defined(NUMA_SHARD))
+#include <cstdio>
+#endif
 
 using namespace std;
 
@@ -55,8 +61,31 @@ QueryBuilder::ScanBuilder QueryBuilder::Scan(std::string relation) {
    auto& rel = db[relation];
    auto nr = nextOpNr();
    auto& s = operatorState.get<Scan::Shared>(nr);
+#ifdef NUMA_SHARD
+#ifdef NUMA_DEBUG
+   fprintf(stderr, "[SCAN] relation=%s nr=%zu nrTuples=%zu this_worker=%p worker_id=%zu\n",
+           relation.c_str(), nr, rel.nrTuples,
+           (void*)runtime::this_worker,
+           runtime::this_worker ? runtime::this_worker->worker_id : 999999);
+   fprintf(stderr, "[SCAN] got Shared at %p hasNumaShards=%d\n",
+           (void*)&s, (int)rel.hasNumaShards);
+#endif
+   if (rel.hasNumaShards) {
+      for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
+         s.ranges[r].tupleBegin = rel.numaShards[r].tupleBegin;
+         s.ranges[r].tupleEnd = rel.numaShards[r].tupleEnd;
+      }
+   } else {
+      s.ranges[0].tupleBegin = 0;
+      s.ranges[0].tupleEnd = rel.nrTuples;
+      for (size_t r = 1; r < runtime::NUM_NUMA_REGIONS; ++r) {
+         s.ranges[r].tupleBegin = 0;
+         s.ranges[r].tupleEnd = 0;
+      }
+   }
+#endif
    auto scan = make_unique<class Scan>(s, rel.nrTuples, vecs.getVecSize());
-   auto res = scan.get();
+   auto* res = scan.get();
    pushOperator(move(scan));
    return {*res, rel};
 }
@@ -127,7 +156,45 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
    r.buf = DataStorage::BufferSpec::Column;
    auto& attr = scan.rel[attribute];
    r.dataSize = attr.type->rt_size();
+
+#ifdef NUMA_SHARD
+   {
+      void* base = attr.data();
+      if (scan.rel.hasNumaShards) {
+         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n)
+            r.shardBases[n] = scan.rel.numaShards[n].columns[attribute];
+         size_t home = runtime::regionOf(runtime::this_worker->worker_id);
+         r.data = r.shardBases[home];
+      } else {
+         // Non-sharded relation: all shardBases point to the single column
+         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n)
+            r.shardBases[n] = base;
+         r.data = base;
+      }
+#ifdef NUMA_DEBUG
+      fprintf(stderr,
+              "worker %zu col %s shardBases=[%p,%p,%p,%p] data=%p\n",
+              runtime::this_worker->worker_id, attribute.c_str(),
+              r.shardBases[0], r.shardBases[1], r.shardBases[2],
+              r.shardBases[3], r.data);
+#endif
+   }
+#elif defined(NUMA_ALLOC)
+   if (scan.rel.hasNumaReplicas) {
+      size_t region = runtime::regionOf(runtime::this_worker->worker_id);
+      r.data = scan.rel.numaReplicas[region].columns[attribute];
+#ifdef NUMA_DEBUG
+      fprintf(stderr, "worker %zu region %zu col %s data=%p numa_replica=%p\n",
+              runtime::this_worker->worker_id, region,
+              attribute.c_str(), attr.data(), r.data);
+#endif
+   } else {
+      r.data = attr.data();
+   }
+#else
    r.data = attr.data();
+#endif
+
    r.scan = &scan.scan;
    return r;
 }
@@ -154,7 +221,11 @@ void QueryBuilder::DataStorage::registerDS(void** location) {
       assert(location);
       assert(scan);
       assert(dataSize);
+#ifdef NUMA_SHARD
+      scan->addConsumer(location, dataSize, shardBases);
+#else
       scan->addConsumer(location, dataSize);
+#endif
    }
 }
 
@@ -204,6 +275,17 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
    expression->ops.push_back(move(f4));
    return *this;
 }
+QueryBuilder::ExpressionBuilder&
+QueryBuilder::ExpressionBuilder::addConcat(DS sel, DS col, DS out,
+                                           size_t offset) {
+   auto concat = make_unique<ConcatOp>(sel, col, out,
+                                       col.dataSize, out.dataSize, offset);
+   sel.registerDS(reinterpret_cast<void**>(&concat->sel));
+   col.registerDS(reinterpret_cast<void**>(&concat->in));
+   expression->ops.push_back(move(concat));
+   return *this;
+}
+
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Expression>() {
    return move(expression);
@@ -499,6 +581,76 @@ QueryBuilder::HashGroupBuilder QueryBuilder::HashGroup() {
    b.globalLookup.partitionedRows = local.partitionedRows;
 
    // scatter hash
+   auto scatter_build = make_unique<FScatterSelOp>(
+       primitives::scatter_sel_hash_t_col, Value(local.groupRepresentatives),
+       Value(local.groupHashes), reinterpret_cast<void**>(&local.scatterStart),
+       &local.ht_entry_size, offsetof(runtime::Hashmap::EntryHeader, hash));
+   local.buildScatter += move(scatter_build);
+
+   auto scatter_build_global = make_unique<FScatterSelRowOp>(
+       primitives::scatter_sel_row_hash_t_col,
+       Value(global.groupRepresentatives), &global.rowData, &global.rowSize, 0,
+       reinterpret_cast<void**>(&global.scatterStart), &global.ht_entry_size,
+       offsetof(runtime::Hashmap::EntryHeader, hash));
+   global.buildScatter += move(scatter_build_global);
+
+   op.child = popOperator();
+   pushOperator(move(gr));
+   return b;
+}
+
+QueryBuilder::HashGroupBuilder QueryBuilder::OptHashGroup() {
+   HashGroupBuilder b(*this);
+   auto nr = nextOpNr();
+   auto& s = operatorState.get<class HashGroup::Shared>(nr);
+   auto gr = make_unique<class OptHashGroup>(s);
+   b.group = gr.get();
+   gr->vecSize = vecs.getVecSize();
+   gr->groupStore.setSource(&runtime::this_worker->allocator);
+
+   auto& op = *gr;
+   op.groupHt =
+       make_unique<runtime::HashmapSmall<pos_t, pos_t>>(vecs.getVecSize());
+   auto& local = op.preAggregation;
+   local.ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
+   local.groupHashes = static_cast<runtime::Hashmap::hash_t*>(
+       vecs.get(8));
+   local.htMatches = static_cast<runtime::Hashmap::EntryHeader**>(
+       vecs.get(sizeof(runtime::Hashmap::EntryHeader*)));
+   local.groupsFound = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.groupsNotFound =
+       reinterpret_cast<SizeBuffer<pos_t>*>(vecs.getSizeBuffer(sizeof(pos_t)));
+   local.keysNEq =
+       reinterpret_cast<SizeBuffer<pos_t>*>(vecs.getSizeBuffer(sizeof(pos_t)));
+   local.partitionEndsIn = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.partitionEndsOut = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.unpartitionedRows = local.groupsNotFound->data();
+   local.partitionedRows = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+   local.groupRepresentatives = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
+
+   b.localLookup.partitionEndsIn = local.partitionEndsIn;
+   b.localLookup.partitionEndsOut = local.partitionEndsOut;
+   b.localLookup.unpartitionedRows = local.unpartitionedRows;
+   b.localLookup.partitionedRows = local.partitionedRows;
+
+   auto& global = op.globalAggregation;
+   global.ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
+   global.groupHashes = local.groupHashes;
+   global.htMatches = local.htMatches;
+   global.groupsFound = local.groupsFound;
+   global.groupsNotFound = local.groupsNotFound;
+   global.keysNEq = local.keysNEq;
+   global.partitionEndsIn = local.partitionEndsIn;
+   global.partitionEndsOut = local.partitionEndsOut;
+   global.unpartitionedRows = global.groupsNotFound->data();
+   global.partitionedRows = local.partitionedRows;
+   global.groupRepresentatives = local.groupRepresentatives;
+
+   b.globalLookup.partitionEndsIn = local.partitionEndsIn;
+   b.globalLookup.partitionEndsOut = local.partitionEndsOut;
+   b.globalLookup.unpartitionedRows = local.unpartitionedRows;
+   b.globalLookup.partitionedRows = local.partitionedRows;
+
    auto scatter_build = make_unique<FScatterSelOp>(
        primitives::scatter_sel_hash_t_col, Value(local.groupRepresentatives),
        Value(local.groupHashes), reinterpret_cast<void**>(&local.scatterStart),
@@ -818,4 +970,79 @@ QueryBuilder::HashGroupBuilder::padToAlign(size_t align) {
        padding(group->globalAggregation.ht_entry_size, align);
    return *this;
 }
+// ---------------------------------------------------------------------------
+// LUTGroupBuilder
+// ---------------------------------------------------------------------------
+QueryBuilder::LUTGroupBuilder::LUTGroupBuilder(QueryBuilder& b) : base(b) {}
+
+QueryBuilder::LUTGroupBuilder QueryBuilder::LUTGroup() {
+   LUTGroupBuilder b(*this);
+   auto nr = nextOpNr();
+   auto& s = operatorState.get<class LUTGroup::Shared>(nr);
+   auto gr = make_unique<class LUTGroup>(s);
+   b.group = gr.get();
+   gr->vecSize = vecs.getVecSize();
+   gr->child = popOperator();
+   pushOperator(move(gr));
+   return b;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::setKeyAndSel(DS packedKeyBuf, DS selBuf) {
+   group->packedKeys = reinterpret_cast<uint16_t*>(packedKeyBuf.data);
+   packedKeyBuf.registerDS(reinterpret_cast<void**>(&group->packedKeys));
+   group->selVec = reinterpret_cast<pos_t*>(selBuf.data);
+   selBuf.registerDS(reinterpret_cast<void**>(&group->selVec));
+   return *this;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::addValue(DS col, DS out) {
+   LUTGroup::ValueSpec spec;
+   spec.colData = col.data;
+   spec.hasSel = false;
+   spec.isCount = false;
+   group->valueSpecs.push_back(spec);
+   // Register so column pointers are updated by Scan
+   auto idx = group->valueSpecs.size() - 1;
+   col.registerDS(&group->valueSpecs[idx].colData);
+   group->outValues.push_back(out.data);
+   group->nValues++;
+   return *this;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::addValueSel(DS col, DS out) {
+   LUTGroup::ValueSpec spec;
+   spec.colData = col.data;
+   spec.hasSel = true;
+   spec.isCount = false;
+   group->valueSpecs.push_back(spec);
+   auto idx = group->valueSpecs.size() - 1;
+   col.registerDS(&group->valueSpecs[idx].colData);
+   group->outValues.push_back(out.data);
+   group->nValues++;
+   return *this;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::addCount(DS out) {
+   LUTGroup::ValueSpec spec;
+   spec.colData = nullptr;
+   spec.hasSel = false;
+   spec.isCount = true;
+   group->valueSpecs.push_back(spec);
+   group->outValues.push_back(out.data);
+   group->nValues++;
+   return *this;
+}
+
+QueryBuilder::LUTGroupBuilder&
+QueryBuilder::LUTGroupBuilder::setKeyOutputs(DS outReturnflag,
+                                              DS outLinestatus) {
+   group->outReturnflag = outReturnflag.data;
+   group->outLinestatus = outLinestatus.data;
+   return *this;
+}
+
 } // namespace vectorwise

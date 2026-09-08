@@ -6,6 +6,19 @@ plot/*.log
 plot/*.tex
 .Rhistory
 
+
+# comparison artifacts
+*.bkup
+
+# emacs artifacts
+\#*\#
+
+
+# Data Errata
+*.csv
+*.out
+*.err
+
 # Prerequisites
 *.d
 
@@ -38,3 +51,12 @@ plot/*.tex
 *.exe
 *.out
 *.app
+
+# transient config->binary maps (regenerated per build)
+*_map.txt
+
+# helper scripts: not part of the build
+scripts/
+
+# offline machine registration notes (not tracked)
+OFFLINE_MACHINE_REGISTRATION.md

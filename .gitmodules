@@ -1,0 +1,6 @@
+[submodule "3rdparty/gperftools"]
+	path = 3rdparty/gperftools
+	url = https://github.com/gperftools/gperftools.git
+[submodule "3rdparty/simde"]
+	path = 3rdparty/simde
+	url = https://github.com/simd-everywhere/simde

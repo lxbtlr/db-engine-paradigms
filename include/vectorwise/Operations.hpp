@@ -182,4 +182,20 @@ struct F4_Op : public Op
          operation(o) {}
    virtual pos_t run(pos_t n) override;
 };
+
+/// Concatenate a single source column into an output buffer at a fixed offset.
+/// Called once per source column to build up a packed key buffer.
+struct ConcatOp : public Op {
+   void* sel;       // selection vector (pos_t*)
+   void* in;        // source column
+   void* out;       // destination packed buffer
+   size_t in_size;  // byte width of source element
+   size_t out_size; // byte width of destination element (total packed width)
+   size_t offset;   // byte offset within destination element
+   ConcatOp(void* sel, void* in, void* out,
+            size_t in_size, size_t out_size, size_t offset)
+       : sel(sel), in(in), out(out), in_size(in_size),
+         out_size(out_size), offset(offset) {}
+   virtual pos_t run(pos_t n) override;
+};
 }
