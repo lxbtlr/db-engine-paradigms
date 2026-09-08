@@ -62,15 +62,15 @@ TARGET_ARCH_CHOICES = [
 BUILD_TYPES = ["Release", "RelWithDebInfo", "Debug"]
 
 # ── Machine topology presets ──────────────────────────────────────────────
-# Each entry: (SOCKETS_COUNT, CORES_PER_SOCKET, SMT_PER_CORE, CPU_LAYOUT_CONTIGUOUS)
+# Each entry: (SOCKETS_COUNT, CORES_PER_SOCKET, SMT_PER_CORE, CPU_LAYOUT_CONTIGUOUS, TARGET_ARCH)
 
 MACHINE_PRESETS = {
-    "dubliner":  (4, 22, 2, False),   # 4-socket Xeon, interleaved CPU numbering
-    "roquefort": (1, 24, 2, False),   # 1-socket AMD EPYC 7443P (Zen3)
-    "manchego":  (2, 8, 2, False),    # 2-socket Xeon Silver 4509Y (SPR), interleaved
-    "burrata":   (1, 128, 1, False),  # 1-socket ARM Neoverse-N1
-    "kafir":    (8, 24, 2, True),   # 8-node, contiguous CPU numbering
-    "custom":   None,  # user sets values manually
+    "dubliner":  (4, 22, 2, False, "native"),           # 4-socket Xeon, interleaved
+    "roquefort": (1, 24, 2, False, "native"),            # 1-socket AMD EPYC 7443P (Zen3)
+    "manchego":  (2, 8, 2, False, "sapphirerapids"),     # 2-socket Xeon Silver 4509Y (SPR)
+    "burrata":   (1, 128, 1, False, "neoverse-n1"),      # 1-socket ARM Neoverse-N1
+    "kafir":     (8, 24, 2, True, "skylake-x"),          # 8-node Skylake-SP, contiguous
+    "custom":    None,  # user sets values manually
 }
 
 # ── Preset configurations ─────────────────────────────────────────────────
@@ -154,7 +154,33 @@ def configure():
     if preset_name == "Custom" or questionary.confirm(
         "Customize options further?", default=False
     ).ask():
-        # Target architecture
+        # Machine topology (sets TARGET_ARCH default)
+        machine_name = questionary.select(
+            "Machine topology preset:",
+            choices=list(MACHINE_PRESETS.keys()),
+            default=opts["TARGET_MACHINE"],
+        ).ask()
+        if machine_name is None:
+            sys.exit(1)
+        opts["TARGET_MACHINE"] = machine_name
+        mp = MACHINE_PRESETS[machine_name]
+        if mp is not None:
+            opts["SOCKETS_COUNT"] = str(mp[0])
+            opts["CORES_PER_SOCKET"] = str(mp[1])
+            opts["SMT_PER_CORE"] = str(mp[2])
+            opts["CPU_LAYOUT_CONTIGUOUS"] = mp[3]
+            opts["TARGET_ARCH"] = mp[4]
+        else:
+            opts["SOCKETS_COUNT"] = questionary.text(
+                "Sockets / chiplets / memory domains:", default=opts["SOCKETS_COUNT"]).ask()
+            opts["CORES_PER_SOCKET"] = questionary.text(
+                "Cores per socket / chiplet:", default=opts["CORES_PER_SOCKET"]).ask()
+            opts["SMT_PER_CORE"] = questionary.text(
+                "Hardware threads per core (SMT):", default=opts["SMT_PER_CORE"]).ask()
+            opts["CPU_LAYOUT_CONTIGUOUS"] = questionary.confirm(
+                "Contiguous CPU numbering per node? (vs interleaved)", default=False).ask()
+
+        # Target architecture (default from machine preset, overridable)
         opts["TARGET_ARCH"] = questionary.select(
             "Target architecture:",
             choices=TARGET_ARCH_CHOICES,
@@ -171,31 +197,6 @@ def configure():
         ).ask()
         if opts["BUILD_TYPE"] is None:
             sys.exit(1)
-
-        # Machine topology
-        machine_name = questionary.select(
-            "Machine topology preset:",
-            choices=list(MACHINE_PRESETS.keys()),
-            default=opts["TARGET_MACHINE"],
-        ).ask()
-        if machine_name is None:
-            sys.exit(1)
-        opts["TARGET_MACHINE"] = machine_name
-        mp = MACHINE_PRESETS[machine_name]
-        if mp is not None:
-            opts["SOCKETS_COUNT"] = str(mp[0])
-            opts["CORES_PER_SOCKET"] = str(mp[1])
-            opts["SMT_PER_CORE"] = str(mp[2])
-            opts["CPU_LAYOUT_CONTIGUOUS"] = mp[3]
-        else:
-            opts["SOCKETS_COUNT"] = questionary.text(
-                "Sockets / chiplets / memory domains:", default=opts["SOCKETS_COUNT"]).ask()
-            opts["CORES_PER_SOCKET"] = questionary.text(
-                "Cores per socket / chiplet:", default=opts["CORES_PER_SOCKET"]).ask()
-            opts["SMT_PER_CORE"] = questionary.text(
-                "Hardware threads per core (SMT):", default=opts["SMT_PER_CORE"]).ask()
-            opts["CPU_LAYOUT_CONTIGUOUS"] = questionary.confirm(
-                "Contiguous CPU numbering per node? (vs interleaved)", default=False).ask()
 
         # Compiler & optimization group
         compiler_opts = questionary.checkbox(
