@@ -102,4 +102,112 @@ struct Kernel<W, Shape::Independent> {
    using type = DdKernelIndep<W>;
 };
 
+// ---------------------------------------------------------------------------
+// Test 3 -- tiered-reload kernel.
+//
+// Identical per-intermediate arithmetic to DdKernelIndep (`ep * Ck +
+// (ep ^ (disc + k))`, ~4 scalar ops per intermediate).  Each intermediate
+// is written to and read back from a scratch buffer whose stride is chosen
+// so the reload working set lands in a specific cache tier.
+//
+// The Tier template parameter selects the target: L1, L2, LLC, or DRAM.
+// Instruction count is identical across tiers at each W -- only the
+// address (and therefore the cache level servicing the reload) changes.
+//
+// Target machine: Xeon Gold 6238 (Cascade Lake-SP), 4S/22C/2T.
+// Per-core: L1d 32 KB, L2 1 MB.  Per-socket LLC: 30.25 MB.
+// Tier buffer sizes chosen so that `W_max * stride_bytes` lands in the
+// target level with margin:
+//   L1:   16 KB working set  (fits in 32 KB L1d)
+//   L2:   256 KB working set (overflows L1, fits in 1 MB L2)
+//   LLC:  8 MB working set   (overflows L2, fits in 30 MB LLC)
+//   DRAM: 128 MB working set (overflows 30 MB LLC)
+//
+// Stride per tier = tierBytes / W, rounded down to an odd multiple of a
+// cache line (64 bytes) to avoid 4 KB aliasing and set conflicts.  Both
+// W and Tier are compile-time, so the stride is constexpr and the
+// store/load offsets fold into the addressing mode (no extra instructions).
+// ---------------------------------------------------------------------------
+
+enum class Tier { L1, L2, LLC, DRAM };
+
+namespace detail {
+
+// Target working-set size (bytes) per tier.
+constexpr size_t tierBytes(Tier t) {
+   switch (t) {
+      case Tier::L1:   return 16UL * 1024;        // 16 KB
+      case Tier::L2:   return 256UL * 1024;        // 256 KB
+      case Tier::LLC:  return 8UL * 1024 * 1024;   // 8 MB
+      case Tier::DRAM: return 128UL * 1024 * 1024; // 128 MB
+   }
+   return 16UL * 1024;
+}
+
+// Compute stride in int64_t units (8 bytes each).
+// stride_bytes = tierBytes / W, rounded down to an odd multiple of 64.
+// Minimum stride is 64 bytes (one cache line = 8 int64s).
+constexpr size_t tierStride(Tier t, int W) {
+   size_t raw = tierBytes(t) / static_cast<size_t>(W);
+   // Round down to multiple of 64 bytes
+   size_t lines = raw / 64;
+   if (lines < 1) lines = 1;
+   // Make odd to avoid power-of-two stride aliasing
+   if (lines > 1 && (lines & 1) == 0) lines -= 1;
+   // Return in int64_t units (bytes / 8)
+   return (lines * 64) / 8;
+}
+
+// Total scratch buffer size in int64_t units.
+constexpr size_t tierBufSize(Tier t, int W) {
+   return tierStride(t, W) * static_cast<size_t>(W);
+}
+
+} // namespace detail
+
+template <int W, Tier T>
+struct DdKernelTiered {
+   static constexpr size_t STRIDE = detail::tierStride(T, W);
+   static constexpr size_t BUF_SIZE = detail::tierBufSize(T, W);
+
+   // Compute intermediate k, write to scratch, barrier, read back.
+   // The write+read forces the value through the cache hierarchy at the
+   // tier determined by the buffer's total footprint.
+   template <int k>
+   static inline int64_t gen(int64_t extendedprice, int64_t discount,
+                             int64_t* __restrict__ scratch) {
+      int64_t v = extendedprice * ddConstant(k) +
+                  (extendedprice ^ (discount + k));
+      // Store to tier-specific scratch slot
+      scratch[k * STRIDE] = v;
+      // Scheduling barrier: ensures the store is committed before the
+      // reload, and prevents the compiler from eliminating the round-trip.
+      asm volatile("" ::: "memory");
+      // Reload from the same slot -- this is the measured access.
+      int64_t r = scratch[k * STRIDE];
+      // Pin the reloaded value so it cannot be optimized away.
+      asm volatile("" : "+r"(r));
+      return r;
+   }
+
+   template <int... ks>
+   static inline int64_t reduce(int64_t extendedprice, int64_t discount,
+                                int64_t* __restrict__ scratch,
+                                std::integer_sequence<int, ks...>) {
+      return (gen<ks>(extendedprice, discount, scratch) + ...);
+   }
+
+   static inline int64_t run(int64_t extendedprice, int64_t discount,
+                             int64_t* __restrict__ scratch) {
+      return reduce(extendedprice, discount, scratch,
+                    std::make_integer_sequence<int, W>{});
+   }
+};
+
+// Tiered kernel selector (parallel to Kernel<W,S>).
+template <int W, Tier T>
+struct KernelTiered {
+   using type = DdKernelTiered<W, T>;
+};
+
 }  // namespace dd

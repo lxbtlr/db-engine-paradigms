@@ -47,11 +47,12 @@ set(CORES_PER_SOCKET 22 CACHE STRING "Physical cores per socket/chiplet")
 set(SMT_PER_CORE 2 CACHE STRING "Hardware threads per physical core")
 
 if(TARGET_MACHINE STREQUAL "dubliner")
-  # 4-socket Xeon, 22 cores/socket, 2-way SMT, interleaved CPU numbering
+  # 4-socket Xeon Gold 6238 (Cascade Lake-SP), 22 cores/socket, 2-way SMT,
+  # interleaved CPU numbering.  L1d 32 KB, L2 1 MB, LLC 30.25 MB per socket.
   set(SOCKETS_COUNT 4)
   set(CORES_PER_SOCKET 22)
   set(SMT_PER_CORE 2)
-  set(TARGET_ARCH "native")
+  set(TARGET_ARCH "cascadelake")
 elseif(TARGET_MACHINE STREQUAL "roquefort")
   # 1-socket AMD EPYC 7443P (Zen3), 24 cores, 2-way SMT, 1 NUMA node
   set(SOCKETS_COUNT 1)
@@ -124,7 +125,7 @@ endif (VW_USE_CRC32)
 # "native" (default) auto-detects via -march=native / -mcpu=native.
 # Set to a known profile for cross-compilation or reproducible builds.
 set(TARGET_ARCH "native" CACHE STRING
-    "Target architecture profile: native, skylake-x, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, armv8.2-generic, armv9-generic")
+    "Target architecture profile: native, skylake-x, cascadelake, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, armv8.2-generic, armv9-generic")
 
 if(TARGET_ARCH STREQUAL "native")
   # Auto-detect: -mcpu=native on ARM, -march=native on x86
@@ -136,6 +137,8 @@ if(TARGET_ARCH STREQUAL "native")
 # --- x86 profiles ---
 elseif(TARGET_ARCH STREQUAL "skylake-x")
   set(ARCH_FLAGS "-march=skylake-avx512 -mtune=skylake-avx512")
+elseif(TARGET_ARCH STREQUAL "cascadelake")
+  set(ARCH_FLAGS "-march=cascadelake -mtune=cascadelake")
 elseif(TARGET_ARCH STREQUAL "icelake")
   set(ARCH_FLAGS "-march=icelake-server -mtune=icelake-server")
 elseif(TARGET_ARCH STREQUAL "sapphirerapids")

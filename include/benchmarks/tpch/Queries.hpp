@@ -86,6 +86,17 @@ std::unique_ptr<runtime::Query>
 q1_dd_vectorwise(runtime::Database& db, size_t nrThreads, size_t vectorSize,
                  int W, dd::Shape shape);
 
+// --- Tiered-reload microbenchmark (Test 3) ---
+/// Compile-time (W, Tier) Typer variant: identical arithmetic to DdKernelIndep,
+/// but each intermediate round-trips through a scratch buffer sized so the
+/// reload hits the specified cache tier (L1 / L2 / LLC / DRAM).
+template <int W, dd::Tier T>
+std::unique_ptr<runtime::Query> q1_dd_tiered_impl(runtime::Database& db,
+                                                   size_t nrThreads);
+/// Runtime dispatcher for the tiered kernel.
+std::unique_ptr<runtime::Query>
+q1_dd_tiered(runtime::Database& db, size_t nrThreads, int W, dd::Tier tier);
+
 struct Q3Builder : private vectorwise::QueryBuilder {
    enum {
       sel_order,

@@ -121,13 +121,15 @@ int main(int argc, char* argv[]) {
     int settleSeconds = 10;
     int w = 0;                    // data-dependency width (Test 1); 0 = disabled
     std::string kernelShape = "chained";  // dd kernel shape (Test 1b)
+    std::string tierArg = "";             // tiered-reload tier (Test 3); "" = disabled
     std::string selectedQuery = "";  // e.g., "1" or "1,3,6"
     std::string selectedEngine = ""; // e.g., "h" or "v"
 
     int opt;
     // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize, s: settle,
-    // w: data-dependency width (Test 1), k: dd kernel shape (chained|independent)
-    while ((opt = getopt(argc, argv, "q:e:r:p:t:v:s:w:k:")) != -1) {
+    // w: data-dependency width (Test 1), k: dd kernel shape (chained|independent),
+    // c: tiered-reload tier (l1|l2|llc|dram) (Test 3), P: perf-stat passthrough
+    while ((opt = getopt(argc, argv, "q:e:r:p:t:v:s:w:k:c:P")) != -1) {
         switch (opt) {
             case 'q': selectedQuery = optarg; break;
             case 'e': selectedEngine = optarg; break;
@@ -138,8 +140,10 @@ int main(int argc, char* argv[]) {
             case 's': settleSeconds = atoi(optarg); break;
             case 'w': w = atoi(optarg); break;
             case 'k': kernelShape = optarg; break;
+            case 'c': tierArg = optarg; break;
+            case 'P': /* handled by outer perf-stat wrapper; no-op here */ break;
             default:
-                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-w W] [-k chained|independent]\n";
+                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-w W] [-k chained|independent] [-c l1|l2|llc|dram]\n";
                 exit(1);
         }
     }
@@ -157,6 +161,21 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: unknown kernel shape '" << kernelShape
                   << "' (must be 'chained' or 'independent').\n";
         exit(1);
+    }
+
+    // Parse tiered-reload tier (Test 3).
+    dd::Tier tier = dd::Tier::L1;  // default (only used when tierArg != "")
+    std::string tierTag = "";
+    if (!tierArg.empty()) {
+        if (tierArg == "l1")        { tier = dd::Tier::L1;   tierTag = "tier-l1"; }
+        else if (tierArg == "l2")   { tier = dd::Tier::L2;   tierTag = "tier-l2"; }
+        else if (tierArg == "llc")  { tier = dd::Tier::LLC;  tierTag = "tier-llc"; }
+        else if (tierArg == "dram") { tier = dd::Tier::DRAM; tierTag = "tier-dram"; }
+        else {
+            std::cerr << "Error: unknown tier '" << tierArg
+                      << "' (must be 'l1', 'l2', 'llc', or 'dram').\n";
+            exit(1);
+        }
     }
 
     // Parse comma-separated thread counts (e.g. "1,4,12,44" or just "44")
@@ -290,13 +309,14 @@ int main(int argc, char* argv[]) {
             if (i > 0) tcStr += ",";
             tcStr += std::to_string(threadCounts[i]);
         }
-        fprintf(stderr, "Config: %s | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds | W: %d | Shape: %s"
+        fprintf(stderr, "Config: %s | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds | W: %d | Shape: %s | Tier: %s"
 #ifdef NUMA_DEBUG
                 " | NUMA_DEBUG"
 #endif
                 "\n",
                 numaMode, selectedEngine.c_str(), selectedQuery.c_str(),
-                tcStr.c_str(), vectorSize, settleSeconds, w, kernelShape.c_str());
+                tcStr.c_str(), vectorSize, settleSeconds, w, kernelShape.c_str(),
+                tierArg.empty() ? "none" : tierArg.c_str());
     }
 
     if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);
@@ -408,7 +428,7 @@ int main(int argc, char* argv[]) {
                           });
                        },
                        repetitions);
-   if (q.count("1h") && w > 0) {
+   if (q.count("1h") && w > 0 && tierArg.empty()) {
       char wlabel[64];
       snprintf(wlabel, sizeof(wlabel), "q1dd h %s W%d V%d ", shapeTag.c_str(),
                w, (int)vectorSize);
@@ -417,6 +437,19 @@ int main(int argc, char* argv[]) {
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
                              auto result = q1_dd_hyper(tpch, nrThreads, w, shape);
+                             escape(&result);
+                          });
+                       },
+                       repetitions);
+   }
+   if (q.count("1h") && w > 0 && !tierArg.empty()) {
+      char wlabel[128];
+      snprintf(wlabel, sizeof(wlabel), "q1dd h %s W%d ", tierTag.c_str(), w);
+      e.timeAndProfile(label(wlabel, nrThreads), nrTuples(tpch, {"lineitem"}),
+                       [&]() {
+                          if (clearCaches) clearOsCaches();
+                          arena.execute([&] {
+                             auto result = q1_dd_tiered(tpch, nrThreads, w, tier);
                              escape(&result);
                           });
                        },

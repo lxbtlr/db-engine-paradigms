@@ -13,8 +13,10 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <iostream>
+#include <sys/mman.h>
 
 using namespace runtime;
 using namespace std;
@@ -398,6 +400,178 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
 
    r->rootOp = popOperator();
    return r;
+}
+
+// ---------------------------------------------------------------------------
+// Test 3 -- tiered-reload kernel.
+//
+// Identical scan / filter / group-by / real aggregates as q1_dd_hyper_impl.
+// The synthetic kernel routes each intermediate through a per-thread scratch
+// buffer whose footprint is sized so reloads hit a specific cache tier.
+// Instruction count is identical across tiers at each W.
+// ---------------------------------------------------------------------------
+template <int W, dd::Tier T>
+NOVECTORIZE std::unique_ptr<runtime::Query> q1_dd_tiered_impl(
+    runtime::Database& db, size_t nrThreads) {
+   using Kernel = typename dd::KernelTiered<W, T>::type;
+   using namespace types;
+   using namespace std;
+   types::Date c1 = types::Date::castString("1998-09-02");
+   types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
+   auto& li = db["lineitem"];
+   auto l_returnflag = li["l_returnflag"].data<types::Char<1>>();
+   auto l_linestatus = li["l_linestatus"].data<types::Char<1>>();
+   auto l_extendedprice = li["l_extendedprice"].data<types::Numeric<12, 2>>();
+   auto l_discount = li["l_discount"].data<types::Numeric<12, 2>>();
+   auto l_tax = li["l_tax"].data<types::Numeric<12, 2>>();
+   auto l_quantity = li["l_quantity"].data<types::Numeric<12, 2>>();
+   auto l_shipdate = li["l_shipdate"].data<types::Date>();
+
+   auto resources = initQuery(nrThreads);
+
+   using hash = runtime::CRC32Hash;
+
+   auto groupOp = make_GroupBy<tuple<Char<1>, Char<1>>,
+                               tuple<Numeric<12, 2>, Numeric<12, 2>,
+                                     Numeric<12, 4>, Numeric<12, 6>, int64_t>,
+                               hash>(
+       [](auto& acc, auto&& value) {
+          get<0>(acc) += get<0>(value);
+          get<1>(acc) += get<1>(value);
+          get<2>(acc) += get<2>(value);
+          get<3>(acc) += get<3>(value);
+          get<4>(acc) += get<4>(value);
+       },
+       make_tuple(Numeric<12, 2>(), Numeric<12, 2>(), Numeric<12, 4>(),
+                  Numeric<12, 6>(), int64_t(0)),
+       nrThreads);
+
+   std::atomic<int64_t> sink{0};
+
+   // Per-thread scratch buffers sized for the target tier.
+   constexpr size_t bufElems = Kernel::BUF_SIZE;
+   constexpr size_t bufBytes = bufElems * sizeof(int64_t);
+
+   // Allocate per-thread scratch via mmap (anonymous, private) so each
+   // thread gets its own physical pages -- no coherence traffic.
+   std::vector<int64_t*> scratchBufs(nrThreads, nullptr);
+   for (size_t t = 0; t < nrThreads; ++t) {
+      void* p = mmap(nullptr, bufBytes, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+      if (p == MAP_FAILED) {
+         perror("mmap scratch");
+         exit(1);
+      }
+      scratchBufs[t] = static_cast<int64_t*>(p);
+      // Touch all pages to ensure they are faulted in and warm
+      memset(scratchBufs[t], 0, bufBytes);
+   }
+
+   tbb::parallel_for(
+       tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
+       [&](const tbb::blocked_range<size_t>& r) {
+          int slot = tbb::this_task_arena::current_thread_index();
+          if (slot < 0) slot = 0;
+          int64_t* scratch = scratchBufs[static_cast<size_t>(slot)];
+          auto locals = groupOp.preAggLocals();
+          int64_t localSink = 0;
+          for (size_t i = r.begin(), end = r.end(); i != end; ++i) {
+             if (l_shipdate[i] <= c1) {
+                auto& group = locals.getGroup(make_tuple(l_returnflag[i],
+                                                         l_linestatus[i]));
+
+                get<0>(group) += l_quantity[i];
+                get<1>(group) += l_extendedprice[i];
+                auto disc_price = l_extendedprice[i] * (one - l_discount[i]);
+                get<2>(group) += disc_price;
+                auto charge = disc_price * (one + l_tax[i]);
+                get<3>(group) += charge;
+                get<4>(group) += 1;
+
+                localSink += Kernel::run(l_extendedprice[i].value,
+                                          l_discount[i].value, scratch);
+             }
+          }
+          sink.fetch_add(localSink, std::memory_order_relaxed);
+       });
+
+   escape(&sink);
+
+   // Cleanup scratch buffers
+   for (size_t t = 0; t < nrThreads; ++t) {
+      if (scratchBufs[t]) munmap(scratchBufs[t], bufBytes);
+   }
+
+   auto& result = resources.query->result;
+   auto retAttr = result->addAttribute("l_returnflag", sizeof(Char<1>));
+   auto statusAttr = result->addAttribute("l_linestatus", sizeof(Char<1>));
+   auto qtyAttr = result->addAttribute("sum_qty", sizeof(Numeric<12, 2>));
+   auto base_priceAttr =
+       result->addAttribute("sum_base_price", sizeof(Numeric<12, 2>));
+   auto disc_priceAttr =
+       result->addAttribute("sum_disc_price", sizeof(Numeric<12, 2>));
+   auto chargeAttr = result->addAttribute("sum_charge", sizeof(Numeric<12, 2>));
+   auto count_orderAttr = result->addAttribute("count_order", sizeof(int64_t));
+
+   groupOp.forallGroups(
+       [&](runtime::Stack<typename decltype(groupOp)::group_t>& entries) {
+          auto n = entries.size();
+          auto block = result->createBlock(n);
+          auto ret = reinterpret_cast<Char<1>*>(block.data(retAttr));
+          auto status = reinterpret_cast<Char<1>*>(block.data(statusAttr));
+          auto qty = reinterpret_cast<Numeric<12, 2>*>(block.data(qtyAttr));
+          auto base_price =
+              reinterpret_cast<Numeric<12, 2>*>(block.data(base_priceAttr));
+          auto disc_price =
+              reinterpret_cast<Numeric<12, 4>*>(block.data(disc_priceAttr));
+          auto charge =
+              reinterpret_cast<Numeric<12, 6>*>(block.data(chargeAttr));
+          auto count_order =
+              reinterpret_cast<int64_t*>(block.data(count_orderAttr));
+          for (auto block : entries)
+             for (auto& entry : block) {
+                *ret++ = get<0>(entry.k);
+                *status++ = get<1>(entry.k);
+                *qty++ = get<0>(entry.v);
+                *base_price++ = get<1>(entry.v);
+                *disc_price++ = get<2>(entry.v);
+                *charge++ = get<3>(entry.v);
+                *count_order++ = get<4>(entry.v);
+             }
+          block.addedElements(n);
+       });
+
+   leaveQuery(nrThreads);
+   return move(resources.query);
+}
+
+// Dispatch W for a fixed tier.
+template <dd::Tier T>
+std::unique_ptr<runtime::Query> dispatchTieredW(runtime::Database& db,
+                                                size_t nrThreads, int W) {
+   switch (W) {
+      case 8:  return q1_dd_tiered_impl<8,  T>(db, nrThreads);
+      case 16: return q1_dd_tiered_impl<16, T>(db, nrThreads);
+      case 32: return q1_dd_tiered_impl<32, T>(db, nrThreads);
+      default:
+         std::cerr << "q1_dd_tiered: unsupported W=" << W
+                   << " (must be 8, 16, or 32)\n";
+         exit(1);
+   }
+}
+
+std::unique_ptr<runtime::Query> q1_dd_tiered(runtime::Database& db,
+                                              size_t nrThreads, int W,
+                                              dd::Tier tier) {
+   switch (tier) {
+      case dd::Tier::L1:   return dispatchTieredW<dd::Tier::L1>(db, nrThreads, W);
+      case dd::Tier::L2:   return dispatchTieredW<dd::Tier::L2>(db, nrThreads, W);
+      case dd::Tier::LLC:  return dispatchTieredW<dd::Tier::LLC>(db, nrThreads, W);
+      case dd::Tier::DRAM: return dispatchTieredW<dd::Tier::DRAM>(db, nrThreads, W);
+      default:
+         std::cerr << "q1_dd_tiered: unsupported tier\n";
+         exit(1);
+   }
 }
 
 std::unique_ptr<runtime::Query> q1_dd_vectorwise(runtime::Database& db,
