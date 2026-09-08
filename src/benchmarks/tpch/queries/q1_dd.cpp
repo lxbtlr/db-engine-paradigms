@@ -128,6 +128,8 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_dd_hyper_impl(
        });
 
    escape(&sink);  // force the synthetic work to be live-out
+   { const char* sn = (S == dd::Shape::Chained) ? "chained" : "independent";
+     fprintf(stderr, "[sink] q1dd-hyper %s W%d = %ld\n", sn, W, (long)sink.load()); }
 
    auto& result = resources.query->result;
    auto retAttr = result->addAttribute("l_returnflag", sizeof(Char<1>));
@@ -496,6 +498,8 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_dd_tiered_impl(
        });
 
    escape(&sink);
+   { const char* tn = (T == dd::Tier::L1) ? "l1" : (T == dd::Tier::L2) ? "l2" : (T == dd::Tier::LLC) ? "llc" : "dram";
+     fprintf(stderr, "[sink] q1dd-tier %s W%d = %ld\n", tn, W, (long)sink.load()); }
 
    // Cleanup scratch buffers
    for (size_t t = 0; t < nrThreads; ++t) {

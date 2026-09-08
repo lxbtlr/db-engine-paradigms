@@ -55,7 +55,6 @@ using namespace runtime;
 
 static void escape(void* p) { asm volatile("" : : "g"(p) : "memory"); }
 
-/*
 static void dumpQ1Result(const char* label, runtime::Query* query) {
    if (!query || !query->result) return;
    auto& rel = *query->result;
@@ -66,11 +65,16 @@ static void dumpQ1Result(const char* label, runtime::Query* query) {
    auto discPriceAttr = rel.getAttribute("sum_disc_price");
    auto chargeAttr = rel.getAttribute("sum_charge");
    auto countAttr = rel.getAttribute("count_order");
+   size_t sinkAttr = 0;
+   bool hasSink = false;
+   try { sinkAttr = rel.getAttribute("dd_sink"); hasSink = true; } catch (const std::exception&) { hasSink = false; }
 
    fprintf(stderr, "\n=== Q1 Results [%s] ===\n", label);
-   fprintf(stderr, "%-4s %-4s %20s %20s %20s %20s %15s\n",
+   fprintf(stderr, "%-4s %-4s %20s %20s %20s %20s %15s",
            "ret", "stat", "sum_qty", "sum_base_price", "sum_disc_price",
            "sum_charge", "count_order");
+   if (hasSink) fprintf(stderr, " %22s", "dd_sink");
+   fprintf(stderr, "\n");
    for (auto& block : rel) {
       auto n = block.size();
       auto ret = reinterpret_cast<types::Char<1>*>(block.data(retAttr));
@@ -80,15 +84,17 @@ static void dumpQ1Result(const char* label, runtime::Query* query) {
       auto discPrice = reinterpret_cast<int64_t*>(block.data(discPriceAttr));
       auto charge = reinterpret_cast<int64_t*>(block.data(chargeAttr));
       auto count = reinterpret_cast<int64_t*>(block.data(countAttr));
+      int64_t* sink = hasSink ? reinterpret_cast<int64_t*>(block.data(sinkAttr)) : nullptr;
       for (size_t i = 0; i < n; ++i) {
-         fprintf(stderr, "%-4c %-4c %20ld %20ld %20ld %20ld %15ld\n",
+         fprintf(stderr, "%-4c %-4c %20ld %20ld %20ld %20ld %15ld",
                  ret[i].value, status[i].value,
                  qty[i], basePrice[i], discPrice[i], charge[i], count[i]);
+         if (sink) fprintf(stderr, " %22ld", sink[i]);
+         fprintf(stderr, "\n");
       }
    }
    fprintf(stderr, "=== END ===\n\n");
 }
-*/
 
 size_t nrTuples(Database& db, std::vector<std::string> tables) {
    size_t sum = 0;
@@ -418,42 +424,49 @@ int main(int argc, char* argv[]) {
     PinningObserver pinner(arena);
 #endif
 
-   if (q.count("1h"))
+   if (q.count("1h")) {
+      std::unique_ptr<runtime::Query> result;
       e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
-                             auto result = q1_hyper(tpch, nrThreads);
+                             result = q1_hyper(tpch, nrThreads);
                              escape(&result);
                           });
                        },
                        repetitions);
+      dumpQ1Result("q1_hyper", result.get());
+   }
    if (q.count("1h") && w > 0 && tierArg.empty()) {
       char wlabel[64];
       snprintf(wlabel, sizeof(wlabel), "q1dd h %s W%d V%d ", shapeTag.c_str(),
                w, (int)vectorSize);
+      std::unique_ptr<runtime::Query> result;
       e.timeAndProfile(label(wlabel, nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
-                             auto result = q1_dd_hyper(tpch, nrThreads, w, shape);
+                             result = q1_dd_hyper(tpch, nrThreads, w, shape);
                              escape(&result);
                           });
                        },
                        repetitions);
+      dumpQ1Result(wlabel, result.get());
    }
    if (q.count("1h") && w > 0 && !tierArg.empty()) {
       char wlabel[128];
       snprintf(wlabel, sizeof(wlabel), "q1dd h %s W%d ", tierTag.c_str(), w);
+      std::unique_ptr<runtime::Query> result;
       e.timeAndProfile(label(wlabel, nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
-                             auto result = q1_dd_tiered(tpch, nrThreads, w, tier);
+                             result = q1_dd_tiered(tpch, nrThreads, w, tier);
                              escape(&result);
                           });
                        },
                        repetitions);
+      dumpQ1Result(wlabel, result.get());
    }
    if (q.count("3h"))
       e.timeAndProfile(label("q3 h ", nrThreads),
