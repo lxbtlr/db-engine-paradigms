@@ -110,14 +110,18 @@ void numa_parallel_scan(size_t nrThreads, const runtime::Relation& rel,
 
    std::array<PaddedAtomicPos, N> nodePos;
 
-   tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](size_t tid) {
-      size_t home = runtime::regionOf(tid);
+   tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](size_t /*tid*/) {
+      // Use the actual TBB slot (which PinningObserver pinned to a specific
+      // CPU) rather than the loop variable, which TBB may assign to any worker.
+      size_t slot = static_cast<size_t>(
+          tbb::this_task_arena::current_thread_index());
+      size_t home = runtime::regionOf(slot);
 
       size_t rank;
 #ifdef THREAD_PIN_PACKED
-      rank = tid % runtime::THREADS_PER_SOCKET;
+      rank = slot % runtime::THREADS_PER_SOCKET;
 #else
-      rank = tid / runtime::SOCKETS_COUNT;
+      rank = slot / runtime::SOCKETS_COUNT;
 #endif
 
       std::array<size_t, N> stealOrder;
@@ -157,39 +161,47 @@ T numa_parallel_reduce(size_t nrThreads, const runtime::Relation& rel,
 
    std::array<PaddedAtomicPos, N> nodePos;
 
-   return tbb::parallel_reduce(
-       tbb::blocked_range<size_t>(0, nrThreads), identity,
-       [&](const tbb::blocked_range<size_t>& range, T acc) {
-          for (size_t tid = range.begin(); tid < range.end(); ++tid) {
-             size_t home = runtime::regionOf(tid);
-             size_t rank;
+   // One task per thread; each resolves its NUMA identity from the actual
+   // TBB slot (pinned by PinningObserver), not from the iteration variable.
+   tbb::enumerable_thread_specific<T> locals(identity);
+
+   tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](size_t /*tid*/) {
+      size_t slot = static_cast<size_t>(
+          tbb::this_task_arena::current_thread_index());
+      size_t home = runtime::regionOf(slot);
+
+      size_t rank;
 #ifdef THREAD_PIN_PACKED
-             rank = tid % runtime::THREADS_PER_SOCKET;
+      rank = slot % runtime::THREADS_PER_SOCKET;
 #else
-             rank = tid / runtime::SOCKETS_COUNT;
+      rank = slot / runtime::SOCKETS_COUNT;
 #endif
-             std::array<size_t, N> stealOrder;
-             stealOrder[0] = home;
-             for (size_t k = 0; k < N - 1; ++k)
-                stealOrder[k + 1] = (home + 1 + ((rank + k) % (N - 1))) % N;
 
-             for (size_t si = 0; si < N; ++si) {
-                size_t node = stealOrder[si];
-                size_t nodeTup = shardTuples[node];
-                if (nodeTup == 0) continue;
+      std::array<size_t, N> stealOrder;
+      stealOrder[0] = home;
+      for (size_t k = 0; k < N - 1; ++k)
+         stealOrder[k + 1] = (home + 1 + ((rank + k) % (N - 1))) % N;
 
-                while (true) {
-                   size_t chunk =
-                       nodePos[node].pos.fetch_add(1, std::memory_order_relaxed);
-                   size_t begin = chunk * morselSz;
-                   if (begin >= nodeTup) break;
-                   size_t end = std::min(begin + morselSz, nodeTup);
-                   body(begin, end, node, acc);
-                }
-             }
-          }
-          return acc;
-       },
-       combine);
+      T& acc = locals.local();
+      for (size_t si = 0; si < N; ++si) {
+         size_t node = stealOrder[si];
+         size_t nodeTup = shardTuples[node];
+         if (nodeTup == 0) continue;
+
+         while (true) {
+            size_t chunk =
+                nodePos[node].pos.fetch_add(1, std::memory_order_relaxed);
+            size_t begin = chunk * morselSz;
+            if (begin >= nodeTup) break;
+            size_t end = std::min(begin + morselSz, nodeTup);
+            body(begin, end, node, acc);
+         }
+      }
+   });
+
+   T result = identity;
+   for (auto& local : locals)
+      result = combine(result, local);
+   return result;
 }
 #endif // NUMA_SHARD
