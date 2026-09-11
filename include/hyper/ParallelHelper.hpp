@@ -8,7 +8,7 @@
 #include <atomic>
 #endif
 
-static const size_t morselSize = 10000;
+static const size_t morselSize = 100000;
 
 struct ProcessingResources {
    std::vector<runtime::Worker> workers;
