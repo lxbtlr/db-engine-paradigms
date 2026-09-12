@@ -7,9 +7,13 @@
 #include "vectorwise/VectorAllocator.hpp"
 #include "vectorwise/defs.hpp"
 #include <unordered_map>
+#include <vector>
 // #include "/home/kersten/tools/iaca-lin64/iacaMarks.h"
 
 namespace vectorwise {
+
+inline thread_local std::unordered_map<void*, std::vector<pos_t>> groups;
+
 namespace primitives {
 
 //------------------------------------------------------------------------------
@@ -299,10 +303,27 @@ template <typename T, template <typename> class Op>
 pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
 /// aggregate into multiple aggregators given by result
 {
+#ifdef VW_GROUP_AGGR
+   for (auto& [entry, group] : groups) {
+      if (group.empty()) {
+         continue;
+      }
+
+      T* aggregate = addBytes(static_cast<T*>(entry), offset);
+      T value = *aggregate;
+
+      for (auto i : group) {
+         value = Op<T>()(param1[i], value);
+      }
+
+      *aggregate = value;
+   }
+#else
    for (pos_t i = 0; i < n; i++) {
       T* aggregate = addBytes(entries[i], offset);
       *aggregate = Op<T>()(param1[i], *aggregate);
    }
+#endif
    return n;
 }
 
@@ -312,10 +333,27 @@ pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* selParam1, T* RES param1,
 /// aggregate into multiple aggregators given by result, param1 has selection
 /// vector
 {
+#ifdef VW_GROUP_AGGR
+   for (auto& [entry, group] : groups) {
+      if (group.empty()) {
+         continue;
+      }
+
+      T* aggregate = addBytes(static_cast<T*>(entry), offset);
+      T value = *aggregate;
+
+      for (auto i : group) {
+         value = Op<T>()(param1[selParam1[i]], value);
+      }
+
+      *aggregate = value;
+   }
+#else
    for (pos_t i = 0; i < n; i++) {
       T* aggregate = addBytes(entries[i], offset);
       *aggregate = Op<T>()(param1[selParam1[i]], *aggregate);
    }
+#endif
    return n;
 }
 
