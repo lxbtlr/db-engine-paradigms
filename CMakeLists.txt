@@ -29,11 +29,16 @@ OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise"
 
 if (VW_USE_CRC32)
   ADD_DEFINITIONS(-DVW_USE_CRC32=1)
-  message(STATUS "Building with CRC32Hash ")
+  message(STATUS "Building with CRC32Hash")
 else ()
   message(STATUS "Building with MurMurHash")
 endif (VW_USE_CRC32)
 
+OPTION(VW_GROUP_AGGR "Perform group-wise GROUP BY aggregation for VectorWise" OFF)
+if (VW_GROUP_AGGR)
+  ADD_DEFINITIONS(-DVW_GROUP_AGGR=1)
+  message(STATUS "Building with VW_GROUP_AGGR")
+endif (VW_GROUP_AGGR)
 
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
