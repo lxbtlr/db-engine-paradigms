@@ -419,10 +419,10 @@ class HashGroup : public UnaryOperator {
    std::vector<char> packedKeys;
    pos_t* selVec = nullptr;
 
-#ifndef VW_USE_CRC32
-   runtime::MurMurHash hashFn;
-#else
+#ifdef VW_USE_CRC32
    runtime::CRC32Hash hashFn;
+#else
+   runtime::MurMurHash hashFn;
 #endif
 
    void Concat(pos_t n);
@@ -433,6 +433,8 @@ class HashGroup : public UnaryOperator {
 
    void Lookup(pos_t n);
    template <typename T> void Lookup_T(pos_t n);
+
+   void Group(pos_t n);
 
  private:
    void clearHashtable();
