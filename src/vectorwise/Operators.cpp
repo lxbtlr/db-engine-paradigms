@@ -868,7 +868,7 @@ size_t HashGroup::next() {
          updateGroups.evaluate(n);
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
-      groups.clear()
+      groups.clear();
       flushAndClear(); // flush remaining entries into spillStorage
       barrier();       // Wait until all workers have finished phase 1
 
