@@ -1,4 +1,5 @@
 #include "vectorwise/Operators.hpp"
+#include "vectorwise/Primitives.hpp"
 #include "common/Compat.hpp"
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/SIMD.hpp"
@@ -853,12 +854,17 @@ size_t HashGroup::next() {
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
          preAggregation.groupsNotFound->clear();
+         for (auto& [entry, group] : groups) {
+            group.clear();
+         }
 
          Concat(n);
          Hash(n);
          Lookup(n);
+#ifdef VW_GROUP_AGGR
+         Group(n);
+#endif
 
-         preAggregation.createMissingGroups(ht, false);
          updateGroups.evaluate(n);
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
@@ -945,7 +951,7 @@ template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
    pos_t* __restrict__ sel = selVec;
    char* __restrict__ dest = packedKeys.data() + col.offset;
 
-   if (n < vecSize) {
+   if (sel) {
       for (pos_t i = 0; i < n; i++) {
          std::memcpy(dest + i * keySize, src + sel[i] * colSize, colSize);
       }
@@ -1003,19 +1009,34 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
    EntryHeader* end = ht.end();
    for (pos_t i = 0; i < n; i++) {
       hash_t hash = hashes[i];
-      EntryHeader* el = ht.find_chain(hash);
-      for (; el != end; el = el->next) {
-         if (el->hash == hash) {
-            char* el_key = reinterpret_cast<char*>(el + 1);
-            if (std::memcmp(keys + i * keySize, el_key, keySize) == 0) {
-               matches[i] = el;
+      EntryHeader* entry = ht.find_chain(hash);
+      for (; entry != end; entry = entry->next) {
+         if (entry->hash == hash) {
+            char* entry_key = reinterpret_cast<char*>(entry + 1);
+            if (std::memcmp(keys + i * keySize, entry_key, keySize) == 0) {
+               matches[i] = entry;
                break;
             }
          }
       }
-      if (el == end) {
+      if (entry == end) {
          preAggregation.groupsNotFound->push_back(i);
       }
+   }
+
+   preAggregation.createMissingGroups(ht, false);
+}
+
+// GROUP
+void HashGroup::Group(pos_t n) {
+   EntryHeader** __restrict__ matches = preAggregation.htMatches;
+
+   for (pos_t i = 0; i < n; i++) {
+      auto [it, inserted] = groups.try_emplace(matches[i]);
+      if (inserted) {
+         it->second.reserve(1024);
+      }
+      it->second.push_back(i);
    }
 }
 } // namespace vectorwise
