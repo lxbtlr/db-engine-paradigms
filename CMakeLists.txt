@@ -98,6 +98,7 @@ OPTION(INTERLEAVE_HT "Interleave hash table pages across NUMA nodes" OFF)
 OPTION(HYPER_FLOAT "Let TBB hyper-engine threads float (no pinning)" OFF)
 OPTION(SCAN_STATIC_PARTITION "Static per-thread slice partitioning in Scan::next()" OFF)
 OPTION(ORIGINAL_GROUPLOOKUP "Use original single-pass GroupLookup (no prefetch split)" OFF)
+set(MORSEL_SIZE 10000 CACHE STRING "Morsel size for parallel scan loops")
 
 IF(NUMA_ALLOC AND NUMA_SHARD)
   message(FATAL_ERROR "NUMA_ALLOC and NUMA_SHARD are mutually exclusive. Pick one.")
@@ -266,6 +267,8 @@ ENDIF()
 IF(ORIGINAL_GROUPLOOKUP)
   ADD_DEFINITIONS(-DORIGINAL_GROUPLOOKUP)
 ENDIF()
+
+ADD_DEFINITIONS(-DCFG_MORSEL_SIZE=${MORSEL_SIZE})
 
 IF(NUMA_ALLOC OR NUMA_DEBUG OR NUMA_SHARD OR INTERLEAVE_HT)
   set(NUMA_LIB numa)

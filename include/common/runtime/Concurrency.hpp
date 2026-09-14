@@ -82,6 +82,20 @@ inline size_t regionOf(size_t tid) {
 #endif
 }
 
+/// Count how many distinct NUMA regions are occupied by nrThreads threads.
+inline size_t activeRegions(size_t nrThreads) {
+#ifdef THREAD_PIN_PACKED
+   // Packed: fill one socket before moving to next
+   size_t full = nrThreads / THREADS_PER_SOCKET;
+   size_t partial = (nrThreads % THREADS_PER_SOCKET) > 0 ? 1 : 0;
+   size_t n = full + partial;
+   return n < NUM_NUMA_REGIONS ? n : NUM_NUMA_REGIONS;
+#else
+   // Spread: round-robin across sockets
+   return nrThreads < NUM_NUMA_REGIONS ? nrThreads : NUM_NUMA_REGIONS;
+#endif
+}
+
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD) || defined(NUMA_DEBUG)
 /// Validate at startup that the compile-time topology constants match the
 /// actual hardware.  Aborts if nodeOfCpu(c) doesn't match numa_node_of_cpu(c)

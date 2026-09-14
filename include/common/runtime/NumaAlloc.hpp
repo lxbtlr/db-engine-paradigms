@@ -19,7 +19,9 @@ void numaFreeReplicas(Relation& rel);
 /// Each region owns tuples [tupleBegin, tupleEnd) in an mbind'd anonymous
 /// mapping.  Loader threads pinned to each region memcpy from the original
 /// file-backed mmap.
-void numaShardRelation(Relation& rel);
+/// nActiveRegions: only populate shards 0..nActiveRegions-1 (data placed only
+/// on nodes that have threads).  Defaults to NUM_NUMA_REGIONS.
+void numaShardRelation(Relation& rel, size_t nActiveRegions = NUM_NUMA_REGIONS);
 
 /// Free all NUMA shards for a relation.
 void numaFreeShards(Relation& rel);

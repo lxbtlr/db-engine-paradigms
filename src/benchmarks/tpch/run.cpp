@@ -171,18 +171,21 @@ int main(int argc, char* argv[]) {
 
 #ifdef NUMA_SHARD
     runtime::assertTopology();
+    size_t maxThreads = *std::max_element(threadCounts.begin(), threadCounts.end());
+    size_t nActive = runtime::activeRegions(maxThreads);
     const char* shardTables[] = {"lineitem", "orders", "customer",
                                  "supplier", "part", "partsupp",
                                  "nation", "region"};
     for (auto& name : shardTables) {
        if (!tpch.hasRelation(name)) continue;
-       runtime::numaShardRelation(tpch[name]);
-       fprintf(stderr, "NUMA sharding: %s sharded across %zu regions\n",
-               name, runtime::NUM_NUMA_REGIONS);
+       runtime::numaShardRelation(tpch[name], nActive);
+       fprintf(stderr, "NUMA sharding: %s sharded across %zu of %zu regions\n",
+               name, nActive, runtime::NUM_NUMA_REGIONS);
        for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
           auto& s = tpch[name].numaShards[r];
-          fprintf(stderr, "  shard %zu: tuples [%zu, %zu)\n",
-                  r, s.tupleBegin, s.tupleEnd);
+          if (s.tupleEnd > s.tupleBegin)
+             fprintf(stderr, "  shard %zu: tuples [%zu, %zu)\n",
+                     r, s.tupleBegin, s.tupleEnd);
        }
     }
 #endif
