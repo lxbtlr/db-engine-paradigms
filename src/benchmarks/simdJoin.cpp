@@ -5,10 +5,7 @@
 #include <vector>
 #include <cstring>
 #include <sys/mman.h>
-#ifndef SIMDE_ENABLE_NATIVE_ALIASES
-#define SIMDE_ENABLE_NATIVE_ALIASES
-#endif
-#include <simde/x86/avx512.h>
+#include "common/runtime/SIMD.hpp"
 #include <cassert>
 
 // #include "/opt/iaca-lin64/include/iacaMarks.h"
@@ -24,39 +21,6 @@ void* malloc_huge(size_t size) {
    memset(p, 0, size);
    return p;
 }
-
-struct Vec8u {
-   union {
-      __m512i reg;
-      uint64_t entry[8];
-   };
-
-   // constructor
-   Vec8u(uint64_t x) { reg = _mm512_set1_epi64(x); };
-   Vec8u(void* p) { reg = _mm512_loadu_si512(p); };
-   Vec8u(__m512i x) { reg = x; };
-   Vec8u(uint64_t x0, uint64_t x1, uint64_t x2, uint64_t x3, uint64_t x4, uint64_t x5, uint64_t x6, uint64_t x7) { reg = _mm512_set_epi64(x0, x1, x2, x3, x4, x5, x6, x7); };
-
-   // implicit conversion to register
-   operator __m512i() { return reg; }
-
-   // print vector (for debugging)
-   friend std::ostream& operator<< (std::ostream& stream, const Vec8u& v) {
-      for (auto& e : v.entry)
-         stream << e << " ";
-      return stream;
-   }
-};
-
-inline Vec8u operator+ (const Vec8u& a, const Vec8u& b) { return _mm512_add_epi64(a.reg, b.reg); }
-inline Vec8u operator- (const Vec8u& a, const Vec8u& b) { return _mm512_sub_epi64(a.reg, b.reg); }
-inline Vec8u operator* (const Vec8u& a, const Vec8u& b) { return _mm512_mullo_epi64(a.reg, b.reg); }
-inline Vec8u operator^ (const Vec8u& a, const Vec8u& b) { return _mm512_xor_epi64(a.reg, b.reg); }
-inline Vec8u operator>> (const Vec8u& a, const unsigned shift) { return _mm512_srli_epi64(a.reg, shift); }
-inline Vec8u operator<< (const Vec8u& a, const unsigned shift) { return _mm512_slli_epi64(a.reg, shift); }
-inline Vec8u operator& (const Vec8u& a, const Vec8u& b) { return _mm512_and_epi64(a.reg, b.reg); }
-inline __mmask16 operator== (const Vec8u& a, const Vec8u& b) { return _mm512_cmpeq_epi64_mask(a.reg, b.reg); }
-inline __mmask16 operator!= (const Vec8u& a, const Vec8u& b) { return _mm512_cmpneq_epi64_mask(a.reg, b.reg); }
 
 //int countLoops = 0;
 
@@ -146,16 +110,16 @@ struct Hashtable {
 //IACA_END
 
    void initVectors(uint64_t* keys, uint64_t count, uint64_t* initialKeyIndexes, uint64_t* initialKeyPtrs) {
-      Vec8u maskV = mask;
-      Vec8u m = 0xc6a4a7935bd1e995ull;
+      Vec8u maskV(mask);
+      Vec8u m(0xc6a4a7935bd1e995ull);
       const int r = 47;
-      Vec8u initH = 0x8445d61a4e774912ull ^ (8*m);
+      Vec8u initH = Vec8u(0x8445d61a4e774912ull) ^ (Vec8u(8ull)*m);
 
-      Vec8u eight = 8;
+      Vec8u eight(8ull);
       Vec8u keyIndexes(0,1,2,3,4,5,6,7);
 
       for (uint64_t i=0; i<count; i+=8) {
-         Vec8u key = keys + i;
+         Vec8u key(keys + i);
          Vec8u h = initH;
          Vec8u k = key;
          k = k * m;
@@ -189,12 +153,12 @@ struct Hashtable {
       uint64_t initialKeyPtrs[count];
       initVectors(keys, count, initialKeyIndexes, initialKeyPtrs);
 
-      Vec8u eight = 8;
-      Vec8u nulls(_mm512_set1_epi64(0));
+      Vec8u eight(8ull);
+      Vec8u nulls(0ull);
 
-      Vec8u key(keys); // uint64_t
-      Vec8u keyIndexes(initialKeyIndexes); // uint64_t
-      Vec8u ptr(initialKeyPtrs); // Entry*
+      Vec8u key((void*)keys);
+      Vec8u keyIndexes((void*)initialKeyIndexes);
+      Vec8u ptr((void*)initialKeyPtrs);
 
       unsigned inPos = 8; // # keys read
       unsigned outPos = 0; // # results written
@@ -232,15 +196,15 @@ struct Hashtable {
 
 
    void lookups2(uint64_t* keys, uint64_t count, Entry** result) {
-      Vec8u m = 0xc6a4a7935bd1e995ull;
+      Vec8u m(0xc6a4a7935bd1e995ull);
       const int r = 47;
-      Vec8u initH = 0x8445d61a4e774912ull ^ (8*m);
-      Vec8u maskV = mask;
-      Vec8u nulls(_mm512_set1_epi64(0));
-      Vec8u eight = 8;
+      Vec8u initH = Vec8u(0x8445d61a4e774912ull) ^ (Vec8u(8ull)*m);
+      Vec8u maskV(mask);
+      Vec8u nulls(0ull);
+      Vec8u eight(8ull);
 
       for (uint64_t i=0; i<count; i+=8) {
-         Vec8u key = keys + i;
+         Vec8u key((void*)(keys + i));
          Vec8u h = initH;
          Vec8u k = key;
 

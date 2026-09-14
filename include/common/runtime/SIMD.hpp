@@ -169,6 +169,200 @@
     #define _mm512_i32gather_epi64(idx, base, scale) _mm512_i32gather_epi64_polyfill(idx, base, scale)
     #endif
 
+    // --- Compress-store polyfills (scalar fallback) ---
+
+    // 512-bit compress-store epi64 (8 x 64-bit)
+    #ifndef _mm512_mask_compressstoreu_epi64
+    static inline void _mm512_mask_compressstoreu_epi64_polyfill(void* base_addr, simde__mmask8 k, simde__m512i a) {
+        int64_t tmp[8];
+        simde_mm512_storeu_si512(tmp, a);
+        int64_t* out = static_cast<int64_t*>(base_addr);
+        for (int i = 0; i < 8; i++) {
+            if (k & (1u << i)) {
+                *out++ = tmp[i];
+            }
+        }
+    }
+    #define _mm512_mask_compressstoreu_epi64(base, k, a) _mm512_mask_compressstoreu_epi64_polyfill(base, k, a)
+    #endif
+
+    // 512-bit compress-store epi32 (16 x 32-bit)
+    #ifndef _mm512_mask_compressstoreu_epi32
+    static inline void _mm512_mask_compressstoreu_epi32_polyfill(void* base_addr, simde__mmask16 k, simde__m512i a) {
+        int32_t tmp[16];
+        simde_mm512_storeu_si512(tmp, a);
+        int32_t* out = static_cast<int32_t*>(base_addr);
+        for (int i = 0; i < 16; i++) {
+            if (k & (1u << i)) {
+                *out++ = tmp[i];
+            }
+        }
+    }
+    #define _mm512_mask_compressstoreu_epi32(base, k, a) _mm512_mask_compressstoreu_epi32_polyfill(base, k, a)
+    #endif
+
+    // 256-bit compress-store epi32 (8 x 32-bit)
+    #ifndef _mm256_mask_compressstoreu_epi32
+    static inline void _mm256_mask_compressstoreu_epi32_polyfill(void* base_addr, simde__mmask8 k, simde__m256i a) {
+        int32_t tmp[8];
+        simde_mm256_storeu_si256((simde__m256i*)tmp, a);
+        int32_t* out = static_cast<int32_t*>(base_addr);
+        for (int i = 0; i < 8; i++) {
+            if (k & (1u << i)) {
+                *out++ = tmp[i];
+            }
+        }
+    }
+    #define _mm256_mask_compressstoreu_epi32(base, k, a) _mm256_mask_compressstoreu_epi32_polyfill(base, k, a)
+    #endif
+
+    // --- Expand-load polyfill (scalar fallback) ---
+
+    // 512-bit mask expand-load epi64
+    #ifndef _mm512_mask_expandloadu_epi64
+    static inline simde__m512i _mm512_mask_expandloadu_epi64_polyfill(simde__m512i src, simde__mmask8 k, void const* mem_addr) {
+        int64_t src_tmp[8], out_tmp[8];
+        simde_mm512_storeu_si512(src_tmp, src);
+        const int64_t* in = static_cast<const int64_t*>(mem_addr);
+        for (int i = 0; i < 8; i++) {
+            if (k & (1u << i)) {
+                out_tmp[i] = *in++;
+            } else {
+                out_tmp[i] = src_tmp[i];
+            }
+        }
+        return simde_mm512_loadu_si512(out_tmp);
+    }
+    #define _mm512_mask_expandloadu_epi64(src, k, mem) _mm512_mask_expandloadu_epi64_polyfill(src, k, mem)
+    #endif
+
+    // --- Mask inversion (knot) ---
+
+    #ifndef _mm512_knot
+    static inline simde__mmask16 _mm512_knot_polyfill(simde__mmask16 a) {
+        return static_cast<simde__mmask16>(~a);
+    }
+    #define _mm512_knot(a) _mm512_knot_polyfill(a)
+    #endif
+
+    // --- Blend polyfill ---
+
+    #ifndef _mm512_mask_blend_epi64
+    static inline simde__m512i _mm512_mask_blend_epi64_polyfill(simde__mmask8 k, simde__m512i a, simde__m512i b) {
+        int64_t a_tmp[8], b_tmp[8], out[8];
+        simde_mm512_storeu_si512(a_tmp, a);
+        simde_mm512_storeu_si512(b_tmp, b);
+        for (int i = 0; i < 8; i++) {
+            out[i] = (k & (1u << i)) ? b_tmp[i] : a_tmp[i];
+        }
+        return simde_mm512_loadu_si512(out);
+    }
+    #define _mm512_mask_blend_epi64(k, a, b) _mm512_mask_blend_epi64_polyfill(k, a, b)
+    #endif
+
+    // --- Masked gather polyfill ---
+
+    #ifndef _mm512_mask_i64gather_epi64
+    static inline simde__m512i _mm512_mask_i64gather_epi64_polyfill(simde__m512i src, simde__mmask8 k, simde__m512i vindex, void const* base_addr, int scale) {
+        int64_t src_tmp[8], idx_tmp[8], out[8];
+        simde_mm512_storeu_si512(src_tmp, src);
+        simde_mm512_storeu_si512(idx_tmp, vindex);
+        for (int i = 0; i < 8; i++) {
+            if (k & (1u << i)) {
+                const char* addr = static_cast<const char*>(base_addr) + idx_tmp[i] * scale;
+                int64_t val;
+                __builtin_memcpy(&val, addr, sizeof(val));
+                out[i] = val;
+            } else {
+                out[i] = src_tmp[i];
+            }
+        }
+        return simde_mm512_loadu_si512(out);
+    }
+    #define _mm512_mask_i64gather_epi64(src, k, idx, base, scale) _mm512_mask_i64gather_epi64_polyfill(src, k, idx, base, scale)
+    #endif
+
+    // --- Masked compare polyfill ---
+
+    #ifndef _mm512_mask_cmpeq_epi64_mask
+    static inline simde__mmask8 _mm512_mask_cmpeq_epi64_mask_polyfill(simde__mmask8 k, simde__m512i a, simde__m512i b) {
+        return k & simde_mm512_cmp_epi64_mask(a, b, 0);
+    }
+    #define _mm512_mask_cmpeq_epi64_mask(k, a, b) _mm512_mask_cmpeq_epi64_mask_polyfill(k, a, b)
+    #endif
+
+    #ifndef _mm512_mask_cmpneq_epi64_mask
+    static inline simde__mmask8 _mm512_mask_cmpneq_epi64_mask_polyfill(simde__mmask8 k, simde__m512i a, simde__m512i b) {
+        return k & simde_mm512_cmp_epi64_mask(a, b, 4);
+    }
+    #define _mm512_mask_cmpneq_epi64_mask(k, a, b) _mm512_mask_cmpneq_epi64_mask_polyfill(k, a, b)
+    #endif
+
+    // --- Masked add polyfill ---
+
+    #ifndef _mm512_mask_add_epi64
+    static inline simde__m512i _mm512_mask_add_epi64_polyfill(simde__m512i src, simde__mmask8 k, simde__m512i a, simde__m512i b) {
+        int64_t s[8], av[8], bv[8], out[8];
+        simde_mm512_storeu_si512(s, src);
+        simde_mm512_storeu_si512(av, a);
+        simde_mm512_storeu_si512(bv, b);
+        for (int i = 0; i < 8; i++) {
+            out[i] = (k & (1u << i)) ? (av[i] + bv[i]) : s[i];
+        }
+        return simde_mm512_loadu_si512(out);
+    }
+    #define _mm512_mask_add_epi64(src, k, a, b) _mm512_mask_add_epi64_polyfill(src, k, a, b)
+    #endif
+
+    // --- Store polyfill ---
+
+    #ifndef _mm512_store_epi64
+    static inline void _mm512_store_epi64_polyfill(void* mem_addr, simde__m512i a) {
+        simde_mm512_store_si512(mem_addr, a);
+    }
+    #define _mm512_store_epi64(mem, a) _mm512_store_epi64_polyfill(mem, a)
+    #endif
+
+    // --- Narrow-type comparison polyfills ---
+
+    #ifndef _mm512_cmplt_epi16_mask
+    static inline simde__mmask32 _mm512_cmplt_epi16_mask_polyfill(simde__m512i a, simde__m512i b) {
+        int16_t av[32], bv[32];
+        simde_mm512_storeu_si512(av, a);
+        simde_mm512_storeu_si512(bv, b);
+        simde__mmask32 result = 0;
+        for (int i = 0; i < 32; i++) {
+            if (av[i] < bv[i]) result |= (1u << i);
+        }
+        return result;
+    }
+    #define _mm512_cmplt_epi16_mask(a, b) _mm512_cmplt_epi16_mask_polyfill(a, b)
+    #endif
+
+    #ifndef _mm512_cmplt_epi8_mask
+    static inline simde__mmask64 _mm512_cmplt_epi8_mask_polyfill(simde__m512i a, simde__m512i b) {
+        int8_t av[64], bv[64];
+        simde_mm512_storeu_si512(av, a);
+        simde_mm512_storeu_si512(bv, b);
+        simde__mmask64 result = 0;
+        for (int i = 0; i < 64; i++) {
+            if (av[i] < bv[i]) result |= (1ull << i);
+        }
+        return result;
+    }
+    #define _mm512_cmplt_epi8_mask(a, b) _mm512_cmplt_epi8_mask_polyfill(a, b)
+    #endif
+
+    // --- cmpeq/cmpneq aliases (used by simdJoin.cpp) ---
+
+    #ifndef _mm512_cmpeq_epi64_mask
+    #define _mm512_cmpeq_epi64_mask(a, b) simde_mm512_cmp_epi64_mask(a, b, 0)
+    #endif
+
+    #ifndef _mm512_cmpneq_epi64_mask
+    #define _mm512_cmpneq_epi64_mask(a, b) simde_mm512_cmp_epi64_mask(a, b, 4)
+    #endif
+
 #endif
 
 // --- Vec8u (64-bit elements x 8) ---

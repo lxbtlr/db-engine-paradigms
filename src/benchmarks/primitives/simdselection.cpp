@@ -1,8 +1,5 @@
 #include "benchmarks/Primitives.hpp"
-#ifndef SIMDE_ENABLE_NATIVE_ALIASES
-#define SIMDE_ENABLE_NATIVE_ALIASES
-#endif
-#include <simde/x86/avx512.h>
+#include "common/runtime/SIMD.hpp"
 
 
 using namespace std;
