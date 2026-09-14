@@ -2,6 +2,7 @@
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Util.hpp"
 #include <cstddef>
+#include <cstdlib>
 #include <new>
 
 namespace runtime {
@@ -63,8 +64,10 @@ template <typename T> class Stack {
 };
 
 template <typename T> Stack<T>::Stack() {
-   auto alloc =
-       this_worker->allocator.allocate(sizeof(Chunk) + chunkSize * sizeof(T));
+   size_t bytes = sizeof(Chunk) + chunkSize * sizeof(T);
+   void* alloc = this_worker
+       ? this_worker->allocator.allocate(bytes)
+       : malloc(bytes);
    first = new (alloc) Chunk;
    last = first;
 }
@@ -107,13 +110,14 @@ void Stack<T>::emplace_back(C&&... args) {
 
 template <typename T> void Stack<T>::newChunk() {
    chunkSize *= 2;
-   void* alloc;
    if (last->next)
       last = last->next; // reuse memory
    else {
       auto prev = last;
-      alloc = this_worker->allocator.allocate(sizeof(Chunk) +
-                                              chunkSize * sizeof(T));
+      size_t bytes = sizeof(Chunk) + chunkSize * sizeof(T);
+      void* alloc = this_worker
+          ? this_worker->allocator.allocate(bytes)
+          : malloc(bytes);
       last = new (alloc) Chunk;
       prev->next = last;
    }
