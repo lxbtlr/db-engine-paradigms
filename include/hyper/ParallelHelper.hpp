@@ -8,7 +8,10 @@
 #include <atomic>
 #endif
 
-static const size_t morselSize = 10000;
+#ifndef CFG_MORSEL_SIZE
+#define CFG_MORSEL_SIZE 10000
+#endif
+static const size_t morselSize = CFG_MORSEL_SIZE;
 
 struct ProcessingResources {
    std::vector<runtime::Worker> workers;
@@ -80,12 +83,18 @@ template <typename E, typename HT> void parallel_insert(E& entries, HT& ht) {
 
 #ifdef NUMA_SHARD
 /// Extract per-shard column pointers for a NUMA-sharded relation.
+/// Inactive regions (empty shards) get nullptr — the scan helpers never
+/// dereference them because shardTuples[r] == 0 for those regions.
 template <typename T>
 std::array<const T*, runtime::NUM_NUMA_REGIONS>
 numaShardPtrs(const runtime::Relation& rel, const std::string& attr) {
    std::array<const T*, runtime::NUM_NUMA_REGIONS> ptrs;
-   for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r)
-      ptrs[r] = static_cast<const T*>(rel.numaShards[r].columns.at(attr));
+   for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
+      auto it = rel.numaShards[r].columns.find(attr);
+      ptrs[r] = (it != rel.numaShards[r].columns.end())
+                    ? static_cast<const T*>(it->second)
+                    : nullptr;
+   }
    return ptrs;
 }
 

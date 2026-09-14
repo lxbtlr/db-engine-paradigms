@@ -160,30 +160,36 @@ void numaFreeReplicas(Relation& rel) {
 #endif // NUMA_ALLOC
 
 #ifdef NUMA_SHARD
-void numaShardRelation(Relation& rel) {
+void numaShardRelation(Relation& rel, size_t nActiveRegions) {
    constexpr size_t N = NUM_NUMA_REGIONS;
+   size_t A = std::min(nActiveRegions, N);
+   if (A == 0) A = N;
    constexpr size_t workersPerRegion = CORES_PER_SOCKET;
    size_t totalTuples = rel.nrTuples;
 
-   // Compute shard tuple boundaries (exact split, no alignment requirement
-   // on tuple boundaries — mmap sizes are rounded up per column)
-   size_t baseShard = totalTuples / N;
-   size_t remainder = totalTuples % N;
+   // Compute shard tuple boundaries — only split across active regions.
+   // Inactive regions (A..N-1) get empty ranges.
+   size_t baseShard = totalTuples / A;
+   size_t remainder = totalTuples % A;
 
-   // Set up ranges: first 'remainder' shards get baseShard+1 tuples
    size_t cursor = 0;
    for (size_t r = 0; r < N; ++r) {
-      size_t count = baseShard + (r < remainder ? 1 : 0);
-      rel.numaShards[r].tupleBegin = cursor;
-      rel.numaShards[r].tupleEnd = cursor + count;
-      cursor += count;
+      if (r < A) {
+         size_t count = baseShard + (r < remainder ? 1 : 0);
+         rel.numaShards[r].tupleBegin = cursor;
+         rel.numaShards[r].tupleEnd = cursor + count;
+         cursor += count;
+      } else {
+         rel.numaShards[r].tupleBegin = 0;
+         rel.numaShards[r].tupleEnd = 0;
+      }
    }
 
-   // Allocate, bind, and load each shard in parallel across regions
+   // Allocate, bind, and load each shard in parallel across active regions
    std::vector<std::thread> threads;
-   threads.reserve(N);
+   threads.reserve(A);
 
-   for (size_t r = 0; r < N; ++r) {
+   for (size_t r = 0; r < A; ++r) {
       threads.emplace_back([&rel, r, workersPerRegion]() {
          auto& shard = rel.numaShards[r];
          size_t shardTuples = shard.tupleEnd - shard.tupleBegin;

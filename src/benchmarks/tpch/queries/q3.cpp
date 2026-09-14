@@ -82,7 +82,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
    using range = tbb::blocked_range<size_t>;
 
    const auto add = [](const size_t& a, const size_t& b) { return a + b; };
-   const size_t morselSize = 100000;
 
    // build ht for first join
    Hashset<types::Integer, hash> ht1;

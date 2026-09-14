@@ -46,7 +46,6 @@ using namespace std;
 NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
                                                      size_t nrThreads) {
 
-   const size_t morselSize = 10000;
 
    auto resources = initQuery(nrThreads);
 
