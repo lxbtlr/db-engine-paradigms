@@ -1008,7 +1008,7 @@ size_t HashGroup::next() {
    using header_t = decltype(ht)::EntryHeader;
    if (!cont.consumed) {
       /// ------ phase 1: local preaggregation
-      size_t groups = 0;
+      size_t nGroups = 0;
       auto& spill = shared.spillStorage.local();
       auto entry_size = preAggregation.ht_entry_size;
 
@@ -1026,13 +1026,23 @@ size_t HashGroup::next() {
       };
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
+#ifdef VW_GROUP_AGGR
+         preAggregation.groupsNotFound->clear();
+         for (auto& [entry, group] : groups) {
+            group.clear();
+         }
+#endif
          groupHash.evaluate(n);
          preAggregation.findGroups(n, ht);
          auto groupsCreated = preAggregation.createMissingGroups(ht, false);
+#ifdef VW_GROUP_AGGR
+         Group(n);
+#endif
          updateGroups.evaluate(n);
-         groups += groupsCreated;
-         if (groups >= maxFill) flushAndClear();
+         nGroups += groupsCreated;
+         if (nGroups >= maxFill) flushAndClear();
       }
+      groups.clear();
       flushAndClear();
       barrier();
 
@@ -1257,15 +1267,22 @@ size_t OptHashGroup::next() {
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
          preAggregation.groupsNotFound->clear();
+#ifdef VW_GROUP_AGGR
+         for (auto& [entry, group] : groups) {
+            group.clear();
+         }
+#endif
 
          Concat(n);
          Hash(n);
-         Lookup(n);
-
-         preAggregation.createMissingGroups(ht, false);
+         Lookup(n); // Lookup_T calls createMissingGroups internally
+#ifdef VW_GROUP_AGGR
+         Group(n);
+#endif
          updateGroups.evaluate(n);
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
+      groups.clear();
       flushAndClear();
       barrier();
 
