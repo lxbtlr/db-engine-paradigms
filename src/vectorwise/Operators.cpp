@@ -52,8 +52,10 @@ Scan::Scan(Shared& s, size_t n, size_t v)
     : shared(s), needsInit(true), currentChunk(0), lastOffset(0), nrTuples(n),
       vecSize(v) {
    scanChunkSize = 1;
-   //size_t scanMorselSize = 1024 * 10;
-   size_t scanMorselSize = 1024 * 1'000'000;
+#ifndef CFG_MORSEL_SIZE
+#define CFG_MORSEL_SIZE 10000
+#endif
+   size_t scanMorselSize = CFG_MORSEL_SIZE;
    if (vecSize < scanMorselSize) scanChunkSize = scanMorselSize / vecSize + 1;
    vecInChunk = scanChunkSize;
 

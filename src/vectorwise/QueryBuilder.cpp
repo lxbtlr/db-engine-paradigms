@@ -161,8 +161,12 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
    {
       void* base = attr.data();
       if (scan.rel.hasNumaShards) {
-         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n)
-            r.shardBases[n] = scan.rel.numaShards[n].columns[attribute];
+         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n) {
+            auto it = scan.rel.numaShards[n].columns.find(attribute);
+            r.shardBases[n] = (it != scan.rel.numaShards[n].columns.end())
+                                  ? it->second
+                                  : base; // inactive region — fallback to global
+         }
          size_t home = runtime::regionOf(runtime::this_worker->worker_id);
          r.data = r.shardBases[home];
       } else {
