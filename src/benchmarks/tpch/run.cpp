@@ -55,7 +55,6 @@ using namespace runtime;
 
 static void escape(void* p) { asm volatile("" : : "g"(p) : "memory"); }
 
-/*
 static void dumpQ1Result(const char* label, runtime::Query* query) {
    if (!query || !query->result) return;
    auto& rel = *query->result;
@@ -88,7 +87,6 @@ static void dumpQ1Result(const char* label, runtime::Query* query) {
    }
    fprintf(stderr, "=== END ===\n\n");
 }
-*/
 
 size_t nrTuples(Database& db, std::vector<std::string> tables) {
    size_t sum = 0;
@@ -320,7 +318,7 @@ int main(int argc, char* argv[]) {
     writeHeader = true;
 
     // --- VW queries first (no TBB thread pool interference) ---
-   if (q.count("1v"))
+   if (q.count("1v")) {
       e.timeAndProfile(label("q1 v ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
@@ -329,6 +327,9 @@ int main(int argc, char* argv[]) {
                           escape(&result);
                        },
                        repetitions);
+      auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
+      dumpQ1Result("vectorwise", vResult.get());
+   }
    if (q.count("3h"))
       e.timeAndProfile(label("q3 h ", nrThreads),
                        nrTuples(tpch, {"customer", "orders", "lineitem"}),
@@ -397,7 +398,7 @@ int main(int argc, char* argv[]) {
     PinningObserver pinner(arena);
 #endif
 
-   if (q.count("1h"))
+   if (q.count("1h")) {
       e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
@@ -407,6 +408,10 @@ int main(int argc, char* argv[]) {
                           });
                        },
                        repetitions);
+      std::unique_ptr<runtime::Query> hResult;
+      arena.execute([&] { hResult = q1_hyper(tpch, nrThreads); });
+      dumpQ1Result("hyper", hResult.get());
+   }
    if (q.count("3h"))
       e.timeAndProfile(label("q3 h ", nrThreads),
                        nrTuples(tpch, {"customer", "orders", "lineitem"}),
