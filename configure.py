@@ -70,6 +70,7 @@ MACHINE_PRESETS = {
     "manchego":  (2, 8, 2, False, "sapphirerapids"),     # 2-socket Xeon Silver 4509Y (SPR)
     "burrata":   (1, 128, 1, False, "neoverse-n1"),      # 1-socket ARM Neoverse-N1
     "kafir":     (8, 24, 2, True, "skylake-x"),          # 8-node Skylake-SP, contiguous
+    "rpi5":      (1, 4, 1, False, "cortex-a76"),          # Raspberry Pi 5 (BCM2712, 4x Cortex-A76)
     "custom":    None,  # user sets values manually
 }
 

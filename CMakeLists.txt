@@ -78,8 +78,15 @@ elseif(TARGET_MACHINE STREQUAL "kafir")
   set(SMT_PER_CORE 2)
   set(CPU_LAYOUT_CONTIGUOUS ON)
   set(TARGET_ARCH "skylake-x")
+elseif(TARGET_MACHINE STREQUAL "rpi5")
+  # Raspberry Pi 5: Broadcom BCM2712 (4x Cortex-A76), ARMv8.2-A, no SMT, 1 NUMA node
+  # -march=native is broken on RPi (missing /proc/cpuinfo fields), so we specify explicitly
+  set(SOCKETS_COUNT 1)
+  set(CORES_PER_SOCKET 4)
+  set(SMT_PER_CORE 1)
+  set(TARGET_ARCH "cortex-a76")
 elseif(NOT TARGET_MACHINE STREQUAL "custom")
-  message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner, roquefort, manchego, burrata, kafir")
+  message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner, roquefort, manchego, burrata, kafir, rpi5")
 endif()
 
 IF(CPU_LAYOUT_CONTIGUOUS)
@@ -130,7 +137,7 @@ endif (VW_GROUP_AGGR)
 # "native" (default) auto-detects via -march=native / -mcpu=native.
 # Set to a known profile for cross-compilation or reproducible builds.
 set(TARGET_ARCH "native" CACHE STRING
-    "Target architecture profile: native, skylake-x, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, armv8.2-generic, armv9-generic")
+    "Target architecture profile: native, skylake-x, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, cortex-a76, armv8.2-generic, armv9-generic")
 
 if(TARGET_ARCH STREQUAL "native")
   # Auto-detect: -mcpu=native on ARM, -march=native on x86
@@ -158,6 +165,9 @@ elseif(TARGET_ARCH STREQUAL "neoverse-v2")
   set(ARCH_FLAGS "-mcpu=neoverse-v2 -march=armv9-a+sve2+crypto")
 elseif(TARGET_ARCH STREQUAL "ampere-altra")
   set(ARCH_FLAGS "-mcpu=neoverse-n1 -march=armv8.2-a+simd+crypto")
+elseif(TARGET_ARCH STREQUAL "cortex-a76")
+  # Raspberry Pi 5 (BCM2712) — -march=native broken, specify explicitly
+  set(ARCH_FLAGS "-mcpu=cortex-a76 -march=armv8.2-a+simd+crypto")
 elseif(TARGET_ARCH STREQUAL "armv8.2-generic")
   set(ARCH_FLAGS "-march=armv8.2-a+simd+crypto")
 elseif(TARGET_ARCH STREQUAL "armv9-generic")
