@@ -191,7 +191,7 @@ int main(int argc, char* argv[]) {
     tl("load_end");
 
     // Now, filter the master query set
-    std::unordered_set<std::string> allQueries = {"1h", "1v", "3h", "3v", "5h", "5v", "6h", "6b", "6v", "18h", "18v", "9h", "9v"};
+    std::unordered_set<std::string> allQueries = {"1h", "1v", "3h", "3v", "5h", "5v", "6h", "6v", "18h", "18v", "9h", "9v"};
     std::unordered_set<std::string> q;
 
     // Parse comma-separated query list (e.g. "1,3,6" or just "1")
@@ -376,16 +376,6 @@ int main(int argc, char* argv[]) {
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
                              auto result = q6_hyper(tpch, nrThreads);
-                             escape(&result);
-                          });
-                       },
-                       repetitions);
-   if (q.count("6b"))
-      e.timeAndProfile(label("q6 b ", nrThreads), tpch["lineitem"].nrTuples,
-                       [&]() {
-                          if (clearCaches) clearOsCaches();
-                          arena.execute([&] {
-                             auto result = q6_hyper_branching(tpch, nrThreads);
                              escape(&result);
                           });
                        },

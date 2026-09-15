@@ -159,9 +159,6 @@ runtime::Relation
 q6_hyper(runtime::Database& db,
          size_t nrThreads = std::thread::hardware_concurrency());
 runtime::Relation
-q6_hyper_branching(runtime::Database& db,
-                   size_t nrThreads = std::thread::hardware_concurrency());
-runtime::Relation
 q6_vectorwise(runtime::Database& db,
               size_t nrThreads = std::thread::hardware_concurrency(),
               size_t vectorSize = 1024);

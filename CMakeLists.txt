@@ -412,6 +412,15 @@ if(CANARY_IN_BENCH)
   target_compile_definitions(run_tpch PRIVATE CANARY_IN_BENCH=1)
 endif()
 
+# ── Q6 predicate ablation study (Ross PODS 2002) ─────────────────────────
+# Pass -DABLATION_OPERATOR=<0|1> -DABLATION_PERMUTATION=<0..119> to enable.
+# Without these defines, SELECTION_CONDITION falls back to the original
+# hardcoded bitwise expression (no effect on default builds).
+include(ablation_study.cmake)
+if(DEFINED ABLATION_OPERATOR AND DEFINED ABLATION_PERMUTATION)
+  ablation_configure_target(run_tpch)
+endif()
+
 # ── Standalone canary tool ────────────────────────────────────────────────
 add_executable(canary src/tools/canary.cpp)
 target_include_directories(canary PRIVATE include)
