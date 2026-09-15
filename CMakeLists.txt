@@ -400,11 +400,19 @@ target_include_directories(vectorwise PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-# Set architecture if AVX512 experiments are requested (x86 only)
-if(AVX512EXPERIMENTS AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-  SET_TARGET_PROPERTIES(vectorwise PROPERTIES
-    COMPILE_FLAGS "-march=skylake-avx512"
-  )
+# Set architecture if AVX512 experiments are requested
+# On x86, force skylake-avx512 for native AVX-512; on ARM, use ARCH_FLAGS
+# (SIMDe emulates AVX-512 intrinsics portably).
+if(AVX512EXPERIMENTS)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    SET_TARGET_PROPERTIES(vectorwise PROPERTIES
+      COMPILE_FLAGS "${ARCH_FLAGS}"
+    )
+  else()
+    SET_TARGET_PROPERTIES(vectorwise PROPERTIES
+      COMPILE_FLAGS "-march=skylake-avx512"
+    )
+  endif()
 endif()
 target_link_libraries(vectorwise common)
 
@@ -510,8 +518,9 @@ endif()
 
 
 if(AVX512EXPERIMENTS)
+  # On x86, enable native AVX-512; on ARM, SIMDe emulates AVX-512 portably
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-    set(AVX512_COMPILE_FLAGS "-mcpu=native")
+    set(AVX512_COMPILE_FLAGS "${ARCH_FLAGS}")
   else()
     set(AVX512_COMPILE_FLAGS "-march=skylake-avx512")
   endif()
@@ -524,7 +533,6 @@ if(AVX512EXPERIMENTS)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-
   target_link_libraries(simdJoin common ${JEVENTSLIB})
 
   add_executable(run_simd
