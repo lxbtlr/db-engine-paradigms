@@ -12,7 +12,9 @@
 
 namespace vectorwise {
 
+#ifdef VW_GROUP_AGGR
 inline thread_local std::unordered_map<void*, std::vector<pos_t>> groups;
+#endif
 
 namespace primitives {
 
@@ -309,7 +311,7 @@ pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
          continue;
       }
 
-      T* aggregate = addBytes(static_cast<T*>(entry), offset);
+      T* aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
       T value = *aggregate;
 
       for (auto i : group) {
@@ -339,7 +341,7 @@ pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* selParam1, T* RES param1,
          continue;
       }
 
-      T* aggregate = addBytes(static_cast<T*>(entry), offset);
+      T* aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
       T value = *aggregate;
 
       for (auto i : group) {
