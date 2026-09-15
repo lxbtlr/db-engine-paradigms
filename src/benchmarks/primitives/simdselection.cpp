@@ -1,5 +1,5 @@
 #include "benchmarks/Primitives.hpp"
-#include "immintrin.h"
+#include "common/runtime/SIMD.hpp"
 
 
 using namespace std;

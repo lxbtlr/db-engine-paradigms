@@ -27,6 +27,9 @@ class QueryBuilder {
       void* data = nullptr;
       class Scan* scan = nullptr;
       std::string attribute;
+#ifdef NUMA_SHARD
+      std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases = {};
+#endif
       void registerDS(void** location);
       void registerDS(pos_t** location);
       operator void*() const;
@@ -132,6 +135,25 @@ class QueryBuilder {
       ~HashGroupBuilder();
    };
 
+   struct LUTGroupBuilder {
+      QueryBuilder& base;
+      LUTGroup* group;
+
+      LUTGroupBuilder(QueryBuilder& base);
+
+      using B = LUTGroupBuilder;
+      /// Set the packed key buffer and selection vector
+      B& setKeyAndSel(DS packedKeyBuf, DS selBuf);
+      /// Add a dense value buffer (already filtered, indexed 0..n-1)
+      B& addValue(DS col, DS out);
+      /// Add a column value that requires selection vector indirection
+      B& addValueSel(DS col, DS out);
+      /// Add a count aggregate (increments by 1 per tuple)
+      B& addCount(DS out);
+      /// Set output buffers for the two unpacked key columns
+      B& setKeyOutputs(DS outReturnflag, DS outLinestatus);
+   };
+
    struct ExpressionBuilder {
       std::unique_ptr<Expression> expression;
       using DS = DataStorage;
@@ -139,6 +161,8 @@ class QueryBuilder {
       ExpressionBuilder& addOp(primitives::F2 op, DS a, DS b);
       ExpressionBuilder& addOp(primitives::F3 op, DS a, DS b, DS c);
       ExpressionBuilder& addOp(primitives::F4 op, DS a, DS b, DS c, DS d);
+      /// Concat: copy in_size bytes from col[sel[i]] into out at offset
+      ExpressionBuilder& addConcat(DS sel, DS col, DS out, size_t offset);
       operator std::unique_ptr<vectorwise::Expression>();
       operator std::unique_ptr<vectorwise::Aggregates>();
    };
@@ -165,6 +189,8 @@ class QueryBuilder {
    HashJoin(DS probeMatches,
             pos_t (Hashjoin::*join)() = &Hashjoin::joinAllParallel);
    HashGroupBuilder HashGroup();
+   HashGroupBuilder OptHashGroup();
+   LUTGroupBuilder LUTGroup();
 
    ~QueryBuilder();
 

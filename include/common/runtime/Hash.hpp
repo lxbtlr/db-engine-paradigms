@@ -4,7 +4,10 @@
 #include "common/defs.hpp"
 #include "common/runtime/SIMD.hpp"
 #include "common/runtime/Types.hpp"
-#include <x86intrin.h>
+#ifndef SIMDE_ENABLE_NATIVE_ALIASES
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#endif
+#include <simde/x86/sse4.2.h>
 
 namespace runtime {
 

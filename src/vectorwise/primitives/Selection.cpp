@@ -3,7 +3,10 @@
 #include "vectorwise/Operations.hpp"
 #include "vectorwise/Primitives.hpp"
 #include <functional>
-#include <immintrin.h>
+#ifndef SIMDE_ENABLE_NATIVE_ALIASES
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#endif
+#include <simde/x86/avx512.h>
 #include <string.h>
 
 using namespace types;

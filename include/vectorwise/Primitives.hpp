@@ -7,10 +7,34 @@
 #include "vectorwise/VectorAllocator.hpp"
 #include "vectorwise/defs.hpp"
 #include <unordered_map>
+#include <vector>
 // #include "/home/kersten/tools/iaca-lin64/iacaMarks.h"
 
 namespace vectorwise {
+
+inline thread_local std::unordered_map<void*, std::vector<pos_t>> groups;
+
 namespace primitives {
+
+// Portable masked gather: AVX512VL on x86, AVX2+SIMDE fallback otherwise.
+// AVX512VL _mm256_mmask_i32gather_epi32 takes a scalar __mmask8.
+// AVX2 _mm256_mask_i32gather_epi32 takes a __m256i where each lane's high bit
+// controls the gather.  We expand the bitmask to a vector mask for the fallback.
+static inline __m256i gather_i32_masked(__m256i src, const void* base,
+                                        __m256i idx, unsigned mask) {
+#if defined(__AVX512VL__) && (defined(__x86_64__) || defined(__i386__))
+   return _mm256_mmask_i32gather_epi32(src, (__mmask8)mask, idx, base, 4);
+#else
+   // Expand each bit of mask into a 32-bit lane: bit set → 0xFFFFFFFF
+   __m256i bits = _mm256_set1_epi32(mask);
+   __m256i shift = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+   __m256i shifted = _mm256_srlv_epi32(bits, shift);
+   __m256i vmask = _mm256_slli_epi32(
+       _mm256_and_si256(shifted, _mm256_set1_epi32(1)), 31);
+   return _mm256_mask_i32gather_epi32(
+       src, static_cast<const int*>(base), idx, vmask, 4);
+#endif
+}
 
 //------------------------------------------------------------------------------
 //--- selection templates
@@ -18,10 +42,13 @@ template <typename T, template <typename> class Op>
 pos_t sel_col_val(pos_t n, pos_t* RES result, T* RES param1, T* RES param2)
 /// select with column and constant
 {
-   uint64_t found = 0;
-   const auto& con = *param2;
-   for (uint64_t i = 0; i < n; ++i)
-      if (Op<T>()(param1[i], con)) result[found++] = i;
+   const auto con = *param2;
+   pos_t found = 0;
+   for (pos_t i = 0; i < n; i++) {
+      if (Op<T>()(param1[i], con)) {
+         result[found++] = i;
+      }
+   }
    return found;
 }
 
@@ -84,13 +111,12 @@ pos_t sel_col_val_bf(pos_t n, pos_t* RES result, T* RES param1, T* RES param2)
 /// select with column and constant
 {
    const auto con = *param2;
-   auto rStart = result;
-   for (uint64_t i = 0; i < n; ++i) {
-      bool decision = Op<T>()(param1[i], con);
-      *result = i;
-      result += decision;
+   pos_t found = 0;
+   for (pos_t i = 0; i < n; i++) {
+      result[found] = i;
+      found += Op<T>()(param1[i], con);
    }
-   return result - rStart;
+   return found;
 }
 
 template <typename T, template <typename> class Op>
@@ -144,7 +170,9 @@ pos_t proj_col_val(pos_t n, T* RES result, T* RES param1, T* RES param2)
 /// project with column and constant
 {
    const auto constant = *param2;
-   for (uint64_t i = 0; i < n; ++i) result[i] = Op<T>()(param1[i], constant);
+   for (pos_t i = 0; i < n; i++) {
+      result[i] = Op<T>()(param1[i], constant);
+   }
    return n;
 }
 
@@ -153,7 +181,9 @@ pos_t proj_val_col(pos_t n, T* RES result, T* RES param1, T* RES param2)
 /// project with constant and column
 {
    const auto constant = *param1;
-   for (uint64_t i = 0; i < n; ++i) result[i] = Op<T>()(constant, param2[i]);
+   for (pos_t i = 0; i < n; i++) {
+      result[i] = Op<T>()(constant, param2[i]);
+   }
    return n;
 }
 
@@ -161,7 +191,9 @@ template <typename T, template <typename> class Op>
 pos_t proj_col_col(pos_t n, T* RES result, T* RES param1, T* RES param2)
 /// project with two columns
 {
-   for (uint64_t i = 0; i < n; ++i) result[i] = Op<T>()(param1[i], param2[i]);
+   for (pos_t i = 0; i < n; i++) {
+      result[i] = Op<T>()(param1[i], param2[i]);
+   }
    return n;
 }
 
@@ -171,7 +203,7 @@ pos_t proj_sel_col_val(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
 /// project with input selection vector and column and constant
 {
    const auto constant = *param2;
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[idx], constant);
    }
@@ -184,7 +216,7 @@ pos_t proj_sel_val_col(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
 /// project with input selection vector and constant and column
 {
    const auto constant = *param1;
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(constant, param2[idx]);
    }
@@ -196,7 +228,7 @@ pos_t proj_sel_both_col_col(pos_t n, pos_t* RES inSel, T* RES result,
                             T* RES param1, T* RES param2)
 /// project with input selection vector for both of two columns
 {
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[idx], param2[idx]);
    }
@@ -208,7 +240,7 @@ pos_t proj_sel_col_col(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
                        T* RES param2)
 /// project with input selection vector first of two columns
 {
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[idx], param2[i]);
    }
@@ -220,7 +252,7 @@ pos_t proj_col_sel_col(pos_t n, pos_t* RES inSel, T* RES result, T* RES param1,
                        T* RES param2)
 /// project with input selection vector for second of two columns
 {
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       result[i] = Op<T>()(param1[i], param2[idx]);
    }
@@ -232,7 +264,7 @@ pos_t proj_sel_col_sel_col(pos_t n, pos_t* RES inSel1, pos_t* RES inSel2,
                            T* RES result, T* RES param1, T* RES param2)
 /// project with separate input selection vector for each of two columns
 {
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx1 = inSel1[i];
       const auto idx2 = inSel2[i];
       result[i] = Op<T>()(param1[idx1], param2[idx2]);
@@ -266,7 +298,9 @@ pos_t aggr_static_col(pos_t n, T* RES result, T* RES param1)
 /// aggregate column into single value
 {
    auto aggregator = *result;
-   for (uint64_t i = 0; i < n; ++i) aggregator = Op<T>()(param1[i], aggregator);
+   for (pos_t i = 0; i < n; i++) {
+      aggregator = Op<T>()(param1[i], aggregator);
+   }
    *result = aggregator;
    return n > 0;
 }
@@ -277,7 +311,7 @@ pos_t aggr_static_sel_col(pos_t n, pos_t* RES inSel, T* RES result,
 /// aggregate with input selection vector and column into single value
 {
    auto aggregator = *result;
-   for (uint64_t i = 0; i < n; ++i) {
+   for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
       aggregator = Op<T>()(param1[idx], aggregator);
    }
@@ -286,33 +320,65 @@ pos_t aggr_static_sel_col(pos_t n, pos_t* RES inSel, T* RES result,
 }
 
 template <typename T, template <typename> class Op>
-pos_t aggr_col(pos_t n, T* RES entries[], T* RES param1, size_t offset)
+pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
 /// aggregate into multiple aggregators given by result
 {
-   auto p1 = param1;
-   for (auto e = entries, end = e + n; e < end; ++e, ++p1) {
-      auto aggregate = addBytes(*e, offset);
-      *aggregate = Op<T>()(*p1, *aggregate);
+#ifdef VW_GROUP_AGGR
+   for (auto& [entry, group] : groups) {
+      if (group.empty()) {
+         continue;
+      }
+
+      T* aggregate = addBytes(static_cast<T*>(entry), offset);
+      T value = *aggregate;
+
+      for (auto i : group) {
+         value = Op<T>()(param1[i], value);
+      }
+
+      *aggregate = value;
    }
+#else
+   for (pos_t i = 0; i < n; i++) {
+      T* aggregate = addBytes(entries[i], offset);
+      *aggregate = Op<T>()(param1[i], *aggregate);
+   }
+#endif
    return n;
 }
 
 template <typename T, template <typename> class Op>
-pos_t aggr_sel_col(pos_t n, T* RES entries[], pos_t* selParam1, T* RES param1,
+pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* selParam1, T* RES param1,
                    size_t offset)
 /// aggregate into multiple aggregators given by result, param1 has selection
 /// vector
 {
-   auto s = selParam1;
-   for (auto e = entries, end = e + n; e < end; ++e, ++s) {
-      auto aggregate = addBytes(*e, offset);
-      *aggregate = Op<T>()(param1[*s], *aggregate);
+#ifdef VW_GROUP_AGGR
+   for (auto& [entry, group] : groups) {
+      if (group.empty()) {
+         continue;
+      }
+
+      T* aggregate = addBytes(static_cast<T*>(entry), offset);
+      T value = *aggregate;
+
+      for (auto i : group) {
+         value = Op<T>()(param1[selParam1[i]], value);
+      }
+
+      *aggregate = value;
    }
+#else
+   for (pos_t i = 0; i < n; i++) {
+      T* aggregate = addBytes(entries[i], offset);
+      *aggregate = Op<T>()(param1[selParam1[i]], *aggregate);
+   }
+#endif
    return n;
 }
 
 template <typename T, template <typename> class Op>
-pos_t aggr_row(pos_t n, T* RES entries[], size_t offset, T** RES dataPtr,
+pos_t aggr_row(pos_t n, T** RES entries, size_t offset, T** RES dataPtr,
                size_t* inSizePtr, size_t inOffset)
 /// aggregate into multiple aggregators given by result
 {
@@ -604,7 +670,7 @@ pos_t hash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
    for (uint64_t i = 0; i < n - rest; i += 8) {
       auto inSels = _mm256_loadu_si256((const __m256i*)(inSel + i));
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, all, inSels, input, 4));
+          gather_i32_masked(inSels, input, inSels, (unsigned)all));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       _mm512_mask_storeu_epi64(result + i, all, hashes);
@@ -614,7 +680,7 @@ pos_t hash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       auto inSels = _mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, remaining, inSels, input, 4));
+          gather_i32_masked(inSels, input, inSels, (unsigned)remaining));
       auto hashes = Op().hashKey(in, seeds);
       _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes);
    }
@@ -655,7 +721,7 @@ pos_t rehash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       Vec8u seeds(result + i);
       auto inSels = _mm256_loadu_si256((const __m256i*)(inSel + i));
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, ~0, inSels, input, 4));
+          gather_i32_masked(inSels, input, inSels, (unsigned)~0));
       auto hashes = Op().hashKey(
           in, seeds); // function call operator overloading is not working ?!
       _mm512_mask_storeu_epi64(result + i, ~0, hashes); // ??
@@ -666,7 +732,7 @@ pos_t rehash4_sel(pos_t n, pos_t* RES inSel, hash_t* RES result, T* RES input)
       auto inSels = _mm256_loadu_si256(
           (const __m256i*)(inSel + n - rest)); // ignore mask here?
       Vec8u in = _mm512_cvtepu32_epi64(
-          _mm256_mmask_i32gather_epi32(inSels, remaining, inSels, input, 4));
+          gather_i32_masked(inSels, input, inSels, (unsigned)remaining));
       auto hashes = Op().hashKey(in, seeds);
       _mm512_mask_storeu_epi64(result + n - rest, remaining, hashes); // ??
    }
@@ -1293,6 +1359,26 @@ extern F4 selsel_greater_equal_int64_t_col_int64_t_val_avx512;
 extern F4 selsel_less_int64_t_col_int64_t_val_avx512;
 extern F4 selsel_less_equal_int64_t_col_int64_t_val_avx512;
 #endif
+// ---------------------------------------------------------------------------
+// Packed-key primitives for Q1 (returnflag + linestatus -> uint16_t)
+// ---------------------------------------------------------------------------
+extern F4 pack_sel_void_1_1;
+extern F2 hash_uint16_t_col;
+extern F3 hash_sel_uint16_t_col;
+extern NEQCheck keys_not_equal_uint16_t_col;
+extern NEQCheckSel keys_not_equal_sel_uint16_t_col;
+extern NEQCheckRow keys_not_equal_row_uint16_t_col;
+extern FPartitionByKey partition_by_key_uint16_t_col;
+extern FPartitionByKeySel partition_by_key_sel_uint16_t_col;
+extern FPartitionByKeyRow partition_by_key_row_uint16_t_col;
+extern FScatter scatter_uint16_t_col;
+extern FScatterSel scatter_sel_uint16_t_col;
+extern FScatterSelRow scatter_sel_row_uint16_t_col;
+extern FGather gather_col_uint16_t_col;
+extern FGatherVal gather_val_uint16_t_col;
+extern FGatherVal unpack_q1key_returnflag;
+extern FGatherVal unpack_q1key_linestatus;
+
 } // namespace primitives
 } // namespace vectorwise
 

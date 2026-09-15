@@ -6,11 +6,21 @@
 
 using namespace std;
 
+#if defined(__x86_64__) || defined(_M_X64)
 uint64_t rdtsc() {
    uint32_t hi, lo;
    __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
    return static_cast<uint64_t>(lo)|(static_cast<uint64_t>(hi)<<32);
 }
+#elif defined(__aarch64__)
+uint64_t rdtsc() {
+   uint64_t val;
+   __asm__ __volatile__ ("mrs %0, cntvct_el0" : "=r"(val));
+   return val;
+}
+#else
+#error "Unsupported architecture for rdtsc()"
+#endif
 static void escape(void *p) {
   asm volatile("" : : "g"(p) : "memory");
 }

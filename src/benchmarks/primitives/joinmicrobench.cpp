@@ -2,7 +2,7 @@
 #include "vectorwise/Operators.hpp"
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/Hash.hpp"
-#include "immintrin.h"
+#include "common/runtime/SIMD.hpp"
 #include <algorithm>
 
 using namespace std;
