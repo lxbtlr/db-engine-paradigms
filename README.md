@@ -4,15 +4,26 @@ This repository contains a collection of experiments, conducted to carve out the
 ## Where to Start
 Have a look at src/benchmarks/tpch/queries/ to see how query processing for Typer and Tectorwise works. 
 
+
+## Compatibility
+
+To increase the compatibility of this work with other systems we use SIMDE to translate from AVX instrinsics in-place. 
+Additionally, the cmake file includes a few preset methods for targeting each machine in the testing set (exposed through `-DTARGET_MACHINE`).
+
+
+
 ## How to Build
 A configuration file is provided to build this project with CMake. 
 In the project directory run:
 ```
+git submodule update --init
 mkdir -p build/release
 cd build/release
 cmake -DCMAKE_BUILD_TYPE=Release ../..
 make
 ```
+
+> TODO: extend this later
 
 This creates among others the main binaries test\_all and run\_tpch.
 Use test\_all to run unit tests and check whether your compilation worked.
