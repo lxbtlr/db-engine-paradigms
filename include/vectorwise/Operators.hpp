@@ -434,8 +434,6 @@ class HashGroup : public UnaryOperator {
    void Lookup(pos_t n);
    template <typename T> void Lookup_T(pos_t n);
 
-   void Group(pos_t n);
-
  private:
    void clearHashtable();
 };
