@@ -315,7 +315,9 @@ add_subdirectory("${CMAKE_BINARY_DIR}/googletest-src"
 
 # Suppress -Werror for googletest/googlemock (old gtest triggers warnings with newer GCC)
 target_compile_options(gtest PRIVATE -Wno-error)
+target_compile_options(gtest_main PRIVATE -Wno-error)
 target_compile_options(gmock PRIVATE -Wno-error)
+target_compile_options(gmock_main PRIVATE -Wno-error)
 
 # The gtest/gmock targets carry header search path
 # dependencies automatically when using CMake 2.8.11 or
