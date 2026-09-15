@@ -852,23 +852,29 @@ size_t HashGroup::next() {
          packedKeys.resize(vecSize * totalKeySize);
       }
 
+#ifdef VW_GROUP_AGGR
+      if (groups.empty()) {
+         groups.reserve(vecSize);
+      }
+#endif
+
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         preAggregation.groupsNotFound->clear();
+#ifdef VW_GROUP_AGGR
          for (auto& [entry, group] : groups) {
             group.clear();
          }
+#endif
 
          Concat(n);
          Hash(n);
          Lookup(n);
-#ifdef VW_GROUP_AGGR
-         Group(n);
-#endif
 
          updateGroups.evaluate(n);
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
+#ifdef VW_GROUP_AGGR
       groups.clear();
+#endif
       flushAndClear(); // flush remaining entries into spillStorage
       barrier();       // Wait until all workers have finished phase 1
 
@@ -1015,29 +1021,35 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
          if (entry->hash == hash) {
             char* entry_key = reinterpret_cast<char*>(entry + 1);
             if (std::memcmp(keys + i * keySize, entry_key, keySize) == 0) {
-               matches[i] = entry;
                break;
             }
          }
       }
+
       if (entry == end) {
-         preAggregation.groupsNotFound->push_back(i);
+         auto alloc = groupStore.allocate(preAggregation.ht_entry_size);
+         if (!alloc) throw std::runtime_error("malloc failed");
+         preAggregation.allocations.emplace_back(alloc, 1);
+
+         entry = reinterpret_cast<EntryHeader*>(alloc);
+
+         preAggregation.groupRepresentatives[0] = i;
+         preAggregation.scatterStart = entry;
+         preAggregation.buildScatter.evaluate(1);
+
+         ht.insert<false>(entry, hash);
+         ++preAggregation.entries_in_ht;
       }
-   }
 
-   preAggregation.createMissingGroups(ht, false);
-}
-
-// GROUP
-void HashGroup::Group(pos_t n) {
-   EntryHeader** __restrict__ matches = preAggregation.htMatches;
-
-   for (pos_t i = 0; i < n; i++) {
-      auto [it, inserted] = groups.try_emplace(matches[i]);
+#ifdef VW_GROUP_AGGR
+      auto [it, inserted] = groups.try_emplace(entry);
       if (inserted) {
-         it->second.reserve(1024);
+         it->second.reserve(vecSize);
       }
       it->second.push_back(i);
+#else
+      matches[i] = entry;
+#endif
    }
 }
 } // namespace vectorwise
