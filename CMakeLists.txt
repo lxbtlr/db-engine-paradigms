@@ -313,9 +313,9 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_BINARY_DIR}/googletest-src"
                  "${CMAKE_BINARY_DIR}/googletest-build")
 
-# Suppress -Werror for googletest (newer GCC triggers maybe-uninitialized in gtest internals)
-target_compile_options(gtest PRIVATE -Wno-error=maybe-uninitialized)
-target_compile_options(gmock PRIVATE -Wno-error=maybe-uninitialized)
+# Suppress -Werror for googletest/googlemock (old gtest triggers warnings with newer GCC)
+target_compile_options(gtest PRIVATE -Wno-error)
+target_compile_options(gmock PRIVATE -Wno-error)
 
 # The gtest/gmock targets carry header search path
 # dependencies automatically when using CMake 2.8.11 or
