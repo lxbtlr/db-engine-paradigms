@@ -314,6 +314,12 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_BINARY_DIR}/googletest-src"
                  "${CMAKE_BINARY_DIR}/googletest-build")
 
+# Suppress -Werror for googletest/googlemock (old gtest triggers warnings with newer GCC)
+target_compile_options(gtest PRIVATE -Wno-error)
+target_compile_options(gtest_main PRIVATE -Wno-error)
+target_compile_options(gmock PRIVATE -Wno-error)
+target_compile_options(gmock_main PRIVATE -Wno-error)
+
 # The gtest/gmock targets carry header search path
 # dependencies automatically when using CMake 2.8.11 or
 # later. Otherwise we have to add them here ourselves.
@@ -350,48 +356,8 @@ ELSE()
   set(JEVENTSLIB "")
 ENDIF()
 
-# tcmalloc from gperftools (built out-of-tree to avoid target name collisions)
-IF(USE_TCMALLOC)
-  include(ExternalProject)
-  set(GPERFTOOLS_PREFIX ${CMAKE_BINARY_DIR}/gperftools)
-  set(GPERFTOOLS_BUILD_DIR ${GPERFTOOLS_PREFIX}/src/gperftools_external-build)
-  ExternalProject_Add(gperftools_external
-    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/gperftools
-    PREFIX ${GPERFTOOLS_PREFIX}
-    CMAKE_ARGS
-      -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
-      -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
-      -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-      -Dgperftools_build_minimal=ON
-      -DBUILD_SHARED_LIBS=ON
-      -DBUILD_TESTING=OFF
-    INSTALL_COMMAND ""
-    BUILD_BYPRODUCTS ${GPERFTOOLS_BUILD_DIR}/libtcmalloc_minimal.so
-  )
-  add_library(tcmalloc_minimal SHARED IMPORTED GLOBAL)
-  set_target_properties(tcmalloc_minimal PROPERTIES
-    IMPORTED_LOCATION ${GPERFTOOLS_BUILD_DIR}/libtcmalloc_minimal.so
-    IMPORTED_NO_SONAME TRUE
-  )
-  add_dependencies(tcmalloc_minimal gperftools_external)
-  set(TCMALLOC_LIB tcmalloc_minimal)
-  message(STATUS "Using tcmalloc as the allocator")
-ELSE()
-  set(TCMALLOC_LIB "")
-ENDIF()
 
-# tcmalloc from gperftools
-IF(USE_TCMALLOC)
-  set(gperftools_build_minimal ON CACHE BOOL "" FORCE)
-  set(BUILD_TESTING_SAVED ${BUILD_TESTING})
-  set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-  add_subdirectory(3rdparty/gperftools EXCLUDE_FROM_ALL)
-  set(BUILD_TESTING ${BUILD_TESTING_SAVED} CACHE BOOL "" FORCE)
-  set(TCMALLOC_LIB tcmalloc_minimal)
-  message(STATUS "Using tcmalloc as the allocator")
-ELSE()
-  set(TCMALLOC_LIB "")
-ENDIF()
+
 
 add_library(common
   src/common/algebra/Operators.cpp
@@ -411,7 +377,7 @@ target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-target_link_libraries(common ${TCMALLOC_LIB} ${NUMA_LIB})
+target_link_libraries(common ${NUMA_LIB})
 
 
 set(HYPER_TRANSLATORS
@@ -442,11 +408,19 @@ target_include_directories(vectorwise PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-# Set architecture if AVX512 experiments are requested (x86 only)
-if(AVX512EXPERIMENTS AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-  SET_TARGET_PROPERTIES(vectorwise PROPERTIES
-    COMPILE_FLAGS "-march=skylake-avx512"
-  )
+# Set architecture if AVX512 experiments are requested
+# On x86, force skylake-avx512 for native AVX-512; on ARM, use ARCH_FLAGS
+# (SIMDe emulates AVX-512 intrinsics portably).
+if(AVX512EXPERIMENTS)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+    SET_TARGET_PROPERTIES(vectorwise PROPERTIES
+      COMPILE_FLAGS "${ARCH_FLAGS}"
+    )
+  else()
+    SET_TARGET_PROPERTIES(vectorwise PROPERTIES
+      COMPILE_FLAGS "-march=skylake-avx512"
+    )
+  endif()
 endif()
 target_link_libraries(vectorwise common)
 
@@ -500,10 +474,19 @@ target_include_directories(run_tpch PUBLIC
     PRIVATE src)
 target_link_libraries(run_tpch tpch hyper vectorwise common ${JEVENTSLIB})
 
+# Embed the git commit so the canary's version is reproducible/attributable.
+execute_process(
+  COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  OUTPUT_VARIABLE GIT_COMMIT_SHORT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET)
+if(NOT GIT_COMMIT_SHORT)
+  set(GIT_COMMIT_SHORT "unknown")
+endif()
+target_compile_definitions(run_tpch PRIVATE GIT_COMMIT_SHORT="${GIT_COMMIT_SHORT}")
+
 # Opt-in: compile the canary into run_tpch (per-cell bracketing via -c/-C).
-# OFF by default — see OPTION(CANARY_IN_BENCH) at the top. run_tpch includes
-# canary.hpp and gates its calls behind #ifdef CANARY_IN_BENCH, so when this is
-# OFF the benchmark binary carries no canary code.
 if(CANARY_IN_BENCH)
   target_compile_definitions(run_tpch PRIVATE CANARY_IN_BENCH=1)
 endif()
@@ -580,8 +563,9 @@ endif()
 
 
 if(AVX512EXPERIMENTS)
+  # On x86, enable native AVX-512; on ARM, SIMDe emulates AVX-512 portably
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
-    set(AVX512_COMPILE_FLAGS "-mcpu=native")
+    set(AVX512_COMPILE_FLAGS "${ARCH_FLAGS}")
   else()
     set(AVX512_COMPILE_FLAGS "-march=skylake-avx512")
   endif()
@@ -594,7 +578,6 @@ if(AVX512EXPERIMENTS)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-
   target_link_libraries(simdJoin common ${JEVENTSLIB})
 
   add_executable(run_simd

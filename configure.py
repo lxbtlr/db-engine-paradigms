@@ -32,7 +32,6 @@ BOOL_OPTIONS = [
     ("NUMA_SHARD",            "Shard base-table columns across NUMA regions",             False),
     ("THREAD_PIN_PACKED",     "Pack threads per socket (vs spread round-robin)",           False),
     ("NUMA_DEBUG",            "NUMA placement verification (move_pages)",                  False),
-    ("USE_TCMALLOC",          "Use tcmalloc from gperftools as the allocator",             False),
     ("VW_USE_CRC32",          "Use CRC32 hashing for VectorWise (default: MurMurHash)",   False),
     ("VECTORWISE_BRANCHING",  "Use branching vectorwise primitives",                       False),
     ("AVX512EXPERIMENTS",     "Enable AVX512 experiment targets",                          False),

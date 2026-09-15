@@ -420,11 +420,6 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                                 std::function<void()> fn, uint64_t repetitions,
                                 bool mem) {
    using namespace std;
-   // Canary bracketing (only when CANARY_IN_BENCH is ON): a frozen reference
-   // measurement immediately before and after the timed region, outside the
-   // perf-counter window. With the option OFF, the canary lives entirely in
-   // the standalone `canary` binary (job prologue/epilogue) and this process
-   // carries no canary code at all.
 #ifdef CANARY_IN_BENCH
    if (canary::g_enabled) canary::before(s.c_str());
 #endif
