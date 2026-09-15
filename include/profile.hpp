@@ -1,4 +1,7 @@
 #include "common/Compat.hpp"
+#ifdef CANARY_IN_BENCH
+#include "canary.hpp"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -390,6 +393,16 @@ inline double gettime() {
    return ((double)now_tv.tv_sec) + ((double)now_tv.tv_usec) / 1000000.0;
 }
 
+// Tier-2 run-timeline: emit a monotonic, within-process stage marker to stderr
+// so the corpus can reconstruct load/measure timing and the gaps between them.
+// Format: TIMELINE\t<event>\t<label>\t<monotonic_ms>
+inline void tl(const char* event, const char* label = "") {
+   auto now = std::chrono::steady_clock::now();
+   long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now.time_since_epoch()).count();
+   fprintf(stderr, "TIMELINE\t%s\t%s\t%lld\n", event, label, ms);
+}
+
 size_t getCurrentRSS() {
    long rss = 0L;
    FILE* fp = NULL;
@@ -407,6 +420,11 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
                                 std::function<void()> fn, uint64_t repetitions,
                                 bool mem) {
    using namespace std;
+#ifdef CANARY_IN_BENCH
+   if (canary::g_enabled) canary::before(s.c_str());
+#endif
+   tl("measure_start", s.c_str());
+
    // warmup rounds
    for (int warmup = 0; warmup < 3; ++warmup) fn();
 
@@ -427,6 +445,11 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    }
    double totalEnd = gettime();
    readAll();
+
+#ifdef CANARY_IN_BENCH
+   if (canary::g_enabled) canary::after(s.c_str());
+#endif
+   tl("measure_end", s.c_str());
 
    // Compute statistics
    std::vector<double> sorted = repTimes;

@@ -26,6 +26,7 @@ OPTION(VECTORWISE_BRANCHING "Use branching vectorwise primitives" OFF)
 OPTION(AUTOVECTORIZE "Allow the compiler to autovectorize" OFF)
 OPTION(DATADIR "Directory containing testdata" "")
 OPTION(AVX512EXPERIMENTS OFF)
+OPTION(CANARY_IN_BENCH "Compile the canary into run_tpch (per-cell bracketing, -c/-C). Default OFF: the canary lives in the standalone `canary` binary (job-level prologue/epilogue) and run_tpch has zero canary code." OFF)
 OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
@@ -460,6 +461,28 @@ target_include_directories(run_tpch PUBLIC
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
 target_link_libraries(run_tpch tpch hyper vectorwise common ${JEVENTSLIB})
+
+# Embed the git commit so the canary's version is reproducible/attributable.
+execute_process(
+  COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+  OUTPUT_VARIABLE GIT_COMMIT_SHORT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET)
+if(NOT GIT_COMMIT_SHORT)
+  set(GIT_COMMIT_SHORT "unknown")
+endif()
+target_compile_definitions(run_tpch PRIVATE GIT_COMMIT_SHORT="${GIT_COMMIT_SHORT}")
+
+# Opt-in: compile the canary into run_tpch (per-cell bracketing via -c/-C).
+if(CANARY_IN_BENCH)
+  target_compile_definitions(run_tpch PRIVATE CANARY_IN_BENCH=1)
+endif()
+
+# ── Standalone canary tool ────────────────────────────────────────────────
+add_executable(canary src/tools/canary.cpp)
+target_include_directories(canary PRIVATE include)
+target_compile_definitions(canary PRIVATE GIT_COMMIT_SHORT="${GIT_COMMIT_SHORT}")
 
 file(GLOB SBBQUERIES src/benchmarks/sbb/queries/*.cpp)
 add_library(ssb
