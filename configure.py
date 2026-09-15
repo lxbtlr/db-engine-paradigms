@@ -26,23 +26,13 @@ console = Console()
 BOOL_OPTIONS = [
     ("USE_CLANG",             "Use clang-18/clang++-18 instead of gcc/g++",              False),
     ("AUTOVECTORIZE",         "Allow the compiler to autovectorize",                      False),
-    ("SCAN_STATIC_PARTITION", "Static per-thread slice partitioning in Scan::next()",     False),
-    ("ORIGINAL_GROUPLOOKUP",  "Use original single-pass GroupLookup (no prefetch split)", False),
-    ("NUMA_ALLOC",            "Replicate base-table columns per NUMA region (4x copy)",   False),
-    ("NUMA_SHARD",            "Shard base-table columns across NUMA regions",             False),
     ("THREAD_PIN_PACKED",     "Pack threads per socket (vs spread round-robin)",           False),
-    ("NUMA_DEBUG",            "NUMA placement verification (move_pages)",                  False),
     ("VW_USE_CRC32",          "Use CRC32 hashing for VectorWise (default: MurMurHash)",   False),
     ("VECTORWISE_BRANCHING",  "Use branching vectorwise primitives",                       False),
     ("AVX512EXPERIMENTS",     "Enable AVX512 experiment targets",                          False),
     ("HARDWARE_BENCHMARKS",   "Enable hardware benchmark targets",                         False),
     ("NO_HUGE_PAGES",         "Disable huge pages for malloc_huge",                        False),
     ("HUGE_2MB_MALLOC_HUGE",  "Use 2MB hugetlb pages for malloc_huge",                    False),
-    ("HUGE_1GB_MALLOC_HUGE",  "Use 1GB huge pages for malloc_huge",                       False),
-    ("HUGE_1GB_MALLOC_NUMA",  "Use 1GB huge pages for malloc_numa",                       False),
-    ("WARM_PAGES",            "Touch all relation pages before measurement",               False),
-    ("INTERLEAVE_HT",         "Interleave hash table pages across NUMA nodes",             False),
-    ("HYPER_FLOAT",           "Let TBB hyper-engine threads float (no pinning)",           False),
 ]
 
 TARGET_ARCH_CHOICES = [
@@ -75,23 +65,15 @@ MACHINE_PRESETS = {
 
 # ── Preset configurations ─────────────────────────────────────────────────
 
-PRESETS = { # untested
+PRESETS = {
     "ARM baseline": {
         "USE_CLANG": True,
         "TARGET_ARCH": "neoverse-n1",
-        "SCAN_STATIC_PARTITION": True,
     },
     "ARM optimized": {
         "USE_CLANG": True,
         "TARGET_ARCH": "neoverse-n1",
-        "SCAN_STATIC_PARTITION": True,
         "AUTOVECTORIZE": True,
-    },
-    "ARM NUMA replicate": {
-        "USE_CLANG": True,
-        "TARGET_ARCH": "neoverse-n1",
-        "SCAN_STATIC_PARTITION": True,
-        "NUMA_ALLOC": True,
     },
     "x86 baseline": {
         "TARGET_ARCH": "native",
@@ -100,22 +82,13 @@ PRESETS = { # untested
         "TARGET_ARCH": "skylake-x",
         "AVX512EXPERIMENTS": True,
     },
-    "x86 NUMA shard": {
-        "TARGET_ARCH": "native",
-        "NUMA_SHARD": True,
-    },
     "Custom": None,
 }
 
 # ── Validation ────────────────────────────────────────────────────────────
 
 def validate_options(opts):
-    errors = []
-    if opts.get("NUMA_ALLOC") and opts.get("NUMA_SHARD"):
-        errors.append("NUMA_ALLOC and NUMA_SHARD are mutually exclusive.")
-    if opts.get("SCAN_STATIC_PARTITION") and opts.get("NUMA_SHARD"):
-        errors.append("SCAN_STATIC_PARTITION and NUMA_SHARD are mutually exclusive.")
-    return errors
+    return []
 
 # ── Interactive configuration ─────────────────────────────────────────────
 
@@ -211,33 +184,18 @@ def configure():
         for name, _, _ in BOOL_OPTIONS[:4]:
             opts[name] = name in compiler_opts
 
-        # NUMA group
-        numa_opts = questionary.checkbox(
-            "NUMA options (space to toggle):",
+        # Build features group
+        feature_opts = questionary.checkbox(
+            "Build feature options (space to toggle):",
             choices=[
                 questionary.Choice(f"{name}: {desc}", value=name, checked=opts.get(name, default))
-                for name, desc, default in BOOL_OPTIONS[4:11]
+                for name, desc, default in BOOL_OPTIONS[4:]
             ],
         ).ask()
-        if numa_opts is None:
+        if feature_opts is None:
             sys.exit(1)
-        for name, _, _ in BOOL_OPTIONS[4:11]:
-            opts[name] = name in numa_opts
-
-        # Advanced group
-        show_advanced = questionary.confirm("Show advanced options?", default=False).ask()
-        if show_advanced:
-            adv_opts = questionary.checkbox(
-                "Advanced options (space to toggle):",
-                choices=[
-                    questionary.Choice(f"{name}: {desc}", value=name, checked=opts.get(name, default))
-                    for name, desc, default in BOOL_OPTIONS[11:]
-                ],
-            ).ask()
-            if adv_opts is None:
-                sys.exit(1)
-            for name, _, _ in BOOL_OPTIONS[11:]:
-                opts[name] = name in adv_opts
+        for name, _, _ in BOOL_OPTIONS[4:]:
+            opts[name] = name in feature_opts
 
         # Data directory
         datadir = questionary.text(

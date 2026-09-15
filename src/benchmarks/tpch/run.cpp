@@ -20,11 +20,7 @@
 #include <tbb/global_control.h>
 #include <tbb/task_arena.h>
 #include <tbb/task_scheduler_observer.h>
-#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
-#include "common/runtime/NumaAlloc.hpp"
-#endif
 
-#ifndef HYPER_FLOAT
 /// Pins each TBB worker thread to a CPU using the same policy as
 /// WorkerGroup::run (spread by default, packed with THREAD_PIN_PACKED).
 class PinningObserver : public tbb::task_scheduler_observer {
@@ -43,7 +39,6 @@ public:
    }
    ~PinningObserver() override { observe(false); }
 };
-#endif // !HYPER_FLOAT
 
 // NOTE: this was helpful for debuging, but breaks if we dont use the thread arg, disable for now
 // lets force this thing to use one thread
@@ -186,62 +181,6 @@ int main(int argc, char* argv[]) {
     }
     importTPCH(tpchPath, tpch);
 
-#ifdef NUMA_ALLOC
-    runtime::assertTopology();
-    runtime::numaReplicateRelation(tpch["lineitem"]);
-    fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
-            runtime::NUM_NUMA_REGIONS);
-#ifdef NUMA_DEBUG
-    fprintf(stderr, "--- NUMA placement verification ---\n");
-    runtime::verifyNumaPlacement(tpch["lineitem"]);
-    fprintf(stderr, "--- end verification ---\n");
-#endif
-#endif
-
-#ifdef NUMA_SHARD
-    runtime::assertTopology();
-    size_t maxThreads = *std::max_element(threadCounts.begin(), threadCounts.end());
-    size_t nActive = runtime::activeRegions(maxThreads);
-    const char* shardTables[] = {"lineitem", "orders", "customer",
-                                 "supplier", "part", "partsupp",
-                                 "nation", "region"};
-    for (auto& name : shardTables) {
-       if (!tpch.hasRelation(name)) continue;
-       runtime::numaShardRelation(tpch[name], nActive);
-       fprintf(stderr, "NUMA sharding: %s sharded across %zu of %zu regions\n",
-               name, nActive, runtime::NUM_NUMA_REGIONS);
-       for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
-          auto& s = tpch[name].numaShards[r];
-          if (s.tupleEnd > s.tupleBegin)
-             fprintf(stderr, "  shard %zu: tuples [%zu, %zu)\n",
-                     r, s.tupleBegin, s.tupleEnd);
-       }
-    }
-#endif
-
-#ifdef WARM_PAGES
-    // Touch every page of every relation to warm page tables and TLB caches.
-    // Equalizes page-walk costs across configs (sharding/replication does this
-    // implicitly via memcpy; baseline does not).
-    {
-        volatile char sink = 0;
-        const char* tables[] = {"lineitem", "orders", "customer", "part",
-                                "supplier", "partsupp", "nation", "region"};
-        for (auto& name : tables) {
-            if (!tpch.hasRelation(name)) continue;
-            auto& rel = tpch[name];
-            for (auto& attrKv : rel.attributes) {
-                auto& attr = attrKv.second;
-                const char* p = static_cast<const char*>(attr.data());
-                size_t bytes = rel.nrTuples * attr.type->rt_size();
-                for (size_t off = 0; off < bytes; off += 4096)
-                    sink += p[off];
-            }
-        }
-        fprintf(stderr, "Page warmup complete.\n");
-    }
-#endif
-
     // Settle: let THP compaction / khugepaged finish before measurement
     if (settleSeconds > 0) {
         fprintf(stderr, "Settling for %d seconds...\n", settleSeconds);
@@ -250,21 +189,6 @@ int main(int argc, char* argv[]) {
     }
 
     tl("load_end");
-
-#if defined(NUMA_DEBUG) && defined(NUMA_ALLOC)
-    fprintf(stderr, "--- NUMA placement verification ---\n");
-    runtime::verifyNumaPlacement(tpch["lineitem"]);
-    fprintf(stderr, "--- end verification ---\n");
-#endif
-#if defined(NUMA_DEBUG) && defined(NUMA_SHARD)
-    fprintf(stderr, "--- NUMA placement verification ---\n");
-    for (auto& name : shardTables) {
-       if (!tpch.hasRelation(name)) continue;
-       fprintf(stderr, "  verifying %s...\n", name);
-       runtime::verifyNumaPlacement(tpch[name]);
-    }
-    fprintf(stderr, "--- end verification ---\n");
-#endif
 
     // Now, filter the master query set
     std::unordered_set<std::string> allQueries = {"1h", "1v", "3h", "3v", "5h", "5v", "6h", "6b", "6v", "18h", "18v", "9h", "9v"};
@@ -311,25 +235,14 @@ int main(int argc, char* argv[]) {
     }
 
     // Diagnostics
-    const char* numaMode = "baseline";
-#ifdef NUMA_ALLOC
-    numaMode = "NUMA_ALLOC";
-#endif
-#ifdef NUMA_SHARD
-    numaMode = "NUMA_SHARD";
-#endif
     {
         std::string tcStr;
         for (size_t i = 0; i < threadCounts.size(); ++i) {
             if (i > 0) tcStr += ",";
             tcStr += std::to_string(threadCounts[i]);
         }
-        fprintf(stderr, "Config: %s | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds"
-#ifdef NUMA_DEBUG
-                " | NUMA_DEBUG"
-#endif
-                "\n",
-                numaMode, selectedEngine.c_str(), selectedQuery.c_str(),
+        fprintf(stderr, "Config: baseline | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds\n",
+                selectedEngine.c_str(), selectedQuery.c_str(),
                 tcStr.c_str(), vectorSize, settleSeconds);
     }
 
@@ -418,9 +331,7 @@ int main(int argc, char* argv[]) {
     {
     tbb::global_control gc(tbb::global_control::max_allowed_parallelism, nrThreads);
     tbb::task_arena arena(static_cast<int>(nrThreads));
-#ifndef HYPER_FLOAT
     PinningObserver pinner(arena);
-#endif
 
    if (q.count("1h")) {
       e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),

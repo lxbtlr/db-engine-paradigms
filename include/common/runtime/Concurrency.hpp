@@ -96,13 +96,6 @@ inline size_t activeRegions(size_t nrThreads) {
 #endif
 }
 
-#if defined(NUMA_ALLOC) || defined(NUMA_SHARD) || defined(NUMA_DEBUG)
-/// Validate at startup that the compile-time topology constants match the
-/// actual hardware.  Aborts if nodeOfCpu(c) doesn't match numa_node_of_cpu(c)
-/// for any CPU, or if the node count differs from SOCKETS_COUNT.
-void assertTopology();
-#endif
-
 class Worker;
 class WorkerGroup;
 

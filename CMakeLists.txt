@@ -30,11 +30,7 @@ OPTION(CANARY_IN_BENCH "Compile the canary into run_tpch (per-cell bracketing, -
 OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
-
-OPTION(NUMA_ALLOC "Replicate base-table columns per NUMA region" OFF)
-OPTION(NUMA_SHARD "Shard base-table columns across NUMA regions" OFF)
 OPTION(THREAD_PIN_PACKED "Pack threads per socket (vs spread round-robin)" OFF)
-OPTION(NUMA_DEBUG "Enable NUMA allocation debug logging and placement verification" OFF)
 
 # ── Machine topology ─────────────────────────────────────────────────────
 # TARGET_MACHINE selects a preset for SOCKETS_COUNT, CORES_PER_SOCKET,
@@ -99,21 +95,8 @@ ADD_DEFINITIONS(-DCFG_SMT_PER_CORE=${SMT_PER_CORE})
 message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T  contiguous=${CPU_LAYOUT_CONTIGUOUS}")
 OPTION(NO_HUGE_PAGES "Disable huge pages for malloc_huge" OFF)
 OPTION(HUGE_2MB_MALLOC_HUGE "Use 2MB hugetlb pages for malloc_huge" OFF)
-OPTION(HUGE_1GB_MALLOC_HUGE "Use 1GB huge pages for malloc_huge" OFF)
-OPTION(HUGE_1GB_MALLOC_NUMA "Use 1GB huge pages for malloc_numa" OFF)
-OPTION(WARM_PAGES "Touch all relation pages before measurement to warm page tables" OFF)
-OPTION(INTERLEAVE_HT "Interleave hash table pages across NUMA nodes" OFF)
-OPTION(HYPER_FLOAT "Let TBB hyper-engine threads float (no pinning)" OFF)
-OPTION(SCAN_STATIC_PARTITION "Static per-thread slice partitioning in Scan::next()" OFF)
-OPTION(ORIGINAL_GROUPLOOKUP "Use original single-pass GroupLookup (no prefetch split)" OFF)
 set(MORSEL_SIZE 10000 CACHE STRING "Morsel size for parallel scan loops")
 
-IF(NUMA_ALLOC AND NUMA_SHARD)
-  message(FATAL_ERROR "NUMA_ALLOC and NUMA_SHARD are mutually exclusive. Pick one.")
-ENDIF()
-IF(SCAN_STATIC_PARTITION AND NUMA_SHARD)
-  message(FATAL_ERROR "SCAN_STATIC_PARTITION and NUMA_SHARD are mutually exclusive. Pick one.")
-ENDIF()
 OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise" OFF)
 
 if (VW_USE_CRC32)
@@ -123,11 +106,6 @@ else ()
   message(STATUS "Building with MurMurHash")
 endif (VW_USE_CRC32)
 
-OPTION(VW_GROUP_AGGR "Perform group-wise GROUP BY aggregation for VectorWise" OFF)
-if (VW_GROUP_AGGR)
-  ADD_DEFINITIONS(-DVW_GROUP_AGGR=1)
-  message(STATUS "Building with VW_GROUP_AGGR")
-endif (VW_GROUP_AGGR)
 
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
@@ -227,20 +205,8 @@ ELSE()
   ADD_DEFINITIONS(-DHASH_SIZE=64)
 ENDIF()
 
-IF(NUMA_ALLOC)
-  ADD_DEFINITIONS(-DNUMA_ALLOC)
-ENDIF()
-
-IF(NUMA_SHARD)
-  ADD_DEFINITIONS(-DNUMA_SHARD)
-ENDIF()
-
 IF(THREAD_PIN_PACKED)
   ADD_DEFINITIONS(-DTHREAD_PIN_PACKED)
-ENDIF()
-
-IF(NUMA_DEBUG)
-  ADD_DEFINITIONS(-DNUMA_DEBUG)
 ENDIF()
 
 IF(NO_HUGE_PAGES)
@@ -251,41 +217,8 @@ IF(HUGE_2MB_MALLOC_HUGE)
   ADD_DEFINITIONS(-DHUGE_2MB_MALLOC_HUGE)
 ENDIF()
 
-IF(HUGE_1GB_MALLOC_HUGE)
-  ADD_DEFINITIONS(-DHUGE_1GB_MALLOC_HUGE)
-ENDIF()
-
-IF(HUGE_1GB_MALLOC_NUMA)
-  ADD_DEFINITIONS(-DHUGE_1GB_MALLOC_NUMA)
-ENDIF()
-
-IF(WARM_PAGES)
-  ADD_DEFINITIONS(-DWARM_PAGES)
-ENDIF()
-
-IF(INTERLEAVE_HT)
-  ADD_DEFINITIONS(-DINTERLEAVE_HT)
-ENDIF()
-
-IF(HYPER_FLOAT)
-  ADD_DEFINITIONS(-DHYPER_FLOAT)
-ENDIF()
-
-IF(SCAN_STATIC_PARTITION)
-  ADD_DEFINITIONS(-DSCAN_STATIC_PARTITION)
-ENDIF()
-
-IF(ORIGINAL_GROUPLOOKUP)
-  ADD_DEFINITIONS(-DORIGINAL_GROUPLOOKUP)
-ENDIF()
-
 ADD_DEFINITIONS(-DCFG_MORSEL_SIZE=${MORSEL_SIZE})
 
-IF(NUMA_ALLOC OR NUMA_DEBUG OR NUMA_SHARD OR INTERLEAVE_HT)
-  set(NUMA_LIB numa)
-ELSE()
-  set(NUMA_LIB "")
-ENDIF()
 
 IF(AUTOVECTORIZE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
@@ -376,7 +309,7 @@ target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-target_link_libraries(common ${NUMA_LIB})
+target_link_libraries(common)
 
 
 set(HYPER_TRANSLATORS

@@ -78,15 +78,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
    types::Date c1 = types::Date::castString("1998-09-02");
    types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
    auto& li = db["lineitem"];
-#ifdef NUMA_SHARD
-   auto l_returnflag = numaShardPtrs<types::Char<1>>(li, "l_returnflag");
-   auto l_linestatus = numaShardPtrs<types::Char<1>>(li, "l_linestatus");
-   auto l_extendedprice = numaShardPtrs<types::Numeric<12, 2>>(li, "l_extendedprice");
-   auto l_discount = numaShardPtrs<types::Numeric<12, 2>>(li, "l_discount");
-   auto l_tax = numaShardPtrs<types::Numeric<12, 2>>(li, "l_tax");
-   auto l_quantity = numaShardPtrs<types::Numeric<12, 2>>(li, "l_quantity");
-   auto l_shipdate = numaShardPtrs<types::Date>(li, "l_shipdate");
-#else
    auto l_returnflag = li["l_returnflag"].data<types::Char<1>>();
    auto l_linestatus = li["l_linestatus"].data<types::Char<1>>();
    auto l_extendedprice = li["l_extendedprice"].data<types::Numeric<12, 2>>();
@@ -94,7 +85,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
    auto l_tax = li["l_tax"].data<types::Numeric<12, 2>>();
    auto l_quantity = li["l_quantity"].data<types::Numeric<12, 2>>();
    auto l_shipdate = li["l_shipdate"].data<types::Date>();
-#endif
 
    auto resources = initQuery(nrThreads);
 
@@ -116,27 +106,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
        nrThreads);
 
 
-#ifdef NUMA_SHARD
-   numa_parallel_scan(nrThreads, li, morselSize,
-       [&](size_t begin, size_t end, size_t node) {
-          auto locals = groupOp.preAggLocals();
-          for (size_t i = begin; i < end; ++i) {
-             if (l_shipdate[node][i] <= c1) {
-                auto& group = locals.getGroup(
-                    make_tuple(l_returnflag[node][i], l_linestatus[node][i]));
-
-                get<0>(group) += l_quantity[node][i];
-                get<1>(group) += l_extendedprice[node][i];
-                auto disc_price =
-                    l_extendedprice[node][i] * (one - l_discount[node][i]);
-                get<2>(group) += disc_price;
-                auto charge = disc_price * (one + l_tax[node][i]);
-                get<3>(group) += charge;
-                get<4>(group) += 1;
-             }
-          }
-       });
-#else
    tbb::parallel_for(
        tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
        [&](const tbb::blocked_range<size_t>& r) {
@@ -155,7 +124,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
              }
           }
        });
-#endif
 
    auto& result = resources.query->result;
    auto retAttr = result->addAttribute("l_returnflag", sizeof(Char<1>));
@@ -229,7 +197,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                       Buffer(charge, sizeof(int64_t)),
                       Buffer(disc_price, sizeof(int64_t)),
                       Buffer(result_proj_plus, sizeof(int64_t))));
-   OptHashGroup()
+   HashGroup()
        .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
        .addKey(Column(lineitem, "l_returnflag"), Buffer(sel_date),
                primitives::hash_sel_Char_1_col,
@@ -295,96 +263,6 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
    // TODO: add averages
    r->rootOp = popOperator();
    return r;
-}
-
-std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryPacked() {
-   using namespace vectorwise;
-   auto result = Result();
-   previous = result.resultWriter.shared.result->participate();
-
-   auto r = make_unique<Q1>();
-   auto lineitem = Scan("lineitem");
-   Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
-                             Buffer(sel_date, sizeof(pos_t)),
-                             Column(lineitem, "l_shipdate"), Value(&r->c1)));
-   Project()
-       .addExpression(
-           Expression()
-               .addOp(conf.proj_sel_minus_int64_t_val_int64_t_col(),
-                      Buffer(sel_date),
-                      Buffer(result_proj_minus, sizeof(int64_t)),
-                      Value(&r->one), Column(lineitem, "l_discount"))
-               .addOp(conf.proj_multiplies_sel_int64_t_col_int64_t_col(),
-                      Buffer(sel_date), Buffer(disc_price, sizeof(int64_t)),
-                      Column(lineitem, "l_extendedprice"),
-                      Buffer(result_proj_minus, sizeof(int64_t))))
-       .addExpression(
-           Expression()
-               .addOp(conf.proj_sel_plus_int64_t_col_int64_t_val(),
-                      Buffer(sel_date),
-                      Buffer(result_proj_plus, sizeof(int64_t)),
-                      Column(lineitem, "l_tax"), Value(&r->one))
-               .addOp(conf.proj_multiplies_int64_t_col_int64_t_col(),
-                      Buffer(charge, sizeof(int64_t)),
-                      Buffer(disc_price, sizeof(int64_t)),
-                      Buffer(result_proj_plus, sizeof(int64_t))))
-       // Pack the two Char<1> key columns into a dense uint16_t buffer
-       .addExpression(
-           Expression()
-               .addConcat(Buffer(sel_date),
-                          Column(lineitem, "l_returnflag"),
-                          Buffer(packed_key, sizeof(uint16_t)), 0)
-               .addConcat(Buffer(sel_date),
-                          Column(lineitem, "l_linestatus"),
-                          Buffer(packed_key, sizeof(uint16_t)), 1));
-   // LUT-based aggregation: packed key is used as direct array index.
-   // No hashing, no hash table, no chain walking.
-   LUTGroup()
-       .setKeyAndSel(Buffer(packed_key), Buffer(sel_date))
-       .addValue(Buffer(disc_price),
-                 Buffer(sum_disc_price, sizeof(int64_t)))
-       .addValue(Buffer(charge),
-                 Buffer(sum_charge, sizeof(int64_t)))
-       .addValueSel(Column(lineitem, "l_quantity"),
-                    Buffer(sum_qty, sizeof(int64_t)))
-       .addValueSel(Column(lineitem, "l_extendedprice"),
-                    Buffer(sum_base_price, sizeof(int64_t)))
-       .addCount(Buffer(count_order, sizeof(uint64_t)))
-       .setKeyOutputs(Buffer(returnflag, sizeof(Char_1)),
-                      Buffer(linestatus, sizeof(Char_1)));
-
-   result.addValue("l_returnflag", Buffer(returnflag))
-       .addValue("l_linestatus", Buffer(linestatus))
-       .addValue("sum_qty", Buffer(sum_qty))
-       .addValue("sum_base_price", Buffer(sum_base_price))
-       .addValue("sum_disc_price", Buffer(sum_disc_price))
-       .addValue("sum_charge", Buffer(sum_charge))
-       .addValue("count_order", Buffer(count_order))
-       .finalize();
-
-   r->rootOp = popOperator();
-   return r;
-}
-
-std::unique_ptr<runtime::Query> q1_vectorwise_packed(Database& db,
-                                                     size_t nrThreads,
-                                                     size_t vectorSize) {
-   using namespace vectorwise;
-   WorkerGroup workers(nrThreads);
-   vectorwise::SharedStateManager shared;
-
-   std::unique_ptr<runtime::Query> result;
-   workers.run([&]() {
-      Q1Builder builder(db, shared, vectorSize);
-      auto query = builder.getQueryPacked();
-      query->rootOp->next();
-      auto leader = barrier();
-      if (leader)
-         result = move(
-             dynamic_cast<ResultWriter*>(query->rootOp.get())->shared.result);
-   });
-
-   return result;
 }
 
 std::unique_ptr<runtime::Query> q1_vectorwise(Database& db, size_t nrThreads,
