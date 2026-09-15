@@ -80,9 +80,17 @@ inline const char* version() { return CANARY_WORKLOAD_VERSION "@" GIT_COMMIT_SHO
 // a volatile sink so the frozen loop bodies are the thing being measured.
 inline void escape(volatile uint64_t* p) { (void)p; }
 
+// Compiler barrier: prevents the compiler from reordering kernel work across
+// timing reads. Without this, a fast kernel can appear to take zero time
+// because the compiler sinks/hoists work past the chrono calls.
+inline void timing_fence() { asm volatile("" ::: "memory"); }
+
 inline double now_ms() {
+   timing_fence();
    using namespace std::chrono;
-   return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+   double t = duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+   timing_fence();
+   return t;
 }
 
 // One rep of the compute-bound kernel: dependent imul/add chain over a
