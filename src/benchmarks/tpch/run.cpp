@@ -10,6 +10,9 @@
 #include <unordered_set>
 
 #include "benchmarks/tpch/Queries.hpp"
+#ifdef CANARY_IN_BENCH
+#include "canary.hpp"
+#endif
 #include "common/runtime/Import.hpp"
 #include "common/runtime/Concurrency.hpp"
 #include "profile.hpp"
@@ -106,10 +109,14 @@ void clearOsCaches() {
 int main(int argc, char* argv[]) {
     PerfEvents e;
     Database tpch;
+    tl("proc_start");
     // load tpch data
 //importTPCH(argv[2], tpch);
  
     bool clearCaches = false;
+#ifdef CANARY_IN_BENCH
+    bool canaryOnly = false;
+#endif
    
     // Defaults
     int repetitions = 1;
@@ -121,8 +128,13 @@ int main(int argc, char* argv[]) {
     std::string selectedEngine = ""; // e.g., "h" or "v"
 
     int opt;
+#ifdef CANARY_IN_BENCH
+    const char* optstring = "q:e:r:p:t:v:s:cC";
+#else
+    const char* optstring = "q:e:r:p:t:v:s:";
+#endif
     // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize, s: settle
-    while ((opt = getopt(argc, argv, "q:e:r:p:t:v:s:")) != -1) {
+    while ((opt = getopt(argc, argv, optstring)) != -1) {
         switch (opt) {
             case 'q': selectedQuery = optarg; break;
             case 'e': selectedEngine = optarg; break;
@@ -131,8 +143,16 @@ int main(int argc, char* argv[]) {
             case 't': threadArg = optarg; break;
             case 'v': vectorSize = atoi(optarg); break;
             case 's': settleSeconds = atoi(optarg); break;
+#ifdef CANARY_IN_BENCH
+            case 'c': canary::g_enabled = true; break;
+            case 'C': canaryOnly = true; break;
+#endif
             default:
+#ifdef CANARY_IN_BENCH
+                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-c canary] [-C canary-only]\n";
+#else
                 std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds]\n";
+#endif
                 exit(1);
         }
     }
@@ -148,6 +168,17 @@ int main(int argc, char* argv[]) {
     }
     if (threadCounts.empty())
         threadCounts.push_back(std::thread::hardware_concurrency());
+
+#ifdef CANARY_IN_BENCH
+    // Canary-only self-test / calibration mode: run both frozen kernels once
+    // (emit as phase "before") and exit. No TPC-H data required.
+    if (canaryOnly) {
+        fprintf(stderr, "canary version: %s\n", canary::version());
+        canary::g_enabled = true;
+        canary::before("canary-only");
+        return 0;
+    }
+#endif
 
     if (tpchPath.empty()) {
         std::cerr << "Error: Path to TPC-H directory (-p) is required.\n";
@@ -217,6 +248,8 @@ int main(int argc, char* argv[]) {
         std::this_thread::sleep_for(std::chrono::seconds(settleSeconds));
         fprintf(stderr, "Done settling.\n");
     }
+
+    tl("load_end");
 
 #if defined(NUMA_DEBUG) && defined(NUMA_ALLOC)
     fprintf(stderr, "--- NUMA placement verification ---\n");
@@ -473,6 +506,7 @@ int main(int argc, char* argv[]) {
     } // TBB arena + global_control destroyed here
 
    } // end thread count loop
+   tl("proc_end");
    return 0;
 }
 
