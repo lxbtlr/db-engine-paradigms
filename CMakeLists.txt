@@ -107,6 +107,17 @@ else ()
 endif (VW_USE_CRC32)
 
 
+OPTION(ORIGINAL_GROUPLOOKUP "Use original primitive-based findGroups (OFF = Concat/Hash/Lookup path)" OFF)
+IF(ORIGINAL_GROUPLOOKUP)
+  ADD_DEFINITIONS(-DORIGINAL_GROUPLOOKUP)
+ENDIF()
+
+OPTION(VW_GROUP_AGGR "Perform group-wise GROUP BY aggregation for VectorWise" OFF)
+if(VW_GROUP_AGGR)
+  ADD_DEFINITIONS(-DVW_GROUP_AGGR=1)
+  message(STATUS "Building with VW_GROUP_AGGR")
+endif(VW_GROUP_AGGR)
+
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
 # add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
