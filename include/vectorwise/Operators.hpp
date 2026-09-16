@@ -3,6 +3,7 @@
 #include "common/Compat.hpp"
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Database.hpp"
+#include "common/runtime/Hash.hpp"
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/PartitionedDeque.hpp"
 #include "common/runtime/Query.hpp"
@@ -406,6 +407,32 @@ class HashGroup : public UnaryOperator {
    } cont;
 
    virtual size_t next() override;
+
+   struct KeyColumn {
+      uint32_t size = 0;
+      uint32_t offset = 0;
+      void* data = nullptr;
+   };
+
+   uint32_t totalKeySize = 0;
+   std::deque<KeyColumn> keyColumns;
+   std::vector<char> packedKeys;
+   pos_t* selVec = nullptr;
+
+#ifdef VW_USE_CRC32
+   runtime::CRC32Hash hashFn;
+#else
+   runtime::MurMurHash hashFn;
+#endif
+
+   void Concat(pos_t n);
+   template <typename T> void Concat_T(pos_t n, const KeyColumn& col);
+
+   void Hash(pos_t n);
+   template <typename T> void Hash_T(pos_t n);
+
+   void Lookup(pos_t n);
+   template <typename T> void Lookup_T(pos_t n);
 
  private:
    void clearHashtable();

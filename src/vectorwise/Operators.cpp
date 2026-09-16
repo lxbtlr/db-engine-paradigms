@@ -836,7 +836,6 @@ size_t HashGroup::next() {
    using header_t = decltype(ht)::EntryHeader;
    if (!cont.consumed) {
       /// ------ phase 1: local preaggregation
-      size_t nGroups = 0;
       auto& spill = shared.spillStorage.local();
       auto entry_size = preAggregation.ht_entry_size;
 
@@ -853,13 +852,20 @@ size_t HashGroup::next() {
          preAggregation.clearHashtable(ht);
       };
 
+      if (packedKeys.size() != vecSize * totalKeySize) {
+         packedKeys.resize(vecSize * totalKeySize);
+      }
+
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-         groupHash.evaluate(n);
-         preAggregation.findGroups(n, ht);
-         auto groupsCreated = preAggregation.createMissingGroups(ht, false);
+         preAggregation.groupsNotFound->clear();
+
+         Concat(n);
+         Hash(n);
+         Lookup(n);
+
+         preAggregation.createMissingGroups(ht, false);
          updateGroups.evaluate(n);
-         nGroups += groupsCreated;
-         if (nGroups >= maxFill) flushAndClear();
+         if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
       flushAndClear();
       barrier();
@@ -912,6 +918,100 @@ size_t HashGroup::next() {
       }
    }
    return EndOfStream;
+}
+
+// CONCAT
+void HashGroup::Concat(pos_t n) {
+   for (const auto& col : keyColumns) {
+      switch (col.size) {
+         case 1: Concat_T<uint8_t>(n, col); break;
+         case 2: Concat_T<uint16_t>(n, col); break;
+         case 4: Concat_T<uint32_t>(n, col); break;
+         case 8: Concat_T<uint64_t>(n, col); break;
+         default: Concat_T<char*>(n, col); break;
+      }
+   }
+}
+
+template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
+   uint32_t keySize = totalKeySize;
+   uint32_t colSize = std::is_same_v<T, char*> ? col.size : sizeof(T);
+   char* __restrict__ src = static_cast<char*>(col.data);
+   pos_t* __restrict__ sel = selVec;
+   char* __restrict__ dest = packedKeys.data() + col.offset;
+
+   if (n < vecSize) {
+      for (pos_t i = 0; i < n; i++) {
+         std::memcpy(dest + i * keySize, src + sel[i] * colSize, colSize);
+      }
+   } else {
+      for (pos_t i = 0; i < n; i++) {
+         std::memcpy(dest + i * keySize, src + i * colSize, colSize);
+      }
+   }
+}
+
+// HASH
+void HashGroup::Hash(pos_t n) {
+   switch (totalKeySize) {
+      case 1: Hash_T<uint8_t>(n); break;
+      case 2: Hash_T<uint16_t>(n); break;
+      case 4: Hash_T<uint32_t>(n); break;
+      case 8: Hash_T<uint64_t>(n); break;
+      default: Hash_T<char*>(n); break;
+   }
+}
+
+template <typename T> void HashGroup::Hash_T(pos_t n) {
+   uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
+   char* __restrict__ keys = packedKeys.data();
+   hash_t* __restrict__ hashes = preAggregation.groupHashes;
+
+   for (pos_t i = 0; i < n; i++) {
+      if constexpr (std::is_same_v<T, char*>) {
+         hashes[i] = hashFn.hashKey(keys + i * keySize, keySize, 0);
+      } else {
+         T key;
+         std::memcpy(&key, keys + i * keySize, keySize);
+         hashes[i] = hashFn.hashKey(key);
+      }
+   }
+}
+
+// LOOKUP
+void HashGroup::Lookup(pos_t n) {
+   switch (totalKeySize) {
+      case 1: Lookup_T<uint8_t>(n); break;
+      case 2: Lookup_T<uint16_t>(n); break;
+      case 4: Lookup_T<uint32_t>(n); break;
+      case 8: Lookup_T<uint64_t>(n); break;
+      default: Lookup_T<char*>(n); break;
+   }
+}
+
+template <typename T> void HashGroup::Lookup_T(pos_t n) {
+   uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
+   char* __restrict__ keys = packedKeys.data();
+   hash_t* __restrict__ hashes = preAggregation.groupHashes;
+   EntryHeader** __restrict__ matches = preAggregation.htMatches;
+
+   EntryHeader* end = ht.end();
+   for (pos_t i = 0; i < n; i++) {
+      hash_t hash = hashes[i];
+      EntryHeader* el = ht.find_chain(hash);
+      for (; el != end; el = el->next) {
+         if (el->hash == hash) {
+            char* el_key = reinterpret_cast<char*>(el + 1);
+            if (std::memcmp(keys + i * keySize, el_key, keySize) == 0) {
+               matches[i] = el;
+               break;
+            }
+         }
+      }
+      if (el == end) {
+         preAggregation.groupsNotFound->push_back(i);
+      }
+   }
 }
 
 } // namespace vectorwise
