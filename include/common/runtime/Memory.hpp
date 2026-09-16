@@ -19,7 +19,7 @@ inline void* malloc_huge(size_t size) {
                   -1, 0);
    if (p == MAP_FAILED) {
       p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
-               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
       if (p == MAP_FAILED)
          throw std::runtime_error("malloc_huge: mmap failed");
    }
@@ -30,19 +30,19 @@ inline void* malloc_huge(size_t size) {
                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
    if (p == MAP_FAILED) {
       p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
-               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
       if (p == MAP_FAILED)
          throw std::runtime_error("malloc_huge: mmap failed");
    }
 #elif defined(NO_HUGE_PAGES)
    void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
    if (p == MAP_FAILED)
       throw std::runtime_error("malloc_huge: mmap failed");
 #else
    // Default: use MADV_HUGEPAGE (THP)
    void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
    if (p == MAP_FAILED)
       throw std::runtime_error("malloc_huge: mmap failed");
 #ifdef __linux__
