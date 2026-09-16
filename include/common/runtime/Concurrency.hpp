@@ -3,7 +3,7 @@
 #include "common/Compat.hpp"
 #include "common/runtime/Barrier.hpp"
 #include "common/runtime/MemoryPool.hpp"
-#include "tbb/task_group.h"
+#include <vector>
 #include <array>
 #include <deque>
 #include <functional>
@@ -158,15 +158,16 @@ class WorkerGroup
 };
 
 inline void WorkerGroup::run(std::function<void()> f) {
-   tbb::task_group g;
    auto barriers = HierarchicBarrier::create(size);
    int64_t group = -1;
+   std::vector<std::thread> pool;
+   pool.reserve(size - 1);
    for (size_t i = 0; i < size - 1; ++i) {
       if (i % HierarchicBarrier::threadsPerBarrier == 0) ++group;
       threads.emplace_back(this, f, barriers[group]);
       auto worker = &threads.back();
       worker->worker_id = i;
-      g.run([worker, i]() {
+      pool.emplace_back([worker, i]() {
 
 #ifndef __APPLE__
          pthread_t currentThread = pthread_self();
@@ -201,7 +202,7 @@ inline void WorkerGroup::run(std::function<void()> f) {
    currentBarrier = prevBarrier;
    this_worker->barrier = prevBarrierPtr;
 
-   g.wait();
+   for (auto& t : pool) t.join();
 
    HierarchicBarrier::destroy(barriers);
 }
