@@ -36,13 +36,13 @@ pos_t aggr_count_star_(pos_t n, int64_t* RES entries[], void* RES /*param1*/,
 /// update count aggregates for each entry pointed to by entries
 {
 #ifdef VW_GROUP_AGGR
-   for (auto& [entry, group] : groups) {
-      if (group.empty()) {
+   for (auto entry : groups) {
+      if (entry->size == 0) {
          continue;
       }
 
       int64_t* aggregate = addBytes(reinterpret_cast<int64_t*>(entry), offset);
-      *aggregate += static_cast<int64_t>(group.size());
+      *aggregate += entry->size;
    }
 #else
    for (pos_t i = 0; i < n; i++) {
