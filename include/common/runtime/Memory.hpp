@@ -107,8 +107,18 @@ inline void* malloc_huge_interleaved(size_t size) {
 
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 /// Allocate anonymous memory bound to a specific NUMA node.
+/// When NUM_NUMA_REGIONS == 1 (single-node / NPS1), falls back to malloc_huge
+/// since mbind is unnecessary.
 /// Tries MAP_HUGETLB first; falls back to base pages with MADV_HUGEPAGE.
 inline void* malloc_numa(size_t size, int node) {
+#ifndef CFG_SOCKETS_COUNT
+#define CFG_SOCKETS_COUNT 4
+#endif
+#if CFG_SOCKETS_COUNT == 1
+   // Single NUMA node (NPS1): mbind is unnecessary, use malloc_huge + first-touch
+   (void)node;
+   return malloc_huge(size);
+#else
 #ifdef NO_HUGE_PAGES
    // Plain base pages, no hugetlb, no THP
    size_t allocSize = size;
@@ -150,11 +160,15 @@ inline void* malloc_numa(size_t size, int node) {
                                std::to_string(node) + " failed: " +
                                std::string(std::strerror(errno)));
    return p;
+#endif // CFG_SOCKETS_COUNT == 1
 }
 
 /// Return the actual mmap size used by malloc_numa for cleanup.
 /// Must match the rounding logic in malloc_numa.
 inline size_t malloc_numa_size(size_t size) {
+#if CFG_SOCKETS_COUNT == 1
+   return malloc_huge_size(size);
+#else
 #ifdef NO_HUGE_PAGES
    return size;
 #else
@@ -165,6 +179,7 @@ inline size_t malloc_numa_size(size_t size) {
 #endif
    return (size + PAGE - 1) & ~(PAGE - 1);
 #endif
+#endif // CFG_SOCKETS_COUNT == 1
 }
 #endif // NUMA_ALLOC || NUMA_SHARD
 

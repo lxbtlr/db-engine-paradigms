@@ -38,26 +38,34 @@ OPTION(NUMA_DEBUG "Enable NUMA allocation debug logging and placement verificati
 
 # ── Machine topology ─────────────────────────────────────────────────────
 # TARGET_MACHINE selects a preset for SOCKETS_COUNT, CORES_PER_SOCKET,
-# SMT_PER_CORE, and THREAD_PIN_PACKED.  Use "custom" to set them manually.
+# SMT_PER_CORE, NUM_REGIONS, and layout flags.  Use "custom" to set them manually.
 set(TARGET_MACHINE "custom" CACHE STRING
     "Machine topology preset: custom, dubliner, roquefort, manchego, burrata, kafir")
 OPTION(CPU_LAYOUT_CONTIGUOUS "Contiguous CPU numbering per node (vs interleaved)" OFF)
 
-set(SOCKETS_COUNT 4 CACHE STRING "Number of sockets/chiplets/memory domains")
-set(CORES_PER_SOCKET 22 CACHE STRING "Physical cores per socket/chiplet")
+set(SOCKETS_COUNT 4 CACHE STRING "Number of physical sockets")
+set(CORES_PER_SOCKET 22 CACHE STRING "Physical cores per socket")
 set(SMT_PER_CORE 2 CACHE STRING "Hardware threads per physical core")
+# NUM_REGIONS: number of memory/L3 domains for data sharding.
+# Defaults to SOCKETS_COUNT.  Override for sub-socket domains (e.g. CCDs).
+set(NUM_REGIONS 0 CACHE STRING "Sharding regions (0 = auto from SOCKETS_COUNT)")
 
 if(TARGET_MACHINE STREQUAL "dubliner")
-  # 4-socket Xeon, 22 cores/socket, 2-way SMT, interleaved CPU numbering
+  # 4-socket Xeon E7-8890v4, 22 cores/socket, 2-way SMT, interleaved CPU numbering
   set(SOCKETS_COUNT 4)
   set(CORES_PER_SOCKET 22)
   set(SMT_PER_CORE 2)
+  set(NUM_REGIONS 4)
   set(TARGET_ARCH "native")
 elseif(TARGET_MACHINE STREQUAL "roquefort")
-  # 1-socket AMD EPYC 7443P (Zen3), 24 cores, 2-way SMT, 1 NUMA node
+  # 1-socket AMD EPYC 7443P (Zen3), 24 cores, 2-way SMT, 1 NUMA node, 4 CCDs
+  # L3 domains (CCDs): 0={0-5,24-29} 1={6-11,30-35} 2={12-17,36-41} 3={18-23,42-47}
+  # Primaries-first SMT, contiguous cores per CCD.
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 24)
   set(SMT_PER_CORE 2)
+  set(NUM_REGIONS 4)
+  set(CPU_LAYOUT_CONTIGUOUS ON)
   set(TARGET_ARCH "native")
 elseif(TARGET_MACHINE STREQUAL "manchego")
   # 2-socket Intel Xeon Silver 4509Y (Sapphire Rapids), 8 cores/socket,
@@ -65,29 +73,37 @@ elseif(TARGET_MACHINE STREQUAL "manchego")
   set(SOCKETS_COUNT 2)
   set(CORES_PER_SOCKET 8)
   set(SMT_PER_CORE 2)
+  set(NUM_REGIONS 2)
   set(TARGET_ARCH "sapphirerapids")
 elseif(TARGET_MACHINE STREQUAL "burrata")
   # 1-socket ARM Neoverse-N1, 128 cores, no SMT, 1 NUMA node
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 128)
   set(SMT_PER_CORE 1)
+  set(NUM_REGIONS 1)
   set(TARGET_ARCH "neoverse-n1")
 elseif(TARGET_MACHINE STREQUAL "kafir")
   # 8-node Skylake-SP, 24 cores/node, 2-way SMT, contiguous CPU numbering
   set(SOCKETS_COUNT 8)
   set(CORES_PER_SOCKET 24)
   set(SMT_PER_CORE 2)
+  set(NUM_REGIONS 8)
   set(CPU_LAYOUT_CONTIGUOUS ON)
   set(TARGET_ARCH "skylake-x")
 elseif(TARGET_MACHINE STREQUAL "rpi5")
   # Raspberry Pi 5: Broadcom BCM2712 (4x Cortex-A76), ARMv8.2-A, no SMT, 1 NUMA node
-  # -march=native is broken on RPi (missing /proc/cpuinfo fields), so we specify explicitly
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 4)
   set(SMT_PER_CORE 1)
+  set(NUM_REGIONS 1)
   set(TARGET_ARCH "cortex-a76")
 elseif(NOT TARGET_MACHINE STREQUAL "custom")
   message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner, roquefort, manchego, burrata, kafir, rpi5")
+endif()
+
+# Default NUM_REGIONS to SOCKETS_COUNT if not set by preset or user
+if(NUM_REGIONS EQUAL 0)
+  set(NUM_REGIONS ${SOCKETS_COUNT})
 endif()
 
 IF(CPU_LAYOUT_CONTIGUOUS)
@@ -96,7 +112,8 @@ ENDIF()
 ADD_DEFINITIONS(-DCFG_SOCKETS_COUNT=${SOCKETS_COUNT})
 ADD_DEFINITIONS(-DCFG_CORES_PER_SOCKET=${CORES_PER_SOCKET})
 ADD_DEFINITIONS(-DCFG_SMT_PER_CORE=${SMT_PER_CORE})
-message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T  contiguous=${CPU_LAYOUT_CONTIGUOUS}")
+ADD_DEFINITIONS(-DCFG_NUM_REGIONS=${NUM_REGIONS})
+message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T  regions=${NUM_REGIONS}  contiguous=${CPU_LAYOUT_CONTIGUOUS}")
 OPTION(NO_HUGE_PAGES "Disable huge pages for malloc_huge" OFF)
 OPTION(HUGE_2MB_MALLOC_HUGE "Use 2MB hugetlb pages for malloc_huge" OFF)
 OPTION(HUGE_1GB_MALLOC_HUGE "Use 1GB huge pages for malloc_huge" OFF)
@@ -281,11 +298,8 @@ ENDIF()
 
 ADD_DEFINITIONS(-DCFG_MORSEL_SIZE=${MORSEL_SIZE})
 
-IF(NUMA_ALLOC OR NUMA_DEBUG OR NUMA_SHARD OR INTERLEAVE_HT)
-  set(NUMA_LIB numa)
-ELSE()
-  set(NUMA_LIB "")
-ENDIF()
+# Always link libnuma — assertTopology() is unconditional
+set(NUMA_LIB numa)
 
 IF(AUTOVECTORIZE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")

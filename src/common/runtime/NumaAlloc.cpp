@@ -17,13 +17,25 @@
 
 namespace runtime {
 
-// Pin the calling thread to logical thread j on NUMA region r.
+// Pin the calling thread to the j-th core within region r.
+// Always uses packed-style mapping (independent of THREAD_PIN_PACKED),
+// since this is for warmup/sharding, not query scheduling.
 static void pinToRegion(size_t r, size_t j = 0) {
    cpu_set_t cpuset;
    CPU_ZERO(&cpuset);
 #ifdef CPU_LAYOUT_CONTIGUOUS
-   CPU_SET(r * THREADS_PER_SOCKET + j, &cpuset);
+   // Contiguous: regions are contiguous blocks of cores.
+   // j indexes within the region, primaries before siblings.
+   size_t core_in_region = j % CORES_PER_REGION;
+   size_t smt = j / CORES_PER_REGION;
+   size_t socket = (r * CORES_PER_REGION) / CORES_PER_SOCKET;
+   size_t core_in_socket =
+       (r * CORES_PER_REGION) % CORES_PER_SOCKET + core_in_region;
+   size_t cpu = socket * THREADS_PER_SOCKET + core_in_socket +
+                smt * CORES_PER_SOCKET;
+   CPU_SET(cpu, &cpuset);
 #else
+   // Interleaved: regions are sockets, threads round-robin across sockets.
    CPU_SET(j * SOCKETS_COUNT + r, &cpuset);
 #endif
    pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
@@ -114,7 +126,7 @@ struct RegionPool {
 
 #ifdef NUMA_ALLOC
 void numaReplicateRelation(Relation& rel) {
-   constexpr size_t workersPerRegion = CORES_PER_SOCKET;
+   constexpr size_t workersPerRegion = CORES_PER_REGION;
    std::vector<std::thread> threads;
    threads.reserve(NUM_NUMA_REGIONS);
 
@@ -164,7 +176,7 @@ void numaShardRelation(Relation& rel, size_t nActiveRegions) {
    constexpr size_t N = NUM_NUMA_REGIONS;
    size_t A = std::min(nActiveRegions, N);
    if (A == 0) A = N;
-   constexpr size_t workersPerRegion = CORES_PER_SOCKET;
+   constexpr size_t workersPerRegion = CORES_PER_REGION;
    size_t totalTuples = rel.nrTuples;
 
    // Compute shard tuple boundaries — only split across active regions.
@@ -328,24 +340,6 @@ void verifyNumaPlacement(Relation& rel) {
    }
 }
 #endif // NUMA_DEBUG
-
-#ifdef NUMA_DEBUG
-void verifyNumaPlacement(Relation& rel) {
-   for (size_t r = 0; r < NUM_NUMA_REGIONS; ++r) {
-      for (auto& kv : rel.numaReplicas[r].columns) {
-         constexpr size_t pageSize = 4096;
-         constexpr size_t nPages = 4;
-         void* pages[nPages];
-         int status[nPages];
-         for (size_t p = 0; p < nPages; ++p)
-            pages[p] = (char*)kv.second + p * pageSize;
-         move_pages(0, nPages, pages, nullptr, status, 0);
-         fprintf(stderr, "region %zu col %-20s: pages on nodes %d %d %d %d\n",
-                 r, kv.first.c_str(), status[0], status[1], status[2], status[3]);
-      }
-   }
-}
-#endif
 
 } // namespace runtime
 

@@ -2,6 +2,14 @@
 
 #include "common/runtime/Database.hpp"
 
+// Use CFG_NUM_REGIONS from CMake; fallback matches Concurrency.hpp default
+#ifndef CFG_NUM_REGIONS
+#ifndef CFG_SOCKETS_COUNT
+#define CFG_SOCKETS_COUNT 4
+#endif
+#define CFG_NUM_REGIONS CFG_SOCKETS_COUNT
+#endif
+
 namespace runtime {
 
 #ifdef NUMA_ALLOC
@@ -21,7 +29,7 @@ void numaFreeReplicas(Relation& rel);
 /// file-backed mmap.
 /// nActiveRegions: only populate shards 0..nActiveRegions-1 (data placed only
 /// on nodes that have threads).  Defaults to NUM_NUMA_REGIONS.
-void numaShardRelation(Relation& rel, size_t nActiveRegions = NUM_NUMA_REGIONS);
+void numaShardRelation(Relation& rel, size_t nActiveRegions = CFG_NUM_REGIONS);
 
 /// Free all NUMA shards for a relation.
 void numaFreeShards(Relation& rel);
@@ -31,12 +39,6 @@ void numaFreeShards(Relation& rel);
 /// Verify that replicated/sharded pages landed on the expected NUMA nodes.
 /// Samples across each region's full extent at 2MB stride.
 /// Aborts if any region has <95% of pages on its home node.
-void verifyNumaPlacement(Relation& rel);
-#endif
-
-#ifdef NUMA_DEBUG
-/// Verify that replicated pages landed on the expected NUMA nodes.
-/// Uses move_pages() syscall to query physical placement.
 void verifyNumaPlacement(Relation& rel);
 #endif
 

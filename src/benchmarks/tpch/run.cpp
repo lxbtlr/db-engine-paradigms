@@ -186,8 +186,9 @@ int main(int argc, char* argv[]) {
     }
     importTPCH(tpchPath, tpch);
 
-#ifdef NUMA_ALLOC
     runtime::assertTopology();
+
+#ifdef NUMA_ALLOC
     runtime::numaReplicateRelation(tpch["lineitem"]);
     fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
             runtime::NUM_NUMA_REGIONS);
@@ -199,7 +200,6 @@ int main(int argc, char* argv[]) {
 #endif
 
 #ifdef NUMA_SHARD
-    runtime::assertTopology();
     size_t maxThreads = *std::max_element(threadCounts.begin(), threadCounts.end());
     size_t nActive = runtime::activeRegions(maxThreads);
     const char* shardTables[] = {"lineitem", "orders", "customer",

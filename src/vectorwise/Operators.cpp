@@ -82,15 +82,17 @@ Scan::Scan(Shared& s, size_t n, size_t v)
    size_t myId = runtime::this_worker->worker_id;
    size_t rank = 0;
 #ifdef THREAD_PIN_PACKED
-   rank = myId % runtime::THREADS_PER_SOCKET;
+   rank = myId % runtime::THREADS_PER_REGION;
 #else
-   rank = myId / runtime::SOCKETS_COUNT;
+   rank = myId / runtime::NUM_NUMA_REGIONS;
 #endif
 
    // ring[k] = (home + 1 + ((rank + k) % (N-1))) % N
    stealOrder[0] = homeNode;
-   for (size_t k = 0; k < N - 1; ++k)
-      stealOrder[k + 1] = (homeNode + 1 + ((rank + k) % (N - 1))) % N;
+   if constexpr (N > 1) {
+      for (size_t k = 0; k < N - 1; ++k)
+         stealOrder[k + 1] = (homeNode + 1 + ((rank + k) % (N - 1))) % N;
+   }
    currentStealIdx = 0;
 #endif
 }

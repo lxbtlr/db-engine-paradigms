@@ -176,11 +176,11 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
          r.data = base;
       }
 #ifdef NUMA_DEBUG
-      fprintf(stderr,
-              "worker %zu col %s shardBases=[%p,%p,%p,%p] data=%p\n",
-              runtime::this_worker->worker_id, attribute.c_str(),
-              r.shardBases[0], r.shardBases[1], r.shardBases[2],
-              r.shardBases[3], r.data);
+      fprintf(stderr, "worker %zu col %s shardBases=[",
+              runtime::this_worker->worker_id, attribute.c_str());
+      for (size_t i = 0; i < runtime::NUM_NUMA_REGIONS; ++i)
+         fprintf(stderr, "%s%p", i ? "," : "", r.shardBases[i]);
+      fprintf(stderr, "] data=%p\n", r.data);
 #endif
    }
 #elif defined(NUMA_ALLOC)

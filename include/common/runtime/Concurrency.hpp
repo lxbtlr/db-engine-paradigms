@@ -28,32 +28,71 @@ namespace runtime {
 #ifndef CFG_SMT_PER_CORE
 #define CFG_SMT_PER_CORE 2
 #endif
+// NUM_REGIONS: number of memory/L3 domains for sharding.
+// Equals SOCKETS_COUNT on multi-socket (dubliner=4, manchego=2),
+// or CCDS_PER_SOCKET on single-socket multi-CCD (roquefort=4).
+// Set explicitly per machine preset in CMakeLists.txt.
+#ifndef CFG_NUM_REGIONS
+#define CFG_NUM_REGIONS CFG_SOCKETS_COUNT
+#endif
 
 constexpr size_t SOCKETS_COUNT = CFG_SOCKETS_COUNT;
 constexpr size_t CORES_PER_SOCKET = CFG_CORES_PER_SOCKET;
 constexpr size_t SMT_PER_CORE = CFG_SMT_PER_CORE;
-constexpr size_t NUM_NUMA_REGIONS = SOCKETS_COUNT;
+constexpr size_t NUM_NUMA_REGIONS = CFG_NUM_REGIONS;
 constexpr size_t THREADS_PER_SOCKET = CORES_PER_SOCKET * SMT_PER_CORE;
+constexpr size_t THREADS_PER_REGION =
+    THREADS_PER_SOCKET * SOCKETS_COUNT / NUM_NUMA_REGIONS;
+constexpr size_t CORES_PER_REGION =
+    CORES_PER_SOCKET * SOCKETS_COUNT / NUM_NUMA_REGIONS;
 
 /// Map a thread id to the CPU id it should be pinned to.
-/// Two layouts:
-///   Interleaved (default): CPU c -> node (c % SOCKETS_COUNT)
-///     thread i in packed mode: cpu = (i % TPS) * SOCKETS_COUNT + (i / TPS)
-///     thread i in spread mode: cpu = i  (sequential IDs round-robin across nodes)
-///   Contiguous (CPU_LAYOUT_CONTIGUOUS): CPU c -> node (c / THREADS_PER_SOCKET)
-///     thread i in packed mode: cpu = i  (contiguous blocks already match)
-///     thread i in spread mode: cpu = (i % SOCKETS_COUNT) * TPS + (i / SOCKETS_COUNT)
+///
+/// Three layout families:
+///
+///   1. Interleaved (default): CPU c -> node (c % SOCKETS_COUNT)
+///        NUM_NUMA_REGIONS == SOCKETS_COUNT (regions are sockets)
+///
+///   2. Contiguous (CPU_LAYOUT_CONTIGUOUS): cores numbered contiguously per
+///        socket, siblings follow primaries within each socket block.
+///        NUM_NUMA_REGIONS == SOCKETS_COUNT (regions are sockets)
+///
+///   3. CCD (CPU_LAYOUT_CONTIGUOUS + NUM_REGIONS > SOCKETS_COUNT):
+///        Sub-socket L3 domains.  Primaries grouped first across all CCDs,
+///        then siblings.  Example (roquefort, 4 CCDs of 6 cores):
+///          CCD 0: primaries 0-5,   siblings 24-29
+///          CCD 1: primaries 6-11,  siblings 30-35
+///          CCD 2: primaries 12-17, siblings 36-41
+///          CCD 3: primaries 18-23, siblings 42-47
+///
 inline size_t cpuOfThread(size_t tid) {
 #if defined(CPU_LAYOUT_CONTIGUOUS)
+   // Contiguous: sub-socket regions (CCD) or socket-level regions
 #ifdef THREAD_PIN_PACKED
-   return tid;
+   // Packed: fill one region before moving to next, primaries before siblings
+   size_t region = tid / THREADS_PER_REGION;
+   size_t j = tid % THREADS_PER_REGION;
+   size_t core_in_region = j % CORES_PER_REGION;
+   size_t smt = j / CORES_PER_REGION;
+   // Which socket this region belongs to, and offset within that socket
+   size_t socket = (region * CORES_PER_REGION) / CORES_PER_SOCKET;
+   size_t core_in_socket =
+       (region * CORES_PER_REGION) % CORES_PER_SOCKET + core_in_region;
+   return socket * THREADS_PER_SOCKET + core_in_socket +
+          smt * CORES_PER_SOCKET;
 #else
-   // Spread across nodes: thread 0->node0, 1->node1, ..., N->node0, ...
-   size_t node = tid % SOCKETS_COUNT;
-   size_t j = tid / SOCKETS_COUNT;
-   return node * THREADS_PER_SOCKET + j;
+   // Spread across regions: thread 0->region0, 1->region1, ..., N->region0, ...
+   size_t region = tid % NUM_NUMA_REGIONS;
+   size_t j = tid / NUM_NUMA_REGIONS;
+   size_t core_in_region = j % CORES_PER_REGION;
+   size_t smt = j / CORES_PER_REGION;
+   size_t socket = (region * CORES_PER_REGION) / CORES_PER_SOCKET;
+   size_t core_in_socket =
+       (region * CORES_PER_REGION) % CORES_PER_SOCKET + core_in_region;
+   return socket * THREADS_PER_SOCKET + core_in_socket +
+          smt * CORES_PER_SOCKET;
 #endif
-#else // Interleaved (default)
+#else // Interleaved (default): NUM_NUMA_REGIONS == SOCKETS_COUNT
 #ifdef THREAD_PIN_PACKED
    size_t socket = tid / THREADS_PER_SOCKET;
    size_t j = tid % THREADS_PER_SOCKET;
@@ -64,44 +103,47 @@ inline size_t cpuOfThread(size_t tid) {
 #endif
 }
 
-/// Map a CPU id to its NUMA node / memory domain.
-inline size_t nodeOfCpu(size_t cpu) {
+/// Map a CPU id to its region (NUMA node, CCD, or socket — depending on config).
+inline size_t regionOfCpu(size_t cpu) {
 #ifdef CPU_LAYOUT_CONTIGUOUS
-   return cpu / THREADS_PER_SOCKET;
+   // Contiguous: strip SMT layer, then divide by cores-per-region
+   size_t socket = cpu / THREADS_PER_SOCKET;
+   size_t within_socket = cpu % THREADS_PER_SOCKET;
+   size_t core_in_socket = within_socket % CORES_PER_SOCKET;
+   return (socket * CORES_PER_SOCKET + core_in_socket) / CORES_PER_REGION;
 #else
-   return cpu % SOCKETS_COUNT;
+   return cpu % NUM_NUMA_REGIONS;
 #endif
 }
 
-/// Map a thread id to its NUMA region (convenience: nodeOfCpu(cpuOfThread(tid))).
+/// Legacy alias — assertTopology() uses this name.
+inline size_t nodeOfCpu(size_t cpu) { return regionOfCpu(cpu); }
+
+/// Map a thread id to its region (convenience: regionOfCpu(cpuOfThread(tid))).
 inline size_t regionOf(size_t tid) {
 #ifdef THREAD_PIN_PACKED
-   return tid / THREADS_PER_SOCKET;
+   return tid / THREADS_PER_REGION;
 #else
-   return tid % SOCKETS_COUNT;
+   return tid % NUM_NUMA_REGIONS;
 #endif
 }
 
-/// Count how many distinct NUMA regions are occupied by nrThreads threads.
+/// Count how many distinct regions are occupied by nrThreads threads.
 inline size_t activeRegions(size_t nrThreads) {
 #ifdef THREAD_PIN_PACKED
-   // Packed: fill one socket before moving to next
-   size_t full = nrThreads / THREADS_PER_SOCKET;
-   size_t partial = (nrThreads % THREADS_PER_SOCKET) > 0 ? 1 : 0;
+   size_t full = nrThreads / THREADS_PER_REGION;
+   size_t partial = (nrThreads % THREADS_PER_REGION) > 0 ? 1 : 0;
    size_t n = full + partial;
    return n < NUM_NUMA_REGIONS ? n : NUM_NUMA_REGIONS;
 #else
-   // Spread: round-robin across sockets
    return nrThreads < NUM_NUMA_REGIONS ? nrThreads : NUM_NUMA_REGIONS;
 #endif
 }
 
-#if defined(NUMA_ALLOC) || defined(NUMA_SHARD) || defined(NUMA_DEBUG)
 /// Validate at startup that the compile-time topology constants match the
 /// actual hardware.  Aborts if nodeOfCpu(c) doesn't match numa_node_of_cpu(c)
 /// for any CPU, or if the node count differs from SOCKETS_COUNT.
 void assertTopology();
-#endif
 
 class Worker;
 class WorkerGroup;
@@ -204,6 +246,13 @@ inline void WorkerGroup::run(std::function<void()> f) {
    this_worker->barrier = barriers.back();
    currentBarrier = 0;
    this_worker->worker_id = size - 1;
+#ifndef __APPLE__
+   // Pin the calling thread to its designated CPU, just like spawned workers
+   cpu_set_t callerCpuset;
+   CPU_ZERO(&callerCpuset);
+   CPU_SET(cpuOfThread(size - 1), &callerCpuset);
+   pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &callerCpuset);
+#endif
    f();
    this_worker->group = prevGroup;
    currentBarrier = prevBarrier;

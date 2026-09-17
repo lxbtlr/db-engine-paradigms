@@ -61,15 +61,15 @@ TARGET_ARCH_CHOICES = [
 BUILD_TYPES = ["Release", "RelWithDebInfo", "Debug"]
 
 # ── Machine topology presets ──────────────────────────────────────────────
-# Each entry: (SOCKETS_COUNT, CORES_PER_SOCKET, SMT_PER_CORE, CPU_LAYOUT_CONTIGUOUS, TARGET_ARCH)
+# Each entry: (SOCKETS_COUNT, CORES_PER_SOCKET, SMT_PER_CORE, CPU_LAYOUT_CONTIGUOUS, TARGET_ARCH, NUM_REGIONS)
 
 MACHINE_PRESETS = {
-    "dubliner":  (4, 22, 2, False, "native"),           # 4-socket Xeon, interleaved
-    "roquefort": (1, 24, 2, False, "native"),            # 1-socket AMD EPYC 7443P (Zen3)
-    "manchego":  (2, 8, 2, False, "sapphirerapids"),     # 2-socket Xeon Silver 4509Y (SPR)
-    "burrata":   (1, 128, 1, False, "neoverse-n1"),      # 1-socket ARM Neoverse-N1
-    "kafir":     (8, 24, 2, True, "skylake-x"),          # 8-node Skylake-SP, contiguous
-    "rpi5":      (1, 4, 1, False, "cortex-a76"),          # Raspberry Pi 5 (BCM2712, 4x Cortex-A76)
+    "dubliner":  (4, 22, 2, False, "native", 4),          # 4-socket Xeon, interleaved
+    "roquefort": (1, 24, 2, True, "native", 4),            # 1-socket AMD EPYC 7443P (Zen3), 4 CCDs
+    "manchego":  (2, 8, 2, False, "sapphirerapids", 2),    # 2-socket Xeon Silver 4509Y (SPR)
+    "burrata":   (1, 128, 1, False, "neoverse-n1", 1),     # 1-socket ARM Neoverse-N1
+    "kafir":     (8, 24, 2, True, "skylake-x", 8),         # 8-node Skylake-SP, contiguous
+    "rpi5":      (1, 4, 1, False, "cortex-a76", 1),        # Raspberry Pi 5 (BCM2712, 4x Cortex-A76)
     "custom":    None,  # user sets values manually
 }
 
@@ -140,6 +140,7 @@ def configure():
     opts["SOCKETS_COUNT"] = "4"
     opts["CORES_PER_SOCKET"] = "22"
     opts["SMT_PER_CORE"] = "2"
+    opts["NUM_REGIONS"] = "0"  # 0 = auto (defaults to SOCKETS_COUNT)
     opts["CPU_LAYOUT_CONTIGUOUS"] = False
     opts["BUILD_TYPE"] = "Release"
     opts["DATADIR"] = ""
@@ -170,6 +171,7 @@ def configure():
             opts["SMT_PER_CORE"] = str(mp[2])
             opts["CPU_LAYOUT_CONTIGUOUS"] = mp[3]
             opts["TARGET_ARCH"] = mp[4]
+            opts["NUM_REGIONS"] = str(mp[5])
         else:
             opts["SOCKETS_COUNT"] = questionary.text(
                 "Sockets / chiplets / memory domains:", default=opts["SOCKETS_COUNT"]).ask()
@@ -177,6 +179,8 @@ def configure():
                 "Cores per socket / chiplet:", default=opts["CORES_PER_SOCKET"]).ask()
             opts["SMT_PER_CORE"] = questionary.text(
                 "Hardware threads per core (SMT):", default=opts["SMT_PER_CORE"]).ask()
+            opts["NUM_REGIONS"] = questionary.text(
+                "Sharding regions (0 = auto from sockets):", default=opts["NUM_REGIONS"]).ask()
             opts["CPU_LAYOUT_CONTIGUOUS"] = questionary.confirm(
                 "Contiguous CPU numbering per node? (vs interleaved)", default=False).ask()
 
@@ -281,6 +285,7 @@ def build_cmake_args(opts):
         args.append(f"-DSOCKETS_COUNT={opts['SOCKETS_COUNT']}")
         args.append(f"-DCORES_PER_SOCKET={opts['CORES_PER_SOCKET']}")
         args.append(f"-DSMT_PER_CORE={opts['SMT_PER_CORE']}")
+        args.append(f"-DNUM_REGIONS={opts['NUM_REGIONS']}")
         val = "ON" if opts.get("CPU_LAYOUT_CONTIGUOUS", False) else "OFF"
         args.append(f"-DCPU_LAYOUT_CONTIGUOUS={val}")
     if opts["DATADIR"]:

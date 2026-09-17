@@ -128,15 +128,17 @@ void numa_parallel_scan(size_t nrThreads, const runtime::Relation& rel,
 
       size_t rank;
 #ifdef THREAD_PIN_PACKED
-      rank = slot % runtime::THREADS_PER_SOCKET;
+      rank = slot % runtime::THREADS_PER_REGION;
 #else
-      rank = slot / runtime::SOCKETS_COUNT;
+      rank = slot / runtime::NUM_NUMA_REGIONS;
 #endif
 
       std::array<size_t, N> stealOrder;
       stealOrder[0] = home;
-      for (size_t k = 0; k < N - 1; ++k)
-         stealOrder[k + 1] = (home + 1 + ((rank + k) % (N - 1))) % N;
+      if constexpr (N > 1) {
+         for (size_t k = 0; k < N - 1; ++k)
+            stealOrder[k + 1] = (home + 1 + ((rank + k) % (N - 1))) % N;
+      }
 
       for (size_t si = 0; si < N; ++si) {
          size_t node = stealOrder[si];
@@ -181,15 +183,17 @@ T numa_parallel_reduce(size_t nrThreads, const runtime::Relation& rel,
 
       size_t rank;
 #ifdef THREAD_PIN_PACKED
-      rank = slot % runtime::THREADS_PER_SOCKET;
+      rank = slot % runtime::THREADS_PER_REGION;
 #else
-      rank = slot / runtime::SOCKETS_COUNT;
+      rank = slot / runtime::NUM_NUMA_REGIONS;
 #endif
 
       std::array<size_t, N> stealOrder;
       stealOrder[0] = home;
-      for (size_t k = 0; k < N - 1; ++k)
-         stealOrder[k + 1] = (home + 1 + ((rank + k) % (N - 1))) % N;
+      if constexpr (N > 1) {
+         for (size_t k = 0; k < N - 1; ++k)
+            stealOrder[k + 1] = (home + 1 + ((rank + k) % (N - 1))) % N;
+      }
 
       T& acc = locals.local();
       for (size_t si = 0; si < N; ++si) {
