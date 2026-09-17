@@ -521,3 +521,9 @@ if(AVX512EXPERIMENTS)
     PRIVATE src)
   target_link_libraries(run_join vectorwise common ${TBB_LIBRARIES}  ${JEVENTSLIB})
 endif(AVX512EXPERIMENTS)
+
+# Grant cap_sys_nice to all built binaries (requires sudo)
+add_custom_target(setcap
+  COMMAND sudo ${CMAKE_CURRENT_SOURCE_DIR}/scripts/setcap.sh ${CMAKE_BINARY_DIR}
+  COMMENT "Setting cap_sys_nice on executables in build subdirectories"
+)
