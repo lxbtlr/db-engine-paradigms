@@ -274,7 +274,7 @@ int main(int argc, char* argv[]) {
                        },
                        repetitions);
       auto vResult = q1_vectorwise(tpch, nrThreads, vectorSize);
-      //dumpQ1Result("vectorwise", vResult.get());
+      dumpQ1Result("vectorwise", vResult.get());
    }
    if (q.count("3v"))
       e.timeAndProfile(
@@ -345,7 +345,7 @@ int main(int argc, char* argv[]) {
                        repetitions);
       std::unique_ptr<runtime::Query> hResult;
       arena.execute([&] { hResult = q1_hyper(tpch, nrThreads); });
-      //dumpQ1Result("hyper", hResult.get());
+      dumpQ1Result("hyper", hResult.get());
    }
    if (q.count("3h"))
       e.timeAndProfile(label("q3 h ", nrThreads),
