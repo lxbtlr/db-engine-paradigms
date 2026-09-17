@@ -25,6 +25,10 @@ class Hashmap {
     public:
       EntryHeader* next;
       hash_t hash;
+#ifdef VW_GROUP_AGGR
+      uint32_t* group;
+      int64_t size;
+#endif
       EntryHeader(EntryHeader* n, hash_t h) : next(n), hash(h) {}
       // payload data follows this header
    };
