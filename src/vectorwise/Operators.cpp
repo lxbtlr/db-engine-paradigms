@@ -835,6 +835,9 @@ size_t HashGroup::next() {
       auto entry_size = preAggregation.ht_entry_size;
 
       auto flushAndClear = [&]() INTERPRET_SEPARATE {
+#ifdef VW_GROUP_AGGR
+         groups.clear();
+#endif
          assert(offsetof(header_t, next) + sizeof(header_t::next) ==
                 offsetof(header_t, hash));
          // flush ht entries into spillStorage
@@ -848,20 +851,20 @@ size_t HashGroup::next() {
          preAggregation.clearHashtable(ht);
       };
 
-      if (packedKeys.size() != vecSize * totalKeySize) {
+      if (packedKeys.size() < vecSize * totalKeySize) {
          packedKeys.resize(vecSize * totalKeySize);
       }
 
 #ifdef VW_GROUP_AGGR
-      if (groups.empty()) {
+      if (groups.capacity() < vecSize) {
          groups.reserve(vecSize);
       }
 #endif
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
 #ifdef VW_GROUP_AGGR
-         for (auto& [entry, group] : groups) {
-            group.clear();
+         for (auto entry : groups) {
+            entry->size = 0;
          }
 #endif
 
@@ -872,9 +875,6 @@ size_t HashGroup::next() {
          updateGroups.evaluate(n);
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
-#ifdef VW_GROUP_AGGR
-      groups.clear();
-#endif
       flushAndClear(); // flush remaining entries into spillStorage
       barrier();       // Wait until all workers have finished phase 1
 
@@ -1013,40 +1013,46 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
    EntryHeader** __restrict__ matches = preAggregation.htMatches;
 
-   EntryHeader* end = ht.end();
    for (pos_t i = 0; i < n; i++) {
       hash_t hash = hashes[i];
       EntryHeader* entry = ht.find_chain(hash);
-      for (; entry != end; entry = entry->next) {
+      for (; entry != nullptr; entry = entry->next) {
          if (entry->hash == hash) {
             char* entry_key = reinterpret_cast<char*>(entry + 1);
             if (std::memcmp(keys + i * keySize, entry_key, keySize) == 0) {
-               break;
+               goto found;
             }
          }
       }
 
-      if (entry == end) {
+      {
          auto alloc = groupStore.allocate(preAggregation.ht_entry_size);
-         if (!alloc) throw std::runtime_error("malloc failed");
-         preAggregation.allocations.emplace_back(alloc, 1);
-
+         if (!alloc) {
+            throw std::runtime_error("malloc failed");
+         }
          entry = reinterpret_cast<EntryHeader*>(alloc);
-
+         preAggregation.allocations.emplace_back(alloc, 1);
          preAggregation.groupRepresentatives[0] = i;
          preAggregation.scatterStart = entry;
          preAggregation.buildScatter.evaluate(1);
-
          ht.insert<false>(entry, hash);
          ++preAggregation.entries_in_ht;
-      }
 
 #ifdef VW_GROUP_AGGR
-      auto [it, inserted] = groups.try_emplace(entry);
-      if (inserted) {
-         it->second.reserve(vecSize);
+         groups.push_back(entry);
+
+         alloc = groupStore.allocate(vecSize * sizeof(pos_t));
+         if (!alloc) {
+            throw std::runtime_error("malloc failed");
+         }
+         entry->group = reinterpret_cast<pos_t*>(alloc);
+         entry->size = 0;
+#endif
       }
-      it->second.push_back(i);
+
+      found:;
+#ifdef VW_GROUP_AGGR
+      entry->group[entry->size++] = i;
 #else
       matches[i] = entry;
 #endif
