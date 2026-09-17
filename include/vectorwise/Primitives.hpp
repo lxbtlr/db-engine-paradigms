@@ -1,19 +1,20 @@
 #pragma once
 #include "common/defs.hpp"
+#include "common/runtime/Hashmap.hpp"
 #include "common/runtime/HashmapSmall.hpp"
 #include "common/runtime/SIMD.hpp"
 #include "common/runtime/Types.hpp"
 #include "common/runtime/Util.hpp"
 #include "vectorwise/VectorAllocator.hpp"
 #include "vectorwise/defs.hpp"
-#include <unordered_map>
 #include <vector>
 // #include "/home/kersten/tools/iaca-lin64/iacaMarks.h"
 
 namespace vectorwise {
 
 #ifdef VW_GROUP_AGGR
-inline thread_local std::unordered_map<void*, std::vector<pos_t>> groups;
+using EntryHeader = runtime::Hashmap::EntryHeader;
+inline thread_local std::vector<EntryHeader*> groups;
 #endif
 
 namespace primitives {
@@ -306,16 +307,16 @@ pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
 /// aggregate into multiple aggregators given by result
 {
 #ifdef VW_GROUP_AGGR
-   for (auto& [entry, group] : groups) {
-      if (group.empty()) {
+   for (auto entry : groups) {
+      if (entry->size == 0) {
          continue;
       }
 
       T* aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
       T value = *aggregate;
 
-      for (auto i : group) {
-         value = Op<T>()(param1[i], value);
+      for (int64_t i = 0; i < entry->size; i++) {
+         value = Op<T>()(param1[entry->group[i]], value);
       }
 
       *aggregate = value;
@@ -336,16 +337,16 @@ pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* selParam1, T* RES param1,
 /// vector
 {
 #ifdef VW_GROUP_AGGR
-   for (auto& [entry, group] : groups) {
-      if (group.empty()) {
+   for (auto entry : groups) {
+      if (entry->size == 0) {
          continue;
       }
 
       T* aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
       T value = *aggregate;
 
-      for (auto i : group) {
-         value = Op<T>()(param1[selParam1[i]], value);
+      for (int64_t i = 0; i < entry->size; i++) {
+         value = Op<T>()(param1[selParam1[entry->group[i]]], value);
       }
 
       *aggregate = value;
