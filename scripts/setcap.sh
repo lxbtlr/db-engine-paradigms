@@ -11,15 +11,12 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 count=0
-for dir in "$BUILD_DIR"/*/; do
-    [ -d "$dir" ] || continue
-    for f in "$dir"*; do
-        [ -f "$f" ] && [ -x "$f" ] && file "$f" | grep -q ELF && {
-            setcap 'cap_sys_nice=eip' "$f"
-            echo "  $f"
-            ((count++))
-        }
-    done
-done
+while IFS= read -r -d '' f; do
+    file "$f" | grep -q 'ELF.*executable' && {
+        setcap 'cap_sys_nice=eip' "$f"
+        echo "  $f"
+        ((count++))
+    }
+done < <(find "$BUILD_DIR" -maxdepth 3 -type f -executable -print0)
 
 echo "Set cap_sys_nice on $count binaries."
