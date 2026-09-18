@@ -37,12 +37,15 @@ pos_t aggr_count_star_(pos_t n, int64_t* RES entries[], void* RES /*param1*/,
 {
 #ifdef VW_GROUP_AGGR
    for (auto entry : groups) {
-      if (entry->size == 0) {
+      Group* RES group = entry->group;
+
+      pos_t size = group->size;
+      if (size == 0) {
          continue;
       }
 
       int64_t* aggregate = addBytes(reinterpret_cast<int64_t*>(entry), offset);
-      *aggregate += entry->size;
+      *aggregate += static_cast<int64_t>(size);
    }
 #else
    for (pos_t i = 0; i < n; i++) {

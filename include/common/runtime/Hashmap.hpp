@@ -3,6 +3,7 @@
 #include "common/runtime/Memory.hpp"
 #include "common/runtime/SIMD.hpp"
 #include "common/runtime/Stack.hpp"
+#include "vectorwise/defs.hpp"
 #include <assert.h>
 #include <atomic>
 #include <cassert>
@@ -17,6 +18,15 @@ namespace runtime {
 class Hashmap {
 
  public:
+#ifdef VW_GROUP_AGGR
+   using pos_t = vectorwise::pos_t;
+
+   struct Group {
+      pos_t pos[1024];
+      pos_t size;
+   };
+#endif
+
    using hash_t = defs::hash_t;
    size_t capacity = 0;
    class EntryHeader
@@ -26,8 +36,7 @@ class Hashmap {
       EntryHeader* next;
       hash_t hash;
 #ifdef VW_GROUP_AGGR
-      uint32_t* group;
-      int64_t size;
+      Group* group;
 #endif
       EntryHeader(EntryHeader* n, hash_t h) : next(n), hash(h) {}
       // payload data follows this header

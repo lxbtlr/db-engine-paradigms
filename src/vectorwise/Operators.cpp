@@ -2,6 +2,7 @@
 #include "vectorwise/Primitives.hpp"
 #include "common/Compat.hpp"
 #include "common/runtime/Concurrency.hpp"
+#include "common/runtime/Hashmap.hpp"
 #include "common/runtime/SIMD.hpp"
 #include <algorithm>
 #include <iostream>
@@ -874,7 +875,7 @@ size_t HashGroup::next() {
 #else
 #ifdef VW_GROUP_AGGR
          for (auto entry : groups) {
-            entry->size = 0;
+            entry->group->size = 0;
          }
 #endif
 
@@ -1042,22 +1043,21 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
 #ifdef VW_GROUP_AGGR
          groups.push_back(entry);
 
-         alloc = groupStore.allocate(vecSize * sizeof(pos_t));
+         alloc = groupStore.allocate(sizeof(Group));
          if (!alloc) {
             throw std::runtime_error("malloc failed");
          }
-         entry->group = reinterpret_cast<pos_t*>(alloc);
-         entry->size = 0;
+         entry->group = reinterpret_cast<Group*>(alloc);
+         entry->group->size = 0;
 #endif
       }
 
       found:;
 #ifdef VW_GROUP_AGGR
-      entry->group[entry->size++] = i;
+      entry->group->pos[entry->group->size++] = i;
 #else
       matches[i] = entry;
 #endif
    }
 }
-
 } // namespace vectorwise

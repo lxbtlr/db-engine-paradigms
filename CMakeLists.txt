@@ -118,6 +118,12 @@ if(VW_GROUP_AGGR)
   message(STATUS "Building with VW_GROUP_AGGR")
 endif(VW_GROUP_AGGR)
 
+OPTION(VW_POS_16 "Use uint16_t for VectorWise pos_t" OFF)
+if(VW_POS_16)
+  ADD_DEFINITIONS(-DVW_POS_16=1)
+  message(STATUS "Building with VW_POS_16")
+endif(VW_POS_16)
+
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
 # add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})

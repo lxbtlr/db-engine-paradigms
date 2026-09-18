@@ -14,6 +14,7 @@ namespace vectorwise {
 
 #ifdef VW_GROUP_AGGR
 using EntryHeader = runtime::Hashmap::EntryHeader;
+using Group = runtime::Hashmap::Group;
 inline thread_local std::vector<EntryHeader*> groups;
 #endif
 
@@ -328,15 +329,19 @@ pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
 {
 #ifdef VW_GROUP_AGGR
    for (auto entry : groups) {
-      if (entry->size == 0) {
+      Group* RES group = entry->group;
+
+      pos_t size = group->size;
+      if (size == 0) {
          continue;
       }
 
-      T* aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
+      pos_t* RES pos = group->pos;
+      T* RES aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
       T value = *aggregate;
 
-      for (int64_t i = 0; i < entry->size; i++) {
-         value = Op<T>()(param1[entry->group[i]], value);
+      for (pos_t i = 0; i < size; i++) {
+         value = Op<T>()(param1[pos[i]], value);
       }
 
       *aggregate = value;
@@ -351,22 +356,26 @@ pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
 }
 
 template <typename T, template <typename> class Op>
-pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* selParam1, T* RES param1,
-                   size_t offset)
+pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* RES selParam1,
+                   T* RES param1, size_t offset)
 /// aggregate into multiple aggregators given by result, param1 has selection
 /// vector
 {
 #ifdef VW_GROUP_AGGR
    for (auto entry : groups) {
-      if (entry->size == 0) {
+      Group* RES group = entry->group;
+
+      pos_t size = group->size;
+      if (size == 0) {
          continue;
       }
 
-      T* aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
+      pos_t* RES pos = group->pos;
+      T* RES aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
       T value = *aggregate;
 
-      for (int64_t i = 0; i < entry->size; i++) {
-         value = Op<T>()(param1[selParam1[entry->group[i]]], value);
+      for (pos_t i = 0; i < size; i++) {
+         value = Op<T>()(param1[selParam1[pos[i]]], value);
       }
 
       *aggregate = value;
