@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Database.hpp"
 
 // Use CFG_NUM_REGIONS from CMake; fallback matches Concurrency.hpp default
