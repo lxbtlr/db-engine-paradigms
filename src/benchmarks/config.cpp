@@ -57,38 +57,38 @@ vectorwise::primitives::F4 ExperimentConfig::proj_multiplies_sel_int64_t_col_int
   return vectorwise::primitives::proj_multiplies_sel_int64_t_col_int64_t_col;
 }
 vectorwise::primitives::F3 ExperimentConfig::sel_less_int32_t_col_int32_t_val(){
-#ifdef __AVX512F__
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if(useSimdSel) return vectorwise::primitives::sel_less_int32_t_col_int32_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::sel_less_int32_t_col_int32_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_greater_equal_int32_t_col_int32_t_val() {
-#ifdef __AVX512F__
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if(useSimdSel) return vectorwise::primitives::selsel_greater_equal_int32_t_col_int32_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_greater_equal_int32_t_col_int32_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_less_int64_t_col_int64_t_val() {
-#ifdef __AVX512F__
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if(useSimdSel) return vectorwise::primitives::selsel_less_int64_t_col_int64_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_less_int64_t_col_int64_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_greater_equal_int64_t_col_int64_t_val() {
-#ifdef __AVX512F__
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if(useSimdSel) return vectorwise::primitives::selsel_greater_equal_int64_t_col_int64_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_greater_equal_int64_t_col_int64_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_less_equal_int64_t_col_int64_t_val() {
-#ifdef __AVX512F__
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if(useSimdSel) return vectorwise::primitives::selsel_less_equal_int64_t_col_int64_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_less_equal_int64_t_col_int64_t_val);
 }
 
 ExperimentConfig::joinFun ExperimentConfig::joinAll() {
-#ifdef __AVX512F__
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if (useSimdJoin) return &vectorwise::Hashjoin::joinAllSIMD;
 #endif
   char* v;
@@ -98,7 +98,7 @@ ExperimentConfig::joinFun ExperimentConfig::joinAll() {
 }
 
 ExperimentConfig::joinFun ExperimentConfig::joinSel() {
-#ifdef __AVX512F__
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if (useSimdJoin) return &vectorwise::Hashjoin::joinSelSIMD;
 #endif
   return &vectorwise::Hashjoin::joinSelParallel;

@@ -132,7 +132,9 @@ void measureJoin(size_t minSize, size_t maxSize, PerfEvents& e){
     auto lookups = std::min<size_t>(n, 1024 * 1024);
     join.cont.numProbes = lookups;
     e.timeAndProfile("htLookup", lookups, [&]() { join.joinAllParallel(); }, std::max<uint64_t>(1000, 2*1024ull*1024*1024/lookups));
+#ifndef VW_POS_16
     e.timeAndProfile("htLookup SIMD", lookups, [&]() { join.joinAllSIMD(); }, std::max<uint64_t>(1000, 2*1024ull*1024*1024/lookups));
+#endif
   }
 }
 

@@ -218,6 +218,7 @@ pos_t Hashjoin::joinAllParallel() {
    return found;
 }
 
+#ifndef VW_POS_16
 pos_t Hashjoin::joinAllSIMD() {
    size_t found = 0;
    auto followup = contCon.followup;
@@ -411,6 +412,7 @@ pos_t Hashjoin::joinAllSIMD() {
    contCon.followupWrite = 0;
    return found;
 }
+#endif // !VW_POS_16
 
 pos_t Hashjoin::joinSel() {
    size_t found = 0;
@@ -510,6 +512,7 @@ pos_t Hashjoin::joinSelParallel() {
    return found;
 }
 
+#ifndef VW_POS_16
 pos_t Hashjoin::joinSelSIMD() {
    size_t found = 0;
    auto followup = contCon.followup;
@@ -703,6 +706,7 @@ pos_t Hashjoin::joinSelSIMD() {
    contCon.followupWrite = 0;
    return found;
 }
+#endif // !VW_POS_16
 
 template <typename T, typename HT>
 void INTERPRET_SEPARATE insertAllEntries(T& allocations, HT& ht,
@@ -1013,7 +1017,9 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
    uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
    char* __restrict__ keys = packedKeys.data();
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
+#ifndef VW_GROUP_AGGR
    EntryHeader** __restrict__ matches = preAggregation.htMatches;
+#endif
 
    for (pos_t i = 0; i < n; i++) {
       hash_t hash = hashes[i];

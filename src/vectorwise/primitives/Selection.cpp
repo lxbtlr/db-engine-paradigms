@@ -65,7 +65,7 @@ template <typename T> struct Contains {
 F3 sel_contains_Varchar_55_col_Varchar_55_val =
     (F3)&sel_col_val<Varchar_55, Contains>;
 
-#ifdef __AVX512F__
+#if defined(__AVX512F__) && !defined(VW_POS_16)
 
 // #define PREFETCH(E) __builtin_prefetch(E);
 #define PREFETCH(E)

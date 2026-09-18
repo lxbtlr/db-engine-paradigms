@@ -251,7 +251,9 @@ class Hashjoin : public BinaryOperator {
    pos_t joinBoncz();
    /// computes join result into buildMatches and probeMatches
    /// Implementation: Using AVX 512 SIMD
+#ifndef VW_POS_16
    pos_t joinAllSIMD();
+#endif
    /// computes join result into buildMatches and probeMatches, respecting
    /// selection vector probeSel for probe side
    pos_t joinSel();
@@ -262,7 +264,9 @@ class Hashjoin : public BinaryOperator {
    /// computes join result into buildMatches and probeMatches, respecting
    /// selection vector probeSel for probe side
    /// Implementation: For SkylakeX using AVX512
+#ifndef VW_POS_16
    pos_t joinSelSIMD();
+#endif
 
    virtual size_t next() override;
    ~Hashjoin();
