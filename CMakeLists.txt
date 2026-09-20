@@ -260,7 +260,7 @@ ELSE(AUTOVECTORIZE)
 	if(COMPILER STREQUAL "clang")
 	
 	  if(COMPILER_VERSION STREQUAL "old")
-	    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-vectorize -fno-slp-vectorize")
+	    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize -fno-tree-slp-vectorize")
 	  else()
 	  #if(USE_CLANG)
 	    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize -fno-tree-slp-vectorize")
