@@ -6,14 +6,28 @@ else()
   set(LINUX )
 endif()
 
-OPTION(USE_CLANG "Use clang/clang++ instead of gcc/g++" OFF)
+# Compiler selection: COMPILER={gcc,clang} x COMPILER_VERSION={new,old}
+#   gcc-new  = gcc-16 / g++-16       gcc-old  = gcc-9 / g++-9
+#   clang-new = clang-22 / clang++-22  clang-old = clang-11 / clang++-11
+set(COMPILER "gcc" CACHE STRING "Compiler family: gcc or clang")
+set(COMPILER_VERSION "new" CACHE STRING "Compiler generation: new or old")
 
-if(USE_CLANG)
-  set(CMAKE_C_COMPILER clang-18) # clang 18 is leagues better for arm
-  set(CMAKE_CXX_COMPILER clang++-18)
+if(COMPILER STREQUAL "clang")
+  if(COMPILER_VERSION STREQUAL "old")
+    set(CMAKE_C_COMPILER clang-11)
+    set(CMAKE_CXX_COMPILER clang++-11)
+  else()
+    set(CMAKE_C_COMPILER clang-22)
+    set(CMAKE_CXX_COMPILER clang++-22)
+  endif()
 else()
-  set(CMAKE_C_COMPILER gcc)
-  set(CMAKE_CXX_COMPILER g++)
+  if(COMPILER_VERSION STREQUAL "old")
+    set(CMAKE_C_COMPILER gcc-9)
+    set(CMAKE_CXX_COMPILER g++-9)
+  else()
+    set(CMAKE_C_COMPILER gcc-16)
+    set(CMAKE_CXX_COMPILER g++-16)
+  endif()
 endif()
 
 if(LINUX)
