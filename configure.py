@@ -24,7 +24,6 @@ console = Console()
 # ── CMake option definitions ──────────────────────────────────────────────
 
 BOOL_OPTIONS = [
-    ("USE_CLANG",             "Use clang-18/clang++-18 instead of gcc/g++",              False),
     ("AUTOVECTORIZE",         "Allow the compiler to autovectorize",                      False),
     ("THREAD_PIN_PACKED",     "Pack threads per socket (vs spread round-robin)",           False),
     ("VW_USE_CRC32",          "Use CRC32 hashing for VectorWise (default: MurMurHash)",   False),
@@ -67,11 +66,11 @@ MACHINE_PRESETS = {
 
 PRESETS = {
     "ARM baseline": {
-        "USE_CLANG": True,
+        "COMPILER": "clang",
         "TARGET_ARCH": "neoverse-n1",
     },
     "ARM optimized": {
-        "USE_CLANG": True,
+        "COMPILER": "clang",
         "TARGET_ARCH": "neoverse-n1",
         "AUTOVECTORIZE": True,
     },
@@ -108,6 +107,8 @@ def configure():
 
     # Start with defaults
     opts = {name: default for name, _, default in BOOL_OPTIONS}
+    opts["COMPILER"] = "gcc"
+    opts["COMPILER_VERSION"] = "new"
     opts["TARGET_ARCH"] = "native"
     opts["TARGET_MACHINE"] = "custom"
     opts["SOCKETS_COUNT"] = "4"
@@ -171,17 +172,33 @@ def configure():
         if opts["BUILD_TYPE"] is None:
             sys.exit(1)
 
-        # Compiler & optimization group
+        # Compiler selection
+        opts["COMPILER"] = questionary.select(
+            "Compiler family:",
+            choices=["gcc", "clang"],
+            default=opts["COMPILER"],
+        ).ask()
+        if opts["COMPILER"] is None:
+            sys.exit(1)
+        opts["COMPILER_VERSION"] = questionary.select(
+            "Compiler version:",
+            choices=["new", "old"],
+            default=opts["COMPILER_VERSION"],
+        ).ask()
+        if opts["COMPILER_VERSION"] is None:
+            sys.exit(1)
+
+        # Optimization options
         compiler_opts = questionary.checkbox(
-            "Compiler & optimization options (space to toggle):",
+            "Optimization options (space to toggle):",
             choices=[
                 questionary.Choice(f"{name}: {desc}", value=name, checked=opts.get(name, default))
-                for name, desc, default in BOOL_OPTIONS[:4]
+                for name, desc, default in BOOL_OPTIONS[:3]
             ],
         ).ask()
         if compiler_opts is None:
             sys.exit(1)
-        for name, _, _ in BOOL_OPTIONS[:4]:
+        for name, _, _ in BOOL_OPTIONS[:3]:
             opts[name] = name in compiler_opts
 
         # Build features group
@@ -189,12 +206,12 @@ def configure():
             "Build feature options (space to toggle):",
             choices=[
                 questionary.Choice(f"{name}: {desc}", value=name, checked=opts.get(name, default))
-                for name, desc, default in BOOL_OPTIONS[4:]
+                for name, desc, default in BOOL_OPTIONS[3:]
             ],
         ).ask()
         if feature_opts is None:
             sys.exit(1)
-        for name, _, _ in BOOL_OPTIONS[4:]:
+        for name, _, _ in BOOL_OPTIONS[3:]:
             opts[name] = name in feature_opts
 
         # Data directory
@@ -233,6 +250,8 @@ def configure():
 
 def build_cmake_args(opts):
     args = [f"-DCMAKE_BUILD_TYPE={opts['BUILD_TYPE']}"]
+    args.append(f"-DCOMPILER={opts['COMPILER']}")
+    args.append(f"-DCOMPILER_VERSION={opts['COMPILER_VERSION']}")
     args.append(f"-DTARGET_ARCH={opts['TARGET_ARCH']}")
     args.append(f"-DTARGET_MACHINE={opts['TARGET_MACHINE']}")
     if opts["TARGET_MACHINE"] == "custom":
