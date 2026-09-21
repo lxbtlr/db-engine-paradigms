@@ -2,6 +2,7 @@
 #include "common/Compat.hpp"
 #include <cassert>
 #include <cstring>
+#include <cstdint>
 #if __has_include(<string_view>)
 #include <string_view>
 namespace std { namespace experimental { using string_view = std::string_view; } }

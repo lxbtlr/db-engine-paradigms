@@ -1,5 +1,5 @@
 #include "common/runtime/String.hpp"
-
+#include <cstdint>
 using namespace std;
 
 inline bool fmemcmp(const char* __restrict__ left,
