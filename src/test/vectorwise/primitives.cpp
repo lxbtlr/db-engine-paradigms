@@ -124,7 +124,7 @@ TEST(Partition, uint64_t) {
    for (auto& e : expectedGroupCounts) { ASSERT_EQ(e.second, size_t(0)); }
 }
 
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
 using hash_t = defs::hash_t;
 TEST(Hash, SIMD32bits){
    // checks if scalar and simd variants generate the same hashes

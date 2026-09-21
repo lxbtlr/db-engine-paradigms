@@ -31,18 +31,16 @@ EACH_TYPE(NIL, MK_REHASH)
 EACH_TYPE(NIL, MK_REHASH_SEL)
 
 // SIMD hashes
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
 #if HASH_SIZE != 32
 
-#ifndef __AVX512DQ__
-static_assert(false, "On this platform only 32-bit hashes are supported.");
-#endif
 
 F2 hash8_int64_t_col = (F2)&hash8<int64_t, DEFAULT_HASH>;
 // F3 hash8_sel_int64_t_col = (F3)&hash8_sel<int64_t, DEFAULT_HASH>;
 // F2 rehash8_int64_t_col = (F2)&rehash8<int64_t, DEFAULT_HASH>;
 // F3 rehash8_sel_int64_t_col = (F3)&rehash8_sel<int64_t, DEFAULT_HASH>;
 
+#ifdef DBEP_AVX512_NATIVE
 /*
  * This variant is a workaround for bad code generation of gcc. It is semantically equivalent
  * to hash4_sel<int32_t, DEFAULT_HASH>
@@ -109,10 +107,16 @@ pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES i
   }
   return n;
 }
+#endif
 
 F2 hash4_int32_t_col = (F2)&hash4<int32_t, DEFAULT_HASH>;
 // F3 hash4_sel_int32_t_col = (F3)&hash4_sel<int32_t, DEFAULT_HASH>;
+#ifdef DBEP_AVX512_NATIVE
 F3 hash4_sel_int32_t_col = (F3)&hash4_selASM;
+#else
+F3 hash4_sel_int32_t_col = (F3)&hash4_sel<int32_t, DEFAULT_HASH>;
+#endif
+
 F2 rehash4_int32_t_col = (F2)&rehash4<int32_t, DEFAULT_HASH>;
 F3 rehash4_sel_int32_t_col = (F3)&rehash4_sel<int32_t, DEFAULT_HASH>;
 

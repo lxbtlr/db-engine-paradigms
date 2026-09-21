@@ -160,7 +160,7 @@ class StdHash {
 class MurMurHash : public Hash<MurMurHash> {
  public:
 
-// #ifdef __AVX512F__
+// #ifdef DBEP_HAVE_AVX512
 //   inline Vec8u operator()(Vec8u& k, Vec8u& seed) const {
 //     return ->hashKey(k, seed);
 //   }
@@ -226,8 +226,8 @@ class MurMurHash : public Hash<MurMurHash> {
       return h;
    }
 
-  //#ifdef __AVX512F__
-#ifdef __AVX512DQ__
+  //#ifdef DBEP_HAVE_AVX512
+#ifdef DBEP_HAVE_AVX512DQ
    inline Vec8u hashKey(Vec8u k, Vec8u seed) const {
       // MurmurHash64A
       const Vec8u m(0xc6a4a7935bd1e995);
@@ -269,7 +269,7 @@ FORCE_INLINE uint32_t fmix32 ( uint32_t h ) {
     h ^= h >> 16;
     return h;
 }
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
 FORCE_INLINE Vec16u fmix32 ( Vec16u h ) {
     h = h ^ (h >> 16);
     h = h * Vec16u(0x85ebca6b);
@@ -292,7 +292,7 @@ FORCE_INLINE uint32_t getblock32 ( const uint32_t * p, int i ) {
 class MurMurHash3 : public Hash<MurMurHash3> {
  public:
 
-// #ifdef __AVX512F__
+// #ifdef DBEP_HAVE_AVX512
 //   inline Vec8u operator()(Vec8u& k, Vec8u& seed) const {
 //     return ->hashKey(k, seed);
 //   }
@@ -400,7 +400,7 @@ class MurMurHash3 : public Hash<MurMurHash3> {
      return h1;
    }
 
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
 
   //#ifdef __AVX512DQ__
    inline Vec16u hashKey(Vec16u k, Vec16u seed) const {

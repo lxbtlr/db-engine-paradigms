@@ -1,4 +1,7 @@
 #pragma once
+#include <cerrno>    // errno
+#include <cstring>   // std::strerror
+#include <string>    // std::string, std::to_string
 #include <stdexcept>
 #include <sys/mman.h>
 #include <linux/mman.h>  // MAP_HUGE_2MB / MAP_HUGE_1GB (not pulled in by sys/mman.h)
@@ -8,13 +11,17 @@ inline void* malloc_huge(size_t size) {
 #if defined(HUGE_2MB_MALLOC_HUGE)
    constexpr size_t PAGE = 2 * 1024 * 1024; // 2MB
    size_t allocSize = (size + PAGE - 1) & ~(PAGE - 1);
+   
    void* p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
    if (p == MAP_FAILED) {
       p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
       if (p == MAP_FAILED)
-         throw std::runtime_error("malloc_huge: mmap failed");
+      throw std::runtime_error("malloc_huge: mmap failed, size=" +
+                               std::to_string(size) + " errno=" +
+                               std::to_string(errno) + " (" +
+                               std::string(std::strerror(errno)) + ")");
    }
 #elif defined(NO_HUGE_PAGES)
    void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE,

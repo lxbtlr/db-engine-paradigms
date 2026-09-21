@@ -1303,7 +1303,7 @@ EACH_TYPE(NIL, MK_PARTITION_SEL_DECL);
 EACH_TYPE(NIL, MK_PARTITION_ROW_DECL);
 
 // Specializations
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
 extern F2 hash8_int64_t_col;
 // extern F3 hash8_sel_int64_t_col;
 // extern F2 rehash8_int64_t_col;

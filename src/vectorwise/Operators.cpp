@@ -224,7 +224,7 @@ pos_t Hashjoin::joinAllSIMD() {
 
    if (followup == followupWrite) {
 
-#ifdef __AVX512F__ // if AVX 512 available, use it!
+#ifdef DBEP_HAVE_AVX512 // if AVX 512 available, use it!
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;
       auto ids =
@@ -516,7 +516,7 @@ pos_t Hashjoin::joinSelSIMD() {
 
    if (followup == followupWrite) {
 
-#ifdef __AVX512F__ // if AVX 512 available, use it!
+#ifdef DBEP_HAVE_AVX512 // if AVX 512 available, use it!
 #if HASH_SIZE == 32
       size_t rest = cont.numProbes % 8;
       auto ids =

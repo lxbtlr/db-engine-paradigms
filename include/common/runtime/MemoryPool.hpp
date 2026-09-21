@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <stdexcept>
+#include <string>
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
@@ -56,6 +58,11 @@ inline void* Allocator::allocate(size_t size) {
 #if DEBUG_ALLOC
   return malloc(size);
 #else
+   if (size > (1ull << 40))
+      throw std::runtime_error("Allocator::allocate absurd size=" +
+                               std::to_string(size) + " start=" +
+                               std::to_string((uintptr_t)start) + " free=" +
+                               std::to_string(free));
    auto aligndiff = 64 - ((uintptr_t)start % 64);
    size += aligndiff;
    if (free < size) {
@@ -125,7 +132,7 @@ inline void* ResetableAllocator::allocate(size_t size) {
    auto alloc = start + aligndiff;
    start += size;
    free -= size;
-   if((uintptr_t)alloc % 64) throw;
+   if((uintptr_t)alloc % 64) throw std::runtime_error("ResetableAllocator: misaligned");
    return alloc;
 #endif
 }

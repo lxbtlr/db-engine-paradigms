@@ -68,7 +68,7 @@ EACH_ARITH_NON_COMM(EACH_TYPE_FULL, MK_PROJ_VALCOL)
 EACH_ARITH_NON_COMM(EACH_TYPE_FULL, MK_PROJ_SEL_VALCOL)
 
 
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
 
 pos_t proj_sel8_minus_int64_t_val_int64_t_col_impl(pos_t n, pos_t* RES inSel, int64_t* RES result, int64_t* RES param1,
                                               int64_t* RES param2){
@@ -109,8 +109,7 @@ F4 proj_sel8_minus_int64_t_val_int64_t_col = (F4)&proj_sel8_minus_int64_t_val_in
 F4 proj_sel8_plus_int64_t_col_int64_t_val = (F4)&proj_sel8_plus_int64_t_col_int64_t_val_impl;
 #endif
 
-
-#ifdef __AVX512DQ__
+#ifdef DBEP_HAVE_AVX512DQ
 pos_t proj8_multiplies_int64_t_col_int64_t_col_impl(pos_t n, int64_t* RES result,
                                               int64_t* RES param1, int64_t* RES param2){
   size_t rest = n % 8;

@@ -5,38 +5,38 @@
 ExperimentConfig conf;
 
 vectorwise::primitives::F2 ExperimentConfig::hash_int32_t_col() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
    if (useSimdHash) return vectorwise::primitives::hash4_int32_t_col;
 #endif
    return vectorwise::primitives::hash_int32_t_col;
 }
 vectorwise::primitives::F3 ExperimentConfig::hash_sel_int32_t_col() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
    if (useSimdHash) return vectorwise::primitives::hash4_sel_int32_t_col;
 #endif
    return vectorwise::primitives::hash_sel_int32_t_col;
 }
 vectorwise::primitives::F2 ExperimentConfig::rehash_int32_t_col() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
    if (useSimdHash) return vectorwise::primitives::rehash4_int32_t_col;
 #endif
    return vectorwise::primitives::rehash_int32_t_col;
 }
 vectorwise::primitives::F3 ExperimentConfig::rehash_sel_int32_t_col() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
    if (useSimdHash) return vectorwise::primitives::rehash4_sel_int32_t_col;
 #endif
    return vectorwise::primitives::rehash_sel_int32_t_col;
 }
 vectorwise::primitives::F4 ExperimentConfig::proj_sel_minus_int64_t_val_int64_t_col(){
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
   if (useSimdProj)
   return vectorwise::primitives::proj_sel8_minus_int64_t_val_int64_t_col;
 #endif
   return vectorwise::primitives::proj_sel_minus_int64_t_val_int64_t_col;
 }
 vectorwise::primitives::F4 ExperimentConfig::proj_sel_plus_int64_t_col_int64_t_val(){
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
   if (useSimdProj)
     return vectorwise::primitives::proj_sel8_plus_int64_t_col_int64_t_val;
 #endif
@@ -57,38 +57,38 @@ vectorwise::primitives::F4 ExperimentConfig::proj_multiplies_sel_int64_t_col_int
   return vectorwise::primitives::proj_multiplies_sel_int64_t_col_int64_t_col;
 }
 vectorwise::primitives::F3 ExperimentConfig::sel_less_int32_t_col_int32_t_val(){
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
   if(useSimdSel) return vectorwise::primitives::sel_less_int32_t_col_int32_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::sel_less_int32_t_col_int32_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_greater_equal_int32_t_col_int32_t_val() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
   if(useSimdSel) return vectorwise::primitives::selsel_greater_equal_int32_t_col_int32_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_greater_equal_int32_t_col_int32_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_less_int64_t_col_int64_t_val() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
   if(useSimdSel) return vectorwise::primitives::selsel_less_int64_t_col_int64_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_less_int64_t_col_int64_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_greater_equal_int64_t_col_int64_t_val() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
   if(useSimdSel) return vectorwise::primitives::selsel_greater_equal_int64_t_col_int64_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_greater_equal_int64_t_col_int64_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_less_equal_int64_t_col_int64_t_val() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
   if(useSimdSel) return vectorwise::primitives::selsel_less_equal_int64_t_col_int64_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_less_equal_int64_t_col_int64_t_val);
 }
 
 ExperimentConfig::joinFun ExperimentConfig::joinAll() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
   if (useSimdJoin) return &vectorwise::Hashjoin::joinAllSIMD;
 #endif
   char* v;
@@ -98,7 +98,7 @@ ExperimentConfig::joinFun ExperimentConfig::joinAll() {
 }
 
 ExperimentConfig::joinFun ExperimentConfig::joinSel() {
-#ifdef __AVX512F__
+#ifdef DBEP_HAVE_AVX512
   if (useSimdJoin) return &vectorwise::Hashjoin::joinSelSIMD;
 #endif
   return &vectorwise::Hashjoin::joinSelParallel;

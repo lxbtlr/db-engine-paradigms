@@ -117,6 +117,53 @@
     #define _mm512_cvtepi32_epi64(a) simde_mm512_cvtepi32_epi64_polyfill(a)
     #endif
 
+    #undef _mm512_mask_i64gather_epi64
+    static inline simde__m512i _mm512_mask_i64gather_epi64_polyfill(
+        simde__m512i src, simde__mmask8 k, simde__m512i vindex,
+        void const* base_addr, int scale) {
+        int64_t idx[8], s[8], out[8];
+        simde_mm512_storeu_si512((simde__m512i*)idx, vindex);
+        simde_mm512_storeu_si512((simde__m512i*)s, src);
+        for (int i = 0; i < 8; i++) {
+            if (k & (1u << i)) {
+                const char* a = (const char*)base_addr + (ptrdiff_t)idx[i] * scale;
+                int64_t v;
+                __builtin_memcpy(&v, a, sizeof(v));
+                out[i] = v;
+            } else {
+                out[i] = s[i];
+            }
+        }
+        return simde_mm512_loadu_si512((const simde__m512i*)out);
+    }
+    #define _mm512_mask_i64gather_epi64(src, k, idx, base, scale) \
+            _mm512_mask_i64gather_epi64_polyfill(src, k, idx, base, scale)
+
+    #undef _mm512_mask_i64gather_epi32
+    static inline simde__m256i _mm512_mask_i64gather_epi32_polyfill(
+        simde__m256i src, simde__mmask8 k, simde__m512i vindex,
+        void const* base_addr, int scale) {
+        int64_t idx[8];
+        int32_t s[8], out[8];
+        simde_mm512_storeu_si512((simde__m512i*)idx, vindex);
+        simde_mm256_storeu_si256((simde__m256i*)s, src);
+        for (int i = 0; i < 8; i++) {
+            if (k & (1u << i)) {
+                const char* a = (const char*)base_addr + (ptrdiff_t)idx[i] * scale;
+                int32_t v;
+                __builtin_memcpy(&v, a, sizeof(v));
+                out[i] = v;
+            } else {
+                out[i] = s[i];
+            }
+        }
+        return simde_mm256_loadu_si256((const simde__m256i*)out);
+    }
+    #define _mm512_mask_i64gather_epi32(src, k, idx, base, scale) \
+            _mm512_mask_i64gather_epi32_polyfill(src, k, idx, base, scale)
+
+
+
     // Comparison aliases missing in some SIMDe builds
     #ifndef _mm512_cmplt_epi32_mask
     #define _mm512_cmplt_epi32_mask(a, b) simde_mm512_cmp_epi32_mask(a, b, 1)
@@ -316,9 +363,10 @@
 
     // --- Store polyfill ---
 
+
     #ifndef _mm512_store_epi64
     static inline void _mm512_store_epi64_polyfill(void* mem_addr, simde__m512i a) {
-        simde_mm512_store_si512(mem_addr, a);
+        simde_mm512_storeu_si512(mem_addr, a);
     }
     #define _mm512_store_epi64(mem, a) _mm512_store_epi64_polyfill(mem, a)
     #endif
@@ -363,7 +411,54 @@
     #define _mm512_cmpneq_epi64_mask(a, b) simde_mm512_cmp_epi64_mask(a, b, 4)
     #endif
 
+    // --- Masked gather: 8 x 32-bit, AVX512VL (used by Hash.cpp) ---
+    #ifndef _mm256_mmask_i32gather_epi32
+    static inline simde__m256i _mm256_mmask_i32gather_epi32_polyfill(
+        simde__m256i src, simde__mmask8 k, simde__m256i vindex,
+        void const* base_addr, int scale) {
+        int32_t s[8], idx[8], out[8];
+        simde_mm256_storeu_si256((simde__m256i*)s, src);
+        simde_mm256_storeu_si256((simde__m256i*)idx, vindex);
+        for (int i = 0; i < 8; i++) {
+            if (k & (1u << i)) {
+                const char* a = (const char*)base_addr + (ptrdiff_t)idx[i] * scale;
+                int32_t v;
+                __builtin_memcpy(&v, a, sizeof(v));
+                out[i] = v;
+            } else {
+                out[i] = s[i];
+            }
+        }
+        return simde_mm256_loadu_si256((const simde__m256i*)out);
+    }
+    #define _mm256_mmask_i32gather_epi32(src, k, idx, base, scale) \
+            _mm256_mmask_i32gather_epi32_polyfill(src, k, idx, base, scale)
+    #endif
+
+    // --- Masked aligned store -> unaligned (used by Primitives.hpp:525) ---
+    #ifndef _mm512_mask_store_epi64
+    #define _mm512_mask_store_epi64(mem, k, a) simde_mm512_mask_storeu_epi64(mem, k, a)
+    #endif
+
+
 #endif
+
+#if !defined(DBEP_NO_AVX512)
+   #define DBEP_HAVE_AVX512 1
+#endif
+#if defined(__x86_64__) && defined(__AVX512F__)
+   #define DBEP_AVX512_NATIVE 1
+#endif
+
+#if !defined(DBEP_NO_AVX512)
+   #define DBEP_HAVE_AVX512DQ 1
+#endif
+#if defined(__x86_64__) && defined(__AVX512DQ__)
+   #define DBEP_AVX512DQ_NATIVE 1
+#endif
+
+
+
 
 // --- Vec8u (64-bit elements x 8) ---
 struct Vec8u {
