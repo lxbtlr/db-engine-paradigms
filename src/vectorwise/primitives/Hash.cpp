@@ -13,10 +13,13 @@ namespace primitives {
 
 #if HASH_SIZE == 32
 #define DEFAULT_HASH runtime::MurMurHash3
+#elif defined(VW_USE_CRC32)
+#define DEFAULT_HASH runtime::CRC32Hash
 #else
 #define DEFAULT_HASH runtime::MurMurHash
-//#define DEFAULT_HASH runtime::CRC32Hash
 #endif
+
+
 #define MK_HASH(type) F2 hash_##type##_col = (F2)&hash<type, DEFAULT_HASH>;
 #define MK_HASH_SEL(type)                                                      \
    F3 hash_sel_##type##_col = (F3)&hash_sel<type, DEFAULT_HASH>;
