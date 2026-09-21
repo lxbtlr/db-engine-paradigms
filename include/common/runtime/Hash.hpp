@@ -453,6 +453,15 @@ class CRC32Hash : public Hash<CRC32Hash> {
    }
    inline uint64_t hashKey(uint64_t k) const { return hashKey(k, 0); }
 
+#ifdef DBEP_HAVE_AVX512
+   inline Vec8u hashKey(Vec8u k, Vec8u seed) const {
+      Vec8u res(uint64_t(0));
+      for (unsigned i = 0; i < 8; ++i)
+         res.entry[i] = hashKey(k.entry[i], seed.entry[i]);
+      return res;
+   }
+#endif
+
    inline uint64_t hashKey(const void* key, int len, uint64_t seed) const {
       auto data = reinterpret_cast<const uint8_t*>(key);
       uint64_t s = seed;

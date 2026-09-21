@@ -27,6 +27,7 @@ else()
   else()
     set(CMAKE_C_COMPILER gcc-16)
     set(CMAKE_CXX_COMPILER g++-16)
+    set(WARN_FLAGS "-Wchanges-meaning")
   endif()
 endif()
 
@@ -132,6 +133,9 @@ endif (VW_USE_CRC32)
 set(TARGET_ARCH "native" CACHE STRING
     "Target architecture profile: native, skylake-x, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, cortex-a76, armv8.2-generic, armv9-generic")
 
+
+  
+
 if(TARGET_ARCH STREQUAL "native")
   # Auto-detect: -mcpu=native on ARM, -march=native on x86
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
@@ -150,6 +154,9 @@ elseif(TARGET_ARCH STREQUAL "sapphirerapids")
 elseif(TARGET_ARCH STREQUAL "neoverse-n1")
   # AWS Graviton 2, Ampere eMAG2
   set(ARCH_FLAGS "-mcpu=neoverse-n1 -march=armv8.2-a+simd+crypto")
+if(COMPILER STREQUAL "clang")
+  set(ARCH_FLAGS "-mtune=neoverse-n1")
+endif()
 elseif(TARGET_ARCH STREQUAL "neoverse-v1")
   # AWS Graviton 3
   set(ARCH_FLAGS "-mcpu=neoverse-v1 -march=armv8.4-a+sve+crypto")

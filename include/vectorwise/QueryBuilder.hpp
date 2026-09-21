@@ -50,8 +50,8 @@ class QueryBuilder {
 
    struct ProjectionBuilder {
       QueryBuilder& base;
-      Project& project;
-      ProjectionBuilder& addExpression(std::unique_ptr<Expression>&& exp);
+      vectorwise::Project& project;
+      ProjectionBuilder& addExpression(std::unique_ptr<vectorwise::Expression>&& exp);
    };
 
    struct HashJoinBuilder {
@@ -85,7 +85,7 @@ class QueryBuilder {
 
    struct HashGroupBuilder {
       QueryBuilder& base;
-      HashGroup* group;
+      vectorwise::HashGroup* group;
 
       struct Lookup {
          pos_t* partitionEndsIn;
@@ -133,7 +133,7 @@ class QueryBuilder {
    };
 
    struct ExpressionBuilder {
-      std::unique_ptr<Expression> expression;
+      std::unique_ptr<vectorwise::Expression> expression;
       using DS = DataStorage;
       ExpressionBuilder& addOp(primitives::F1 op, DS a);
       ExpressionBuilder& addOp(primitives::F2 op, DS a, DS b);
@@ -158,7 +158,7 @@ class QueryBuilder {
    void Debug(std::function<void(size_t, PAYLOAD&)> step,
               std::function<void(PAYLOAD&)> finish);
    void DebugCounter(std::string message);
-   void Select(std::unique_ptr<Expression>&& exp);
+   void Select(std::unique_ptr<vectorwise::Expression>&& exp);
    ProjectionBuilder Project();
    void FixedAggregation(std::unique_ptr<Aggregates>&& aggrs);
    HashJoinBuilder
