@@ -144,6 +144,12 @@ if(VW_POS_16)
   message(STATUS "Building with VW_POS_16")
 endif(VW_POS_16)
 
+OPTION(VW_FUSE_HASH "Perform hash inside Lookup() for VectorWise GROUP BY" OFF)
+if(VW_FUSE_HASH)
+  ADD_DEFINITIONS(-DVW_FUSE_HASH=1)
+  message(STATUS "Building with VW_FUSE_HASH")
+endif(VW_FUSE_HASH)
+
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
 # add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})

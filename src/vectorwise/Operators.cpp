@@ -884,7 +884,9 @@ size_t HashGroup::next() {
 #endif
 
          Concat(n);
+#ifndef VW_FUSE_HASH
          Hash(n);
+#endif
          Lookup(n);
 #endif
 
@@ -1025,7 +1027,18 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
 #endif
 
    for (pos_t i = 0; i < n; i++) {
+#ifdef VW_FUSE_HASH
+      hash_t hash;
+      if constexpr (std::is_same_v<T, char*>) {
+         hash = hashFn.hashKey(keys + i * keySize, keySize, 0);
+      } else {
+         T key;
+         std::memcpy(&key, keys + i * keySize, keySize);
+         hash = hashFn.hashKey(key);
+      }
+#else
       hash_t hash = hashes[i];
+#endif
       EntryHeader* entry = ht.find_chain(hash);
       for (; entry != nullptr; entry = entry->next) {
          if (entry->hash == hash) {
@@ -1041,20 +1054,29 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
          if (!alloc) {
             throw std::runtime_error("malloc failed");
          }
+
          entry = reinterpret_cast<EntryHeader*>(alloc);
          preAggregation.allocations.emplace_back(alloc, 1);
+
+#ifdef VW_FUSE_HASH
+         hashes[i] = hash;
+#endif
+
          preAggregation.groupRepresentatives[0] = i;
          preAggregation.scatterStart = entry;
          preAggregation.buildScatter.evaluate(1);
+
          ht.insert<false>(entry, hash);
          ++preAggregation.entries_in_ht;
 
 #ifdef VW_GROUP_AGGR
          groups.push_back(entry);
+
          alloc = groupStore.allocate(sizeof(Group));
          if (!alloc) {
             throw std::runtime_error("malloc failed");
          }
+
          entry->group = reinterpret_cast<Group*>(alloc);
          entry->group->size = 0;
 #endif
