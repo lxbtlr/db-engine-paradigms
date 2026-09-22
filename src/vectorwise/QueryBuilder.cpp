@@ -563,15 +563,18 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    local.ht_entry_size += col.dataSize;
    global.ht_entry_size += col.dataSize;
 
+#ifndef ORIGINAL_GROUPLOOKUP
    uint32_t colSize = static_cast<uint32_t>(col.dataSize);
    op.keyColumns.push_back({colSize, op.totalKeySize, col.data});
    auto& keyColumn = op.keyColumns.back();
    col.registerDS(&keyColumn.data);
    op.totalKeySize += colSize;
+#endif
 
    auto partitionOffset =
        entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
 
+#ifdef ORIGINAL_GROUPLOOKUP
    op.groupHash +=
        base.Expression().addOp(hash, base.Value(local.groupHashes), col);
 
@@ -580,6 +583,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
        entryOffset, local.keysNEq);
    col.registerDS(&neqCheck->probeKey);
    local.keyEquality += move(neqCheck);
+#endif
 
    auto neqCheckGlobal = make_unique<NEQCheckRowOp>(
        eqG, global.groupsFound, reinterpret_cast<void**>(global.htMatches),
@@ -587,6 +591,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
        global.keysNEq);
    global.keyEquality += move(neqCheckGlobal);
 
+#ifdef ORIGINAL_GROUPLOOKUP
    auto partition = make_unique<FPartitionByKeyOp>(
        partitionByKey, localLookup.unpartitionedRows, col, local.groupHashes,
        localLookup.partitionEndsIn, localLookup.partitionedRows,
@@ -596,6 +601,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    // swap buffers so that next key reads output of this partition primitive
    std::swap(localLookup.partitionEndsIn, localLookup.partitionEndsOut);
    std::swap(localLookup.unpartitionedRows, localLookup.partitionedRows);
+#endif
 
    auto partitionGlobal = make_unique<FPartitionByKeyRowOp>(
        partitionByKeyG, globalLookup.unpartitionedRows, &global.rowData, 0,
@@ -647,6 +653,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    local.ht_entry_size += col.dataSize;
    global.ht_entry_size += col.dataSize;
 
+#ifndef ORIGINAL_GROUPLOOKUP
    uint32_t colSize = static_cast<uint32_t>(col.dataSize);
    op.keyColumns.push_back({colSize, op.totalKeySize, col.data});
    auto& keyColumn = op.keyColumns.back();
@@ -656,10 +663,12 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
       op.selVec = sel;
       sel.registerDS(&op.selVec);
    }
+#endif
 
    auto partitionOffset =
        entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
 
+#ifdef ORIGINAL_GROUPLOOKUP
    op.groupHash +=
        base.Expression().addOp(hash, sel, base.Value(local.groupHashes), col);
 
@@ -669,6 +678,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    sel.registerDS(&neqCheck->probeSel);
    col.registerDS(&neqCheck->probeKey);
    local.keyEquality += move(neqCheck);
+#endif
 
    auto neqCheckGlobal = make_unique<NEQCheckRowOp>(
        eqG, global.groupsFound, reinterpret_cast<void**>(global.htMatches),
@@ -676,6 +686,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
        global.keysNEq);
    global.keyEquality += move(neqCheckGlobal);
 
+#ifdef ORIGINAL_GROUPLOOKUP
    auto partition = make_unique<FPartitionByKeySelOp>(
        partitionByKey, localLookup.unpartitionedRows, sel, col,
        local.groupHashes, localLookup.partitionEndsIn,
@@ -686,6 +697,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    // swap buffers so that next key reads output of this partition primitive
    std::swap(localLookup.partitionEndsIn, localLookup.partitionEndsOut);
    std::swap(localLookup.unpartitionedRows, localLookup.partitionedRows);
+#endif
 
    auto partitionGlobal = make_unique<FPartitionByKeyRowOp>(
        partitionByKeyG, globalLookup.unpartitionedRows, &global.rowData, 0,
