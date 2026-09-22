@@ -52,7 +52,8 @@ template <typename> class OpArgs;
 
 template <typename... Args>
 class OpArgs<pos_t (*)(pos_t, Args...)> : public Op {
-   std::function<pos_t(pos_t, Args...)> function;
+   using Function = pos_t (*)(pos_t, Args...);
+   Function function;
 
  public:
    std::tuple<Args...> args;
