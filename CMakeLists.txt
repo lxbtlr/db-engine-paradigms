@@ -132,6 +132,12 @@ if(VW_GROUP_AGGR)
   message(STATUS "Building with VW_GROUP_AGGR")
 endif(VW_GROUP_AGGR)
 
+OPTION(VW_GROUP_AGGR_SEL "Perform selection vector batching for VectorWise" OFF)
+if(VW_GROUP_AGGR_SEL)
+  ADD_DEFINITIONS(-DVW_GROUP_AGGR_SEL=1)
+  message(STATUS "Building with VW_GROUP_AGGR_SEL")
+endif(VW_GROUP_AGGR_SEL)
+
 OPTION(VW_POS_16 "Use uint16_t for VectorWise pos_t" OFF)
 if(VW_POS_16)
   ADD_DEFINITIONS(-DVW_POS_16=1)
@@ -258,7 +264,7 @@ IF(AUTOVECTORIZE)
 ELSE(AUTOVECTORIZE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
 	if(COMPILER STREQUAL "clang")
-	
+
 	  if(COMPILER_VERSION STREQUAL "old")
 	    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize -fno-tree-slp-vectorize")
 	  else()

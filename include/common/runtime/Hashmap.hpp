@@ -23,6 +23,9 @@ class Hashmap {
 
    struct Group {
       pos_t pos[1024];
+#ifdef VW_GROUP_AGGR_SEL
+      pos_t sel[1024];
+#endif
       pos_t size;
    };
 #endif

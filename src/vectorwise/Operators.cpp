@@ -1017,6 +1017,9 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
    uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
    char* __restrict__ keys = packedKeys.data();
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
+#ifdef VW_GROUP_AGGR_SEL
+   pos_t* __restrict__ sel = selVec;
+#endif
 #ifndef VW_GROUP_AGGR
    EntryHeader** __restrict__ matches = preAggregation.htMatches;
 #endif
@@ -1048,7 +1051,6 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
 
 #ifdef VW_GROUP_AGGR
          groups.push_back(entry);
-
          alloc = groupStore.allocate(sizeof(Group));
          if (!alloc) {
             throw std::runtime_error("malloc failed");
@@ -1060,7 +1062,12 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
 
       found:;
 #ifdef VW_GROUP_AGGR
-      entry->group->pos[entry->group->size++] = i;
+      pos_t next = entry->group->size;
+      entry->group->pos[next] = i;
+#ifdef VW_GROUP_AGGR_SEL
+      entry->group->sel[next] = sel[i];
+#endif
+      ++entry->group->size;
 #else
       matches[i] = entry;
 #endif
