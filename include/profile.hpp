@@ -173,9 +173,9 @@ struct PerfEvents {
                  (PERF_COUNT_HW_CACHE_RESULT_ACCESS << 16));
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
-         add("all_rd", "offcore_requests.all_data_rd");
-         add("stores", "mem_inst_retired.all_stores");
-         add("loads", "mem_inst_retired.all_loads");
+        //add("all_rd", "offcore_requests.all_data_rd");
+         //add("stores", "mem_inst_retired.all_stores");
+         //add("loads", "mem_inst_retired.all_loads");
          add("mem_stall", "cycle_activity.stalls_mem_any");
       } else if (cpu == "AuthenticAMD-25-1-core" ||
                  cpu == "AuthenticAMD-25-11-core") {
