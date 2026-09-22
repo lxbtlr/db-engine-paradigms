@@ -65,7 +65,7 @@ template <typename T> struct Contains {
 F3 sel_contains_Varchar_55_col_Varchar_55_val =
     (F3)&sel_col_val<Varchar_55, Contains>;
 
-#if defined(__AVX512F__) && !defined(VW_POS_16)
+#ifdef __AVX512F__
 
 // #define PREFETCH(E) __builtin_prefetch(E);
 #define PREFETCH(E)
@@ -77,16 +77,26 @@ pos_t sel_less_int32_t_col_int32_t_val_avx512_impl(pos_t n, pos_t* RES result,
                  "This implementation only supports sizeof(pos_t) == 4");
    uint64_t found = 0;
    size_t rest = n % 16;
+#if defined(VW_POS_16)
+   auto ids =
+       _mm256_set_epi16(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+#else
    auto ids =
        _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+#endif
    auto con = *param2;
    auto consts = _mm512_set1_epi32(con);
    for (uint64_t i = 0; i < n - rest; i += 16) {
       Vec8u in(param1 + i);
       __mmask16 less = _mm512_cmplt_epi32_mask(in, consts);
+#if defined(__AVX512VBMI__) && defined(VW_POS_16)
+      _mm256_mask_compressstoreu_epi16(result + found, less, ids);
+      ids = _mm256_add_epi16(ids, _mm256_set1_epi16(16));
+#else
       _mm512_mask_compressstoreu_epi32(result + found, less, ids);
-      found += __builtin_popcount(less);
       ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
+#endif
+      found += __builtin_popcount(less);
    }
    for (uint64_t i = n - rest; i < n; ++i)
       if (param1[i] < con) result[found++] = i;
