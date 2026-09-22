@@ -371,11 +371,18 @@ pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* RES selParam1,
       }
 
       pos_t* RES pos = group->pos;
+#ifdef VW_GROUP_AGGR_SEL
+      pos_t* RES sel = group->sel;
+#endif
       T* RES aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
       T value = *aggregate;
 
       for (pos_t i = 0; i < size; i++) {
+#ifdef VW_GROUP_AGGR_SEL
+         value = Op<T>()(param1[sel[i]], value);
+#else
          value = Op<T>()(param1[selParam1[pos[i]]], value);
+#endif
       }
 
       *aggregate = value;

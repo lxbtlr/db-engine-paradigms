@@ -132,11 +132,23 @@ if(VW_GROUP_AGGR)
   message(STATUS "Building with VW_GROUP_AGGR")
 endif(VW_GROUP_AGGR)
 
+OPTION(VW_GROUP_AGGR_SEL "Perform selection vector batching for VectorWise" OFF)
+if(VW_GROUP_AGGR_SEL)
+  ADD_DEFINITIONS(-DVW_GROUP_AGGR_SEL=1)
+  message(STATUS "Building with VW_GROUP_AGGR_SEL")
+endif(VW_GROUP_AGGR_SEL)
+
 OPTION(VW_POS_16 "Use uint16_t for VectorWise pos_t" OFF)
 if(VW_POS_16)
   ADD_DEFINITIONS(-DVW_POS_16=1)
   message(STATUS "Building with VW_POS_16")
 endif(VW_POS_16)
+
+OPTION(VW_FUSE_HASH "Perform hash inside Lookup() for VectorWise GROUP BY" OFF)
+if(VW_FUSE_HASH)
+  ADD_DEFINITIONS(-DVW_FUSE_HASH=1)
+  message(STATUS "Building with VW_FUSE_HASH")
+endif(VW_FUSE_HASH)
 
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
@@ -266,7 +278,7 @@ IF(AUTOVECTORIZE)
 ELSE(AUTOVECTORIZE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
 	if(COMPILER STREQUAL "clang")
-	
+
 	  if(COMPILER_VERSION STREQUAL "old")
 	    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize -fno-tree-slp-vectorize")
 	  else()
