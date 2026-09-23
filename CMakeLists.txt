@@ -299,6 +299,27 @@ ELSE(AUTOVECTORIZE)
 	endif(CLANG)
 ENDIF(AUTOVECTORIZE)
 
+# PGO: profile-guided optimization
+# Usage: build with -DPGO=generate, run workload, rebuild with -DPGO=use
+set(PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, generate, or use")
+if(PGO STREQUAL "generate")
+  if(COMPILER STREQUAL "clang")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-generate=${CMAKE_BINARY_DIR}/pgo-profiles")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-generate=${CMAKE_BINARY_DIR}/pgo-profiles")
+  else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-generate -fprofile-dir=${CMAKE_BINARY_DIR}/pgo-profiles")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-generate")
+  endif()
+  message(STATUS "PGO: generating profiles to ${CMAKE_BINARY_DIR}/pgo-profiles")
+elseif(PGO STREQUAL "use")
+  if(COMPILER STREQUAL "clang")
+    # Clang needs llvm-profdata merge first: llvm-profdata merge -output=default.profdata pgo-profiles/
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-use=${CMAKE_BINARY_DIR}/pgo-profiles/default.profdata")
+  else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-use -fprofile-dir=${CMAKE_BINARY_DIR}/pgo-profiles -fprofile-correction")
+  endif()
+  message(STATUS "PGO: using profiles from ${CMAKE_BINARY_DIR}/pgo-profiles")
+endif()
 
 # Download and unpack googletest at configure time
 configure_file(3rdparty/GTest.CMakeLists.txt googletest-download/CMakeLists.txt)
