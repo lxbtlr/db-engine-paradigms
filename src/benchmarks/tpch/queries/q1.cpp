@@ -173,7 +173,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
 
    auto r = make_unique<Q1>();
    auto lineitem = Scan("lineitem");
-   Select(Expression().addOp(BF(primitives::sel_less_equal_Date_col_Date_val),
+   Select(Expression().addOp(conf.sel_less_equal_int32_t_col_int32_t_val(),
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
    Project()
