@@ -67,17 +67,11 @@ F3 sel_contains_Varchar_55_col_Varchar_55_val =
 
 #ifdef __AVX512F__
 
-// #define PREFETCH(E) __builtin_prefetch(E);
-#define PREFETCH(E)
-//pos_t sel_less_equal_int32_t_col_int32_t_val_avx512_impl(pos_t n, pos_t* RES result,
-pos_t sel_less_int32_t_col_int32_t_val_avx512_impl(pos_t n, pos_t* RES result,
-                                                   int32_t* RES param1,
-                                                   int32_t* RES param2) {
-   //static_assert(sizeof(pos_t) == 4,
-   //              "This implementation only supports sizeof(pos_t) == 4");
+pos_t sel_less_int32_t_col_int32_t_val_avx512_impl(
+    pos_t n, pos_t* RES result, int32_t* RES param1, int32_t* RES param2) {
    uint64_t found = 0;
    size_t rest = n % 16;
-#if defined(__AVX512VBMI__) && defined(VW_POS_16)
+#if defined(VW_POS_16) && defined(__AVX512VBMI2__) && defined(__AVX512VL__)
    auto ids =
        _mm256_set_epi16(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 #else
@@ -89,28 +83,75 @@ pos_t sel_less_int32_t_col_int32_t_val_avx512_impl(pos_t n, pos_t* RES result,
    for (uint64_t i = 0; i < n - rest; i += 16) {
       Vec8u in(param1 + i);
       __mmask16 less = _mm512_cmplt_epi32_mask(in, consts);
-#if defined(__AVX512VBMI__) && defined(VW_POS_16)
+      uint32_t count = __builtin_popcount(less);
+#ifdef VW_POS_16
+#if defined(__AVX512VBMI2__) && defined(__AVX512VL__)
       _mm256_mask_compressstoreu_epi16(result + found, less, ids);
       ids = _mm256_add_epi16(ids, _mm256_set1_epi16(16));
+#else
+      __m512i packed = _mm512_maskz_compress_epi32(less, ids);
+      __mmask16 store_mask = static_cast<__mmask16>((1u << count) - 1);
+      _mm512_mask_cvtepi32_storeu_epi16(result + found, store_mask, packed);
+      ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
+#endif
 #else
       _mm512_mask_compressstoreu_epi32(result + found, less, ids);
       ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
 #endif
-      found += __builtin_popcount(less);
+      found += count;
    }
-   for (uint64_t i = n - rest; i < n; ++i)
-      if (param1[i] < con) result[found++] = i;
+   for (uint64_t i = n - rest; i < n; i++) {
+      if (param1[i] < con) {
+         result[found++] = i;
+      }
+   }
    return found;
 }
 
-const size_t lead = 16;
+pos_t sel_less_equal_int32_t_col_int32_t_val_avx512_impl(
+    pos_t n, pos_t* RES result, int32_t* RES param1, int32_t* RES param2) {
+   uint64_t found = 0;
+   size_t rest = n % 16;
+#if defined(VW_POS_16) && defined(__AVX512VBMI2__) && defined(__AVX512VL__)
+   auto ids =
+       _mm256_set_epi16(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+#else
+   auto ids =
+       _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+#endif
+   auto con = *param2;
+   auto consts = _mm512_set1_epi32(con);
+   for (uint64_t i = 0; i < n - rest; i += 16) {
+      Vec8u in(param1 + i);
+      __mmask16 less = _mm512_cmple_epi32_mask(in, consts);
+      uint32_t count = __builtin_popcount(less);
+#ifdef VW_POS_16
+#if defined(__AVX512VBMI2__) && defined(__AVX512VL__)
+      _mm256_mask_compressstoreu_epi16(result + found, less, ids);
+      ids = _mm256_add_epi16(ids, _mm256_set1_epi16(16));
+#else
+      __m512i packed = _mm512_maskz_compress_epi32(less, ids);
+      __mmask16 store_mask = static_cast<__mmask16>((1u << count) - 1);
+      _mm512_mask_cvtepi32_storeu_epi16(result + found, store_mask, packed);
+      ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
+#endif
+#else
+      _mm512_mask_compressstoreu_epi32(result + found, less, ids);
+      ids = _mm512_add_epi32(ids, _mm512_set1_epi32(16));
+#endif
+      found += count;
+   }
+   for (uint64_t i = n - rest; i < n; i++) {
+      if (param1[i] <= con) {
+         result[found++] = i;
+      }
+   }
+   return found;
+}
 
 pos_t selsel_greater_equal_int32_t_col_int32_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int32_t* RES param1,
     int32_t* RES param2) {
-   //static_assert(sizeof(pos_t) == 4,
-   //             "This implementation only supports sizeof(pos_t) == 4");
-
    uint64_t found = 0;
    size_t rest = n % 16;
    auto con = *param2;
@@ -118,7 +159,6 @@ pos_t selsel_greater_equal_int32_t_col_int32_t_val_avx512_impl(
    for (uint64_t i = 0; i < n - rest; i += 16) {
       Vec8u idxs(inSel + i);
       auto in = _mm512_i32gather_epi32(idxs, param1, 4);
-      PREFETCH(&param1[inSel[i + lead]]);
       __mmask16 ge = _mm512_cmpge_epi32_mask(in, consts);
       _mm512_mask_compressstoreu_epi32(result + found, ge, idxs);
       found += __builtin_popcount(ge);
@@ -132,13 +172,9 @@ pos_t selsel_greater_equal_int32_t_col_int32_t_val_avx512_impl(
 
 #ifdef __AVX512VL__
 
-pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
-                                                      pos_t* RES result,
-                                                      int64_t* RES param1,
-                                                      int64_t* RES param2) {
-   //static_assert(sizeof(pos_t) == 4,
-   //              "This implementation only supports sizeof(pos_t) == 4");
-
+pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(
+    pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
+    int64_t* RES param2) {
    uint64_t found = 0;
    size_t rest = n % 8;
    auto con = *param2;
@@ -146,7 +182,6 @@ pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
    for (uint64_t i = 0; i < n - rest; i += 8) {
       auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i));
       auto in = _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
-      PREFETCH(&param1[inSel[i + lead]]);
       __mmask8 less = _mm512_cmplt_epi64_mask(in, consts);
       _mm256_mask_compressstoreu_epi32(result + found, less, idxs);
       found += __builtin_popcount(less);
@@ -161,9 +196,6 @@ pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
 pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
     int64_t* RES param2) {
-   //static_assert(sizeof(pos_t) == 4,
-   //              "This implementation only supports sizeof(pos_t) == 4");
-
    uint64_t found = 0;
    size_t rest = n % 8;
    auto con = *param2;
@@ -171,7 +203,6 @@ pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
    for (uint64_t i = 0; i < n - rest; i += 8) {
       auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i));
       auto in = _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
-      PREFETCH(&param1[inSel[i + lead]]);
       __mmask8 less = _mm512_cmpge_epi64_mask(in, consts);
       _mm256_mask_compressstoreu_epi32(result + found, less, idxs);
       found += __builtin_popcount(less);
@@ -186,9 +217,6 @@ pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
 pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
     int64_t* RES param2) {
-   //static_assert(sizeof(pos_t) == 4,
-   //              "This implementation only supports sizeof(pos_t) == 4");
-
    uint64_t found = 0;
    size_t rest = n % 8;
    auto con = *param2;
@@ -196,7 +224,6 @@ pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
    for (uint64_t i = 0; i < n - rest; i += 8) {
       auto idxs = _mm256_loadu_si256((const __m256i*)(inSel + i));
       auto in = _mm512_i32gather_epi64(idxs, (const long long int*)param1, 8);
-      PREFETCH(&param1[inSel[i + lead]]);
       __mmask8 less = _mm512_cmple_epi64_mask(in, consts);
       _mm256_mask_compressstoreu_epi32(result + found, less, idxs);
       found += __builtin_popcount(less);
@@ -210,13 +237,9 @@ pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
 
 #else
 
-pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
-                                                      pos_t* RES result,
-                                                      int64_t* RES param1,
-                                                      int64_t* RES param2) {
-   //static_assert(sizeof(pos_t) == 4,
-   //              "This implementation only supports sizeof(pos_t) == 4");
-
+pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(
+    pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
+    int64_t* RES param2) {
    uint64_t found = 0;
    size_t rest = n % 16;
    auto con = *param2;
@@ -252,9 +275,6 @@ pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
 pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
     int64_t* RES param2) {
-   //static_assert(sizeof(pos_t) == 4,
-   //              "This implementation only supports sizeof(pos_t) == 4");
-
    uint64_t found = 0;
    size_t rest = n % 16;
    auto con = *param2;
@@ -289,9 +309,6 @@ pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
 pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
     int64_t* RES param2) {
-   //static_assert(sizeof(pos_t) == 4,
-   //              "This implementation only supports sizeof(pos_t) == 4");
-
    uint64_t found = 0;
    size_t rest = n % 16;
    auto con = *param2;
@@ -327,10 +344,10 @@ pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
 }
 
 #endif
+F3 sel_less_int32_t_col_int32_t_val_avx512 =
+    (F3)&sel_less_int32_t_col_int32_t_val_avx512_impl;
 F3 sel_less_equal_int32_t_col_int32_t_val_avx512 =
     (F3)&sel_less_equal_int32_t_col_int32_t_val_avx512_impl;
-// F3 sel_less_int32_t_col_int32_t_val_avx512 =
-//     (F3)&sel_less_int32_t_col_int32_t_val_avx512_impl;
 F4 selsel_greater_equal_int32_t_col_int32_t_val_avx512 =
     (F4)&selsel_greater_equal_int32_t_col_int32_t_val_avx512_impl;
 F4 selsel_less_int64_t_col_int64_t_val_avx512 =

@@ -17,6 +17,7 @@ struct ExperimentConfig{
   vectorwise::primitives::F3 proj_multiplies_int64_t_col_int64_t_col();
   vectorwise::primitives::F4 proj_multiplies_sel_int64_t_col_int64_t_col();
   vectorwise::primitives::F3 sel_less_int32_t_col_int32_t_val();
+  vectorwise::primitives::F3 sel_less_equal_int32_t_col_int32_t_val();
   vectorwise::primitives::F4 selsel_greater_equal_int32_t_col_int32_t_val();
   vectorwise::primitives::F4 selsel_less_int64_t_col_int64_t_val();
   vectorwise::primitives::F4 selsel_greater_equal_int64_t_col_int64_t_val();

@@ -1372,34 +1372,13 @@ extern F4 proj_sel8_plus_int64_t_col_int64_t_val;
 extern F3 proj8_multiplies_int64_t_col_int64_t_col;
 extern F4 proj8_multiplies_sel_int64_t_col_int64_t_col;
 
-#ifndef VW_POS_16
 extern F3 sel_less_int32_t_col_int32_t_val_avx512;
+extern F3 sel_less_equal_int32_t_col_int32_t_val_avx512;
 extern F4 selsel_greater_equal_int32_t_col_int32_t_val_avx512;
 extern F4 selsel_greater_equal_int64_t_col_int64_t_val_avx512;
 extern F4 selsel_less_int64_t_col_int64_t_val_avx512;
 extern F4 selsel_less_equal_int64_t_col_int64_t_val_avx512;
 #endif
-#endif
-// ---------------------------------------------------------------------------
-// Packed-key primitives for Q1 (returnflag + linestatus -> uint16_t)
-// ---------------------------------------------------------------------------
-extern F4 pack_sel_void_1_1;
-extern F2 hash_uint16_t_col;
-extern F3 hash_sel_uint16_t_col;
-extern NEQCheck keys_not_equal_uint16_t_col;
-extern NEQCheckSel keys_not_equal_sel_uint16_t_col;
-extern NEQCheckRow keys_not_equal_row_uint16_t_col;
-extern FPartitionByKey partition_by_key_uint16_t_col;
-extern FPartitionByKeySel partition_by_key_sel_uint16_t_col;
-extern FPartitionByKeyRow partition_by_key_row_uint16_t_col;
-extern FScatter scatter_uint16_t_col;
-extern FScatterSel scatter_sel_uint16_t_col;
-extern FScatterSelRow scatter_sel_row_uint16_t_col;
-extern FGather gather_col_uint16_t_col;
-extern FGatherVal gather_val_uint16_t_col;
-extern FGatherVal unpack_q1key_returnflag;
-extern FGatherVal unpack_q1key_linestatus;
-
 } // namespace primitives
 } // namespace vectorwise
 
