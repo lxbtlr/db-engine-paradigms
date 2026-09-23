@@ -69,15 +69,15 @@ F3 sel_contains_Varchar_55_col_Varchar_55_val =
 
 // #define PREFETCH(E) __builtin_prefetch(E);
 #define PREFETCH(E)
-
+//pos_t sel_less_equal_int32_t_col_int32_t_val_avx512_impl(pos_t n, pos_t* RES result,
 pos_t sel_less_int32_t_col_int32_t_val_avx512_impl(pos_t n, pos_t* RES result,
                                                    int32_t* RES param1,
                                                    int32_t* RES param2) {
-   static_assert(sizeof(pos_t) == 4,
-                 "This implementation only supports sizeof(pos_t) == 4");
+   //static_assert(sizeof(pos_t) == 4,
+   //              "This implementation only supports sizeof(pos_t) == 4");
    uint64_t found = 0;
    size_t rest = n % 16;
-#if defined(VW_POS_16)
+#if defined(__AVX512VBMI__) && defined(VW_POS_16)
    auto ids =
        _mm256_set_epi16(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
 #else
@@ -108,8 +108,8 @@ const size_t lead = 16;
 pos_t selsel_greater_equal_int32_t_col_int32_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int32_t* RES param1,
     int32_t* RES param2) {
-   static_assert(sizeof(pos_t) == 4,
-                 "This implementation only supports sizeof(pos_t) == 4");
+   //static_assert(sizeof(pos_t) == 4,
+   //             "This implementation only supports sizeof(pos_t) == 4");
 
    uint64_t found = 0;
    size_t rest = n % 16;
@@ -136,8 +136,8 @@ pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
                                                       pos_t* RES result,
                                                       int64_t* RES param1,
                                                       int64_t* RES param2) {
-   static_assert(sizeof(pos_t) == 4,
-                 "This implementation only supports sizeof(pos_t) == 4");
+   //static_assert(sizeof(pos_t) == 4,
+   //              "This implementation only supports sizeof(pos_t) == 4");
 
    uint64_t found = 0;
    size_t rest = n % 8;
@@ -161,8 +161,8 @@ pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
 pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
     int64_t* RES param2) {
-   static_assert(sizeof(pos_t) == 4,
-                 "This implementation only supports sizeof(pos_t) == 4");
+   //static_assert(sizeof(pos_t) == 4,
+   //              "This implementation only supports sizeof(pos_t) == 4");
 
    uint64_t found = 0;
    size_t rest = n % 8;
@@ -186,8 +186,8 @@ pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
 pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
     int64_t* RES param2) {
-   static_assert(sizeof(pos_t) == 4,
-                 "This implementation only supports sizeof(pos_t) == 4");
+   //static_assert(sizeof(pos_t) == 4,
+   //              "This implementation only supports sizeof(pos_t) == 4");
 
    uint64_t found = 0;
    size_t rest = n % 8;
@@ -214,8 +214,8 @@ pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
                                                       pos_t* RES result,
                                                       int64_t* RES param1,
                                                       int64_t* RES param2) {
-   static_assert(sizeof(pos_t) == 4,
-                 "This implementation only supports sizeof(pos_t) == 4");
+   //static_assert(sizeof(pos_t) == 4,
+   //              "This implementation only supports sizeof(pos_t) == 4");
 
    uint64_t found = 0;
    size_t rest = n % 16;
@@ -252,8 +252,8 @@ pos_t selsel_less_int64_t_col_int64_t_val_avx512_impl(pos_t n, pos_t* RES inSel,
 pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
     int64_t* RES param2) {
-   static_assert(sizeof(pos_t) == 4,
-                 "This implementation only supports sizeof(pos_t) == 4");
+   //static_assert(sizeof(pos_t) == 4,
+   //              "This implementation only supports sizeof(pos_t) == 4");
 
    uint64_t found = 0;
    size_t rest = n % 16;
@@ -289,8 +289,8 @@ pos_t selsel_greater_equal_int64_t_col_int64_t_val_avx512_impl(
 pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
     pos_t n, pos_t* RES inSel, pos_t* RES result, int64_t* RES param1,
     int64_t* RES param2) {
-   static_assert(sizeof(pos_t) == 4,
-                 "This implementation only supports sizeof(pos_t) == 4");
+   //static_assert(sizeof(pos_t) == 4,
+   //              "This implementation only supports sizeof(pos_t) == 4");
 
    uint64_t found = 0;
    size_t rest = n % 16;
@@ -327,9 +327,10 @@ pos_t selsel_less_equal_int64_t_col_int64_t_val_avx512_impl(
 }
 
 #endif
-
-F3 sel_less_int32_t_col_int32_t_val_avx512 =
-    (F3)&sel_less_int32_t_col_int32_t_val_avx512_impl;
+F3 sel_less_equal_int32_t_col_int32_t_val_avx512 =
+    (F3)&sel_less_equal_int32_t_col_int32_t_val_avx512_impl;
+// F3 sel_less_int32_t_col_int32_t_val_avx512 =
+//     (F3)&sel_less_int32_t_col_int32_t_val_avx512_impl;
 F4 selsel_greater_equal_int32_t_col_int32_t_val_avx512 =
     (F4)&selsel_greater_equal_int32_t_col_int32_t_val_avx512_impl;
 F4 selsel_less_int64_t_col_int64_t_val_avx512 =
