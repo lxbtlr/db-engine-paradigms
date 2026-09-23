@@ -122,6 +122,12 @@ endif (VW_USE_CRC32)
 
 
 
+OPTION(HYPER_Q1_DIRECT_AGG "Typer Q1: direct-mapped aggregation bypassing hash table" OFF)
+if(HYPER_Q1_DIRECT_AGG)
+  ADD_DEFINITIONS(-DHYPER_Q1_DIRECT_AGG=1)
+  message(STATUS "Building with HYPER_Q1_DIRECT_AGG")
+endif(HYPER_Q1_DIRECT_AGG)
+
 OPTION(VW_GROUP_AGGR "Perform group-wise GROUP BY aggregation for VectorWise" OFF)
 if(VW_GROUP_AGGR)
   ADD_DEFINITIONS(-DVW_GROUP_AGGR=1)

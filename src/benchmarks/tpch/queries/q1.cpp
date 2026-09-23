@@ -105,7 +105,72 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
                   Numeric<12, 6>(), int64_t(0)),
        nrThreads);
 
+#ifdef HYPER_Q1_DIRECT_AGG
+   // Direct-mapped aggregation: bypass hash table for the per-morsel hot loop.
+   // l_returnflag in {A,N,R}, l_linestatus in {F,O} => 6 groups, 8 slots.
+   // Slot = flagIndex*2 + statusBit. One hash lookup per slot at morsel end.
+   static constexpr int NUM_SLOTS = 8;
 
+   // Map returnflag char to slot index: A->0, N->1, R->2
+   auto flagIndex = [](unsigned char c) -> unsigned {
+      return (c == 'A') ? 0u : (c == 'N') ? 1u : 2u;
+   };
+
+   tbb::parallel_for(
+       tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
+       [&](const tbb::blocked_range<size_t>& r) {
+          auto locals = groupOp.preAggLocals();
+
+          int64_t qty[NUM_SLOTS] = {};
+          int64_t base_price[NUM_SLOTS] = {};
+          int64_t disc_price_acc[NUM_SLOTS] = {};
+          int64_t charge_acc[NUM_SLOTS] = {};
+          int64_t count[NUM_SLOTS] = {};
+
+          for (size_t i = r.begin(), end = r.end(); i != end; ++i) {
+             if (l_shipdate[i].value <= c1.value) {
+                unsigned char flag = l_returnflag[i].value;
+                unsigned char status = l_linestatus[i].value;
+                unsigned slot = flagIndex(flag) * 2 + ((status >> 3) & 1);
+
+                assert(flag == 'A' || flag == 'N' || flag == 'R');
+                assert(status == 'F' || status == 'O');
+
+                int64_t ep = l_extendedprice[i].value;
+                int64_t disc = l_discount[i].value;
+                int64_t tx = l_tax[i].value;
+                int64_t dp = ep * (100 - disc);
+                int64_t ch = dp * (100 + tx);
+
+                qty[slot] += l_quantity[i].value;
+                base_price[slot] += ep;
+                disc_price_acc[slot] += dp;
+                charge_acc[slot] += ch;
+                count[slot] += 1;
+             }
+          }
+
+          // Flush non-empty slots into the hash table (at most 6 calls)
+          // returnflag chars for flag indices 0,1,2
+          static constexpr char flagChars[3] = {'A', 'N', 'R'};
+          // linestatus chars for status indices 0,1
+          static constexpr char statusChars[2] = {'F', 'O'};
+          for (int fi = 0; fi < 3; ++fi) {
+             for (int si = 0; si < 2; ++si) {
+                int slot = fi * 2 + si;
+                if (count[slot] == 0) continue;
+                Char<1> rf; rf.len = 1; rf.value[0] = flagChars[fi];
+                Char<1> ls; ls.len = 1; ls.value[0] = statusChars[si];
+                auto& group = locals.getGroup(make_tuple(rf, ls));
+                get<0>(group).value += qty[slot];
+                get<1>(group).value += base_price[slot];
+                get<2>(group).value += disc_price_acc[slot];
+                get<3>(group).value += charge_acc[slot];
+                get<4>(group) += count[slot];
+             }
+          }
+       });
+#else
    tbb::parallel_for(
        tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
        [&](const tbb::blocked_range<size_t>& r) {
@@ -124,6 +189,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_hyper(Database& db,
              }
           }
        });
+#endif
 
    auto& result = resources.query->result;
    auto retAttr = result->addAttribute("l_returnflag", sizeof(Char<1>));
