@@ -121,10 +121,6 @@ else ()
 endif (VW_USE_CRC32)
 
 
-OPTION(ORIGINAL_GROUPLOOKUP "Use original primitive-based findGroups (OFF = Concat/Hash/Lookup path)" OFF)
-IF(ORIGINAL_GROUPLOOKUP)
-  ADD_DEFINITIONS(-DORIGINAL_GROUPLOOKUP)
-ENDIF()
 
 OPTION(VW_GROUP_AGGR "Perform group-wise GROUP BY aggregation for VectorWise" OFF)
 if(VW_GROUP_AGGR)

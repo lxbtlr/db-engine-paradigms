@@ -300,8 +300,6 @@ class HashGroup : public UnaryOperator {
 
    /// ------ phase 1: local preaggregation
    /// ------ group lookup
-   /// Expression which produces hashes of group keys
-   Expression groupHash;
 
    template <typename T> class GroupLookup {
 

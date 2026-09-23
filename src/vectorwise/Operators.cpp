@@ -860,7 +860,6 @@ size_t HashGroup::next() {
          preAggregation.clearHashtable(ht);
       };
 
-#ifndef ORIGINAL_GROUPLOOKUP
       if (packedKeys.size() < vecSize * totalKeySize) {
          packedKeys.resize(vecSize * totalKeySize);
       }
@@ -869,14 +868,8 @@ size_t HashGroup::next() {
          groups.reserve(vecSize);
       }
 #endif
-#endif
 
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
-#ifdef ORIGINAL_GROUPLOOKUP
-         groupHash.evaluate(n);
-         preAggregation.findGroups(n, ht);
-         preAggregation.createMissingGroups(ht, false);
-#else
 #ifdef VW_GROUP_AGGR
          for (auto entry : groups) {
             entry->group->size = 0;
@@ -888,7 +881,6 @@ size_t HashGroup::next() {
          Hash(n);
 #endif
          Lookup(n);
-#endif
 
          updateGroups.evaluate(n);
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
