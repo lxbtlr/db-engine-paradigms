@@ -146,10 +146,12 @@ TEST(TPCH, q3) {
    tbb::global_control gc(tbb::global_control::max_allowed_parallelism, threads);
    {
       // run queries
+      SCOPED_TRACE("q3 hyper");
       auto result = q3_hyper(tpch, threads);
       checkResult(result->result.get());
    }
    {
+      SCOPED_TRACE("q3 vectorwise");
       auto result = q3_vectorwise(tpch, threads, vectorSize);
       checkResult(result->result.get());
    }

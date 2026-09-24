@@ -64,25 +64,29 @@ vectorwise::primitives::F3 ExperimentConfig::sel_less_equal_int32_t_col_int32_t_
   return BF(vectorwise::primitives::sel_less_equal_int32_t_col_int32_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_greater_equal_int32_t_col_int32_t_val() {
-#ifdef __AVX512F__
+// old selsel kernels load inSel as 32-bit entries: wrong under VW_POS_16
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if (useSimdSel) return vectorwise::primitives::selsel_greater_equal_int32_t_col_int32_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_greater_equal_int32_t_col_int32_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_less_int64_t_col_int64_t_val() {
-#ifdef __AVX512F__
+// old selsel kernels load inSel as 32-bit entries: wrong under VW_POS_16
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if (useSimdSel) return vectorwise::primitives::selsel_less_int64_t_col_int64_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_less_int64_t_col_int64_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_greater_equal_int64_t_col_int64_t_val() {
-#ifdef __AVX512F__
+// old selsel kernels load inSel as 32-bit entries: wrong under VW_POS_16
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if (useSimdSel) return vectorwise::primitives::selsel_greater_equal_int64_t_col_int64_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_greater_equal_int64_t_col_int64_t_val);
 }
 vectorwise::primitives::F4 ExperimentConfig::selsel_less_equal_int64_t_col_int64_t_val() {
-#ifdef __AVX512F__
+// old selsel kernels load inSel as 32-bit entries: wrong under VW_POS_16
+#if defined(__AVX512F__) && !defined(VW_POS_16)
   if (useSimdSel) return vectorwise::primitives::selsel_less_equal_int64_t_col_int64_t_val_avx512;
 #endif
   return BF(vectorwise::primitives::selsel_less_equal_int64_t_col_int64_t_val);
