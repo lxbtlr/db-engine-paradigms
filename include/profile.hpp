@@ -231,6 +231,11 @@ struct PerfEvents {
          add("all_rd", "offcore_requests.data_rd");
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+         // Generic PERF_COUNT_HW_STALLED_CYCLES_BACKEND reports 0 on SPR (the
+         // hardware generic backend-stall counter is not wired up there); the
+         // named cycle_activity.stalls_mem_any event counts real memory stalls
+         // (same event dubliner/Cascade Lake uses).
+         add("mem_stall", "cycle_activity.stalls_mem_any");
       } else {
          add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
          add("LLC-misses", PERF_TYPE_HW_CACHE,
