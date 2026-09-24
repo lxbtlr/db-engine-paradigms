@@ -41,7 +41,7 @@ namespace primitives {
    F4 proj_sel_##op##_##type##_val_##type##_col =                              \
        (F4)&proj_sel_val_col<type, op>;
 
-pos_t lookup_sel_(pos_t n, pos_t* target, pos_t* sel, pos_t* source) {
+pos_t RES lookup_sel_(pos_t n, pos_t* target, pos_t* sel, pos_t* source) {
    for (size_t i = 0; i < n; ++i) target[i] = source[sel[i]];
    return n;
 }
