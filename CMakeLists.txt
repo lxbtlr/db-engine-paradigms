@@ -122,6 +122,21 @@ endif (VW_USE_CRC32)
 
 
 
+OPTION(HYPER_Q1_DIRECT_AGG "Typer Q1: direct-mapped aggregation bypassing hash table" OFF)
+if(HYPER_Q1_DIRECT_AGG)
+  ADD_DEFINITIONS(-DHYPER_Q1_DIRECT_AGG=1)
+  message(STATUS "Building with HYPER_Q1_DIRECT_AGG")
+endif(HYPER_Q1_DIRECT_AGG)
+
+OPTION(HYPER_Q1_SIMD "Typer Q1: AVX-512 fused scan+aggregate loop (requires HYPER_Q1_DIRECT_AGG)" OFF)
+if(HYPER_Q1_SIMD)
+  if(NOT HYPER_Q1_DIRECT_AGG)
+    message(FATAL_ERROR "HYPER_Q1_SIMD requires HYPER_Q1_DIRECT_AGG")
+  endif()
+  ADD_DEFINITIONS(-DHYPER_Q1_SIMD=1)
+  message(STATUS "Building with HYPER_Q1_SIMD")
+endif(HYPER_Q1_SIMD)
+
 OPTION(VW_GROUP_AGGR "Perform group-wise GROUP BY aggregation for VectorWise" OFF)
 if(VW_GROUP_AGGR)
   ADD_DEFINITIONS(-DVW_GROUP_AGGR=1)
@@ -145,6 +160,21 @@ if(VW_FUSE_HASH)
   ADD_DEFINITIONS(-DVW_FUSE_HASH=1)
   message(STATUS "Building with VW_FUSE_HASH")
 endif(VW_FUSE_HASH)
+
+# AVX-512 selection kernels (include/vectorwise/SimdSelection.hpp). The
+# existing sel_*/selsel_* primitive names are redirected to the SIMD kernels
+# for supported types; without AVX-512F in ARCH_FLAGS they stay scalar.
+OPTION(VW_SIMD_SEL "AVX-512 selection kernels for int32/int64/Date (sel/selsel, col_val/col_col)" OFF)
+if(VW_SIMD_SEL)
+  ADD_DEFINITIONS(-DVW_SIMD_SEL=1)
+  message(STATUS "Building with VW_SIMD_SEL")
+endif(VW_SIMD_SEL)
+
+OPTION(VW_SIMD_SEL_CHAR "AVX-512BW Char<N> == constant selection kernel" OFF)
+if(VW_SIMD_SEL_CHAR)
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_CHAR=1)
+  message(STATUS "Building with VW_SIMD_SEL_CHAR")
+endif(VW_SIMD_SEL_CHAR)
 
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
@@ -284,6 +314,27 @@ ELSE(AUTOVECTORIZE)
 	endif(CLANG)
 ENDIF(AUTOVECTORIZE)
 
+# PGO: profile-guided optimization
+# Usage: build with -DPGO=generate, run workload, rebuild with -DPGO=use
+set(PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, generate, or use")
+if(PGO STREQUAL "generate")
+  if(COMPILER STREQUAL "clang")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-generate=${CMAKE_BINARY_DIR}/pgo-profiles")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-generate=${CMAKE_BINARY_DIR}/pgo-profiles")
+  else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-generate -fprofile-dir=${CMAKE_BINARY_DIR}/pgo-profiles")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-generate")
+  endif()
+  message(STATUS "PGO: generating profiles to ${CMAKE_BINARY_DIR}/pgo-profiles")
+elseif(PGO STREQUAL "use")
+  if(COMPILER STREQUAL "clang")
+    # Clang needs llvm-profdata merge first: llvm-profdata merge -output=default.profdata pgo-profiles/
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-use=${CMAKE_BINARY_DIR}/pgo-profiles/default.profdata")
+  else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-use -fprofile-dir=${CMAKE_BINARY_DIR}/pgo-profiles -fprofile-correction")
+  endif()
+  message(STATUS "PGO: using profiles from ${CMAKE_BINARY_DIR}/pgo-profiles")
+endif()
 
 # Download and unpack googletest at configure time
 configure_file(3rdparty/GTest.CMakeLists.txt googletest-download/CMakeLists.txt)
@@ -501,6 +552,15 @@ target_include_directories(run_prim PUBLIC
     PRIVATE src)
 target_link_libraries(run_prim vectorwise common ${TBB_LIBRARIES}  ${JEVENTSLIB})
 
+add_executable(run_selbench
+  src/benchmarks/primitives/selbench.cpp
+  )
+target_include_directories(run_selbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+target_link_libraries(run_selbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
+
 # Enable tests
 enable_testing()
 set(CTEST_OUTPUT_ON_FAILURE "1")
@@ -511,6 +571,7 @@ add_executable(test_all
   src/test/tpch.cpp
   src/test/ssb.cpp
   src/test/vectorwise/primitives.cpp
+  src/test/vectorwise/simd_selection.cpp
   src/test/vectorwise/Operators.cpp
   src/test/common/Hashmap.cpp
   src/test/common/Database.cpp
