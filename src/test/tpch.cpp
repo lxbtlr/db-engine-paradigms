@@ -122,7 +122,7 @@ TEST(TPCH, q3) {
    auto& expected = q3_expected();
 
    auto checkResult = [&](BlockRelation* result) {
-      size_t found = 0;
+      size_t found = 0, wrong = 0;
       auto keyAttr = result->getAttribute("l_orderkey");
       auto dateAttr = result->getAttribute("o_orderdate");
       auto prioAttr = result->getAttribute("o_shippriority");
@@ -135,10 +135,17 @@ TEST(TPCH, q3) {
          auto prio = reinterpret_cast<types::Integer*>(block.data(prioAttr));
          auto revenue = reinterpret_cast<rev_t*>(block.data(revenueAttr));
          for (size_t i = 0; i < elementsInBlock; ++i) {
-            ASSERT_EQ(revenue[i],
-                      expected[make_tuple(key[i], date[i], prio[i])]);
+            // count every wrong group instead of stopping at the first one;
+            // print the first few
+            auto want = expected[make_tuple(key[i], date[i], prio[i])];
+            if (!(revenue[i] == want) && wrong++ < 5)
+               ADD_FAILURE() << "group (" << key[i] << ", " << date[i] << ", "
+                             << prio[i] << "): revenue " << revenue[i]
+                             << " expected " << want;
          }
       };
+      EXPECT_EQ(wrong, size_t(0)) << wrong << " of " << found
+                                  << " groups have the wrong revenue";
       EXPECT_EQ(found, expected.size());
    };
    Database& tpch = TPCH::getDB();
