@@ -239,11 +239,124 @@ pos_t sel_col_col(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
 }
 
 //--- gather -> compressed ----------------------------------------------------
+//
+// Two implementations of the gathered input:
+//   *_scalarload (default): 16 scalar loads through inSel build a 16-bit
+//       match mask, followed by one register compress of the inSel lanes. This
+//       removes the found-dependent store chain of the scalar _bf loop and
+//       avoids vpgather*, which is slow under the Gather Data Sampling (GDS /
+//       Downfall) microcode mitigation on Skylake..Ice Lake parts.
+//   *_hwgather (VW_SIMD_SEL_HWGATHER): vpgatherdd / vpgatherdq, the better
+//       choice on CPUs without that penalty.
+// selsel_col_val / selsel_col_col below pick one at compile time.
+
+// Keep the per-group scalar loop scalar: vectorizing it would turn it back
+// into a hardware gather.
+#if defined(__clang__)
+#define VW_SEL_SCALAR_LOOP _Pragma("clang loop vectorize(disable) unroll(full)")
+#define VW_SEL_SCALAR_TAIL _Pragma("clang loop vectorize(disable)")
+#elif defined(__GNUC__) && __GNUC__ >= 14
+#define VW_SEL_SCALAR_LOOP _Pragma("GCC unroll 16") _Pragma("GCC novector")
+#define VW_SEL_SCALAR_TAIL _Pragma("GCC novector")
+#else
+#define VW_SEL_SCALAR_LOOP _Pragma("GCC unroll 16")
+#define VW_SEL_SCALAR_TAIL
+#endif
+
+// The loop pragmas only stop the loop vectorizer; clang's SLP vectorizer
+// still fuses the 16 unrolled loads into a vpgather, or the OR reduction of
+// the lane bits into vpinsrd chains. An empty asm that takes a value in a
+// register hides the dependency tree from it; it emits no instructions. It is
+// applied to each lane bit and to the running mask (two accumulators, so the
+// serial OR chain stays 8 steps long).
+#if defined(__GNUC__) || defined(__clang__)
+#define VW_SEL_OPAQUE(x) asm("" : "+r"(x))
+// the asm makes clang's inliner treat the mask helpers as expensive
+#define VW_SEL_INLINE inline __attribute__((always_inline))
+#else
+#define VW_SEL_OPAQUE(x) (void)0
+#define VW_SEL_INLINE inline
+#endif
+
+/// Match mask of Op(a[sel[j]], b(sel[j])) for j < 16 (full group).
+template <typename T, template <typename> class Op, typename B>
+VW_SEL_INLINE __mmask16 mask16_scalar(const pos_t* sel, const T* a, B b) {
+   unsigned m0 = 0, m1 = 0;
+   VW_SEL_SCALAR_LOOP
+   for (unsigned j = 0; j < 16; j += 2) {
+      const pos_t i0 = sel[j], i1 = sel[j + 1];
+      unsigned b0 = Op<T>()(a[i0], b(i0));
+      unsigned b1 = Op<T>()(a[i1], b(i1));
+      VW_SEL_OPAQUE(b0);
+      VW_SEL_OPAQUE(b1);
+      m0 |= b0 << j;
+      m1 |= b1 << (j + 1);
+      VW_SEL_OPAQUE(m0);
+      VW_SEL_OPAQUE(m1);
+   }
+   return (__mmask16)(m0 | m1);
+}
+
+/// Same for the last r < 16 entries.
+template <typename T, template <typename> class Op, typename B>
+VW_SEL_INLINE __mmask16 mask_tail_scalar(const pos_t* sel, size_t r, const T* a,
+                                  B b) {
+   unsigned m = 0;
+   VW_SEL_SCALAR_TAIL
+   for (unsigned j = 0; j < r; ++j) {
+      const pos_t idx = sel[j];
+      unsigned bit = Op<T>()(a[idx], b(idx));
+      VW_SEL_OPAQUE(bit);
+      m |= bit << j;
+      VW_SEL_OPAQUE(m);
+   }
+   return (__mmask16)m;
+}
 
 /// result = entries idx of inSel with Op(param1[idx], *param2)
 template <typename T, template <typename> class Op>
-pos_t selsel_col_val(pos_t n, pos_t* RES inSel, pos_t* RES result,
-                     T* RES param1, T* RES param2) {
+pos_t selsel_col_val_scalarload(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                                T* RES param1, T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   const T con = *param2;
+   auto b = [con](pos_t) { return con; };
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16)
+      found += emit(result + found, mask16_scalar<T, Op>(inSel + i, param1, b),
+                    load_idx(inSel + i, 16));
+   if (i < n) {
+      const size_t r = n - i;
+      found += emit(result + found,
+                    mask_tail_scalar<T, Op>(inSel + i, r, param1, b),
+                    load_idx(inSel + i, r));
+   }
+   return found;
+}
+
+/// result = entries idx of inSel with Op(param1[idx], param2[idx])
+template <typename T, template <typename> class Op>
+pos_t selsel_col_col_scalarload(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                                T* RES param1, T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   const T* p2 = param2;
+   auto b = [p2](pos_t idx) { return p2[idx]; };
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16)
+      found += emit(result + found, mask16_scalar<T, Op>(inSel + i, param1, b),
+                    load_idx(inSel + i, 16));
+   if (i < n) {
+      const size_t r = n - i;
+      found += emit(result + found,
+                    mask_tail_scalar<T, Op>(inSel + i, r, param1, b),
+                    load_idx(inSel + i, r));
+   }
+   return found;
+}
+
+/// result = entries idx of inSel with Op(param1[idx], *param2), vpgather
+template <typename T, template <typename> class Op>
+pos_t selsel_col_val_hwgather(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                              T* RES param1, T* RES param2) {
    static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
    const __m512i c = broadcast(*param2);
    size_t found = 0;
@@ -258,10 +371,10 @@ pos_t selsel_col_val(pos_t n, pos_t* RES inSel, pos_t* RES result,
    return found;
 }
 
-/// result = entries idx of inSel with Op(param1[idx], param2[idx])
+/// result = entries idx of inSel with Op(param1[idx], param2[idx]), vpgather
 template <typename T, template <typename> class Op>
-pos_t selsel_col_col(pos_t n, pos_t* RES inSel, pos_t* RES result,
-                     T* RES param1, T* RES param2) {
+pos_t selsel_col_col_hwgather(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                              T* RES param1, T* RES param2) {
    static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
    size_t found = 0;
    for (size_t i = 0; i < n; i += 16) {
@@ -275,6 +388,27 @@ pos_t selsel_col_col(pos_t n, pos_t* RES inSel, pos_t* RES result,
       found += emit(result + found, cmp_regs<T, Op>(k, alo, ahi, blo, bhi), idx);
    }
    return found;
+}
+
+/// Compile-time choice between the two gathered-input implementations.
+template <typename T, template <typename> class Op>
+pos_t selsel_col_val(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                     T* RES param1, T* RES param2) {
+#ifdef VW_SIMD_SEL_HWGATHER
+   return selsel_col_val_hwgather<T, Op>(n, inSel, result, param1, param2);
+#else
+   return selsel_col_val_scalarload<T, Op>(n, inSel, result, param1, param2);
+#endif
+}
+
+template <typename T, template <typename> class Op>
+pos_t selsel_col_col(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                     T* RES param1, T* RES param2) {
+#ifdef VW_SIMD_SEL_HWGATHER
+   return selsel_col_col_hwgather<T, Op>(n, inSel, result, param1, param2);
+#else
+   return selsel_col_col_scalarload<T, Op>(n, inSel, result, param1, param2);
+#endif
 }
 
 //--- Char<N> == constant -----------------------------------------------------

@@ -128,13 +128,21 @@ template <typename T, template <typename> class Op> void checkSelselColVal() {
          auto in = subset(n, density, rng);
          for (T c : constants(col.data, n)) {
             const size_t k = in.size();
-            std::vector<pos_t> ref(k + kSlack, kCanary),
-                got(k + kSlack, kCanary);
+            std::vector<pos_t> ref(k + kSlack, kCanary);
             pos_t fr = selsel_col_val_bf<T, Op>(k, in.data(), ref.data(),
                                                  col.data, &c);
-            pos_t fs = simd::selsel_col_val<T, Op>(k, in.data(), got.data(),
-                                                    col.data, &c);
-            expectSame(fr, ref, fs, got, ctx("selsel_col_val", k, num(c)));
+            // both gathered-input implementations, whichever one the
+            // VW_SIMD_SEL_HWGATHER option selects
+            for (auto kernel : {&simd::selsel_col_val_scalarload<T, Op>,
+                                &simd::selsel_col_val_hwgather<T, Op>}) {
+               std::vector<pos_t> got(k + kSlack, kCanary);
+               pos_t fs = kernel(k, in.data(), got.data(), col.data, &c);
+               expectSame(fr, ref, fs, got,
+                          ctx(kernel == &simd::selsel_col_val_hwgather<T, Op>
+                                  ? "selsel_col_val_hwgather"
+                                  : "selsel_col_val_scalarload",
+                              k, num(c)));
+            }
          }
       }
    }
@@ -148,12 +156,19 @@ template <typename T, template <typename> class Op> void checkSelselColCol() {
       for (int density : {10, 50, 100}) {
          auto in = subset(n, density, rng);
          const size_t k = in.size();
-         std::vector<pos_t> ref(k + kSlack, kCanary), got(k + kSlack, kCanary);
+         std::vector<pos_t> ref(k + kSlack, kCanary);
          pos_t fr = selsel_col_col_bf<T, Op>(k, in.data(), ref.data(), a.data,
                                               b.data);
-         pos_t fs = simd::selsel_col_col<T, Op>(k, in.data(), got.data(),
-                                                 a.data, b.data);
-         expectSame(fr, ref, fs, got, ctx("selsel_col_col", k, 0));
+         for (auto kernel : {&simd::selsel_col_col_scalarload<T, Op>,
+                             &simd::selsel_col_col_hwgather<T, Op>}) {
+            std::vector<pos_t> got(k + kSlack, kCanary);
+            pos_t fs = kernel(k, in.data(), got.data(), a.data, b.data);
+            expectSame(fr, ref, fs, got,
+                       ctx(kernel == &simd::selsel_col_col_hwgather<T, Op>
+                               ? "selsel_col_col_hwgather"
+                               : "selsel_col_col_scalarload",
+                           k, 0));
+         }
       }
    }
 }

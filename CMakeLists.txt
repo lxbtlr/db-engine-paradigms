@@ -170,6 +170,12 @@ if(VW_SIMD_SEL)
   message(STATUS "Building with VW_SIMD_SEL")
 endif(VW_SIMD_SEL)
 
+OPTION(VW_SIMD_SEL_HWGATHER "VW_SIMD_SEL: use vpgather for selsel (gathered input) instead of scalar loads + compress" OFF)
+if(VW_SIMD_SEL_HWGATHER)
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_HWGATHER=1)
+  message(STATUS "Building with VW_SIMD_SEL_HWGATHER")
+endif(VW_SIMD_SEL_HWGATHER)
+
 OPTION(VW_SIMD_SEL_CHAR "AVX-512BW Char<N> == constant selection kernel" OFF)
 if(VW_SIMD_SEL_CHAR)
   ADD_DEFINITIONS(-DVW_SIMD_SEL_CHAR=1)

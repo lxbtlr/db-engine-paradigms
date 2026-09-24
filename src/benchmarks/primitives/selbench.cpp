@@ -1,6 +1,7 @@
 // run_selbench: per-tuple cost of selection primitives. Compares the scalar
 // branch-free templates (what queries use by default), the six pre-existing
-// *_avx512 kernels, and the generic AVX-512 kernels from SimdSelection.hpp.
+// *_avx512 kernels, and the generic AVX-512 kernels from SimdSelection.hpp
+// (for gathered input both the scalar-load and the vpgather implementation).
 //
 // Usage: run_selbench [-v vecSize] [-m l1|stream|all] [-r reps]
 //                     [-s sel%,sel%,...] [-d inSel density %]
@@ -230,12 +231,18 @@ void selselColVal(F4 old = nullptr) {
    benchF4<T, Op>("selsel_col_val", false,
                   {{"scalar_bf", (F4)&selsel_col_val_bf<T, Op>},
                    {"avx512_old", old},
-                   {"simd", SIMD4((simd::selsel_col_val<T, Op>))}});
+                   {"simd_scalarload",
+                    SIMD4((simd::selsel_col_val_scalarload<T, Op>))},
+                   {"simd_hwgather",
+                    SIMD4((simd::selsel_col_val_hwgather<T, Op>))}});
 }
 template <typename T, template <typename> class Op> void selselColCol() {
    benchF4<T, Op>("selsel_col_col", true,
                   {{"scalar_bf", (F4)&selsel_col_col_bf<T, Op>},
-                   {"simd", SIMD4((simd::selsel_col_col<T, Op>))}});
+                   {"simd_scalarload",
+                    SIMD4((simd::selsel_col_col_scalarload<T, Op>))},
+                   {"simd_hwgather",
+                    SIMD4((simd::selsel_col_col_hwgather<T, Op>))}});
 }
 
 /// Char<N> == constant over a column of TPC-H-like segment names.
