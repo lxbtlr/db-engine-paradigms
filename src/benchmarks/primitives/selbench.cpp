@@ -205,6 +205,13 @@ void benchF4(const std::string& family, bool colcol,
 #else
 #define OLD(name) nullptr
 #endif
+// The old selsel *_avx512 kernels load inSel as 32-bit entries, so they read
+// garbage indices under VW_POS_16; skip them there.
+#if defined(__AVX512F__) && !defined(VW_POS_16)
+#define OLD_SELSEL(name) name
+#else
+#define OLD_SELSEL(name) nullptr
+#endif
 
 template <typename T, template <typename> class Op>
 void selColVal(F3 old = nullptr) {
@@ -329,13 +336,13 @@ int main(int argc, char** argv) {
 
    // gather -> compressed (Q5 Date, Q6 int32/int64)
    selselColVal<int32_t, std::greater_equal>(
-       OLD(selsel_greater_equal_int32_t_col_int32_t_val_avx512));
+       OLD_SELSEL(selsel_greater_equal_int32_t_col_int32_t_val_avx512));
    selselColVal<int64_t, std::less>(
-       OLD(selsel_less_int64_t_col_int64_t_val_avx512));
+       OLD_SELSEL(selsel_less_int64_t_col_int64_t_val_avx512));
    selselColVal<int64_t, std::greater_equal>(
-       OLD(selsel_greater_equal_int64_t_col_int64_t_val_avx512));
+       OLD_SELSEL(selsel_greater_equal_int64_t_col_int64_t_val_avx512));
    selselColVal<int64_t, std::less_equal>(
-       OLD(selsel_less_equal_int64_t_col_int64_t_val_avx512));
+       OLD_SELSEL(selsel_less_equal_int64_t_col_int64_t_val_avx512));
    selselColVal<Date, std::greater_equal>();
    selselColCol<int64_t, std::less>();
 
