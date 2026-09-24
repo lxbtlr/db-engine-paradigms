@@ -50,6 +50,10 @@ run_q3() {
         got=$(grep -m1 -o 'revenue [0-9.-]* expected [0-9.-]*' "$f" | cut -d' ' -f2)
         exp=$(grep -m1 -o 'revenue [0-9.-]* expected [0-9.-]*' "$f" | cut -d' ' -f4)
         nwrong=$(grep -m1 -o '[0-9]* of [0-9]* groups have the wrong revenue' "$f" | cut -d' ' -f1,3 | tr ' ' '/')
+        if [ -z "$got" ]; then # older test binaries: ASSERT_EQ "Which is:" format
+          got=$(grep -m1 -A1 'revenue\[i\]' "$f" | grep -o 'Which is: .*' | cut -d' ' -f3)
+          exp=$(grep -m1 -A1 'expected\[make_tuple' "$f" | grep -o 'Which is: .*' | cut -d' ' -f3)
+        fi
         grep -q 'q3 hyper' "$f" && res="fail(hyper)"
         grep -q 'q3 vectorwise' "$f" && res="fail(vectorwise)"
       else
@@ -88,6 +92,15 @@ build_variant() {
   if [ ! -d "$wt" ]; then
     git -C "$ROOT" worktree add --detach "$wt" "$commit" > "$OUT/${name}_worktree.log" 2>&1       || { log "$name: git worktree add failed (see $OUT/${name}_worktree.log)"; return 1; }
   fi
+  # Worktrees do not populate submodules. simde is header-only: reuse the main
+  # checkout's copy, or fall back to fetching it.
+  if [ ! -e "$wt/3rdparty/simde/simde" ]; then
+    if [ -d "$ROOT/3rdparty/simde/simde" ]; then
+      rm -rf "$wt/3rdparty/simde" && ln -s "$ROOT/3rdparty/simde" "$wt/3rdparty/simde"
+    else
+      git -C "$wt" submodule update --init 3rdparty/simde >> "$OUT/${name}_worktree.log" 2>&1
+    fi
+  fi
   ( cd "$wt" && $patch ) || { log "$name: patch step failed"; return 1; }
   pb="$wt/build_q3"
   if cmake -S "$wt" -B "$pb" -DCMAKE_BUILD_TYPE=Release -DCOMPILER="$COMPILER"         -DTARGET_MACHINE="$MACHINE" -DDATADIR="$DATADIR" > "$OUT/${name}_cmake.log" 2>&1      && cmake --build "$pb" -j "$(nproc)" --target test_all > "$OUT/${name}_build.log" 2>&1; then
@@ -95,7 +108,11 @@ build_variant() {
   else
     log "$name: build failed (see $OUT/${name}_cmake.log / ${name}_build.log)"
   fi
-  [ "$KEEP_WORKTREE" = 1 ] || { git -C "$ROOT" worktree remove --force "$wt" && log "$name: removed $wt"; }
+  if [ "$KEEP_WORKTREE" != 1 ]; then
+    # drop the simde symlink first so cleanup never touches the main checkout
+    [ -L "$wt/3rdparty/simde" ] && rm "$wt/3rdparty/simde"
+    git -C "$ROOT" worktree remove --force "$wt" && log "$name: removed $wt"
+  fi
 }
 
 # Newer compilers need the two test-build fixes made after e841b30. They touch
