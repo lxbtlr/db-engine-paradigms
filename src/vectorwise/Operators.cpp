@@ -955,7 +955,9 @@ template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
    uint32_t keySize = totalKeySize;
    uint32_t colSize = std::is_same_v<T, char*> ? col.size : sizeof(T);
    char* __restrict__ src = static_cast<char*>(col.data);
-   pos_t* __restrict__ sel = selVec;
+   // per-column selection: dense key buffers must not go through another
+   // key's selection vector
+   pos_t* __restrict__ sel = col.sel;
    char* __restrict__ dest = packedKeys.data() + col.offset;
 
    if (sel) {

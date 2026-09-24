@@ -632,6 +632,8 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    op.keyColumns.push_back({colSize, op.totalKeySize, col.data});
    auto& keyColumn = op.keyColumns.back();
    col.registerDS(&keyColumn.data);
+   keyColumn.sel = sel;
+   sel.registerDS(&keyColumn.sel);
    op.totalKeySize += colSize;
    if (op.selVec == nullptr) {
       op.selVec = sel;

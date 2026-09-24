@@ -414,6 +414,11 @@ class HashGroup : public UnaryOperator {
       uint32_t size = 0;
       uint32_t offset = 0;
       void* data = nullptr;
+      /// Selection vector for this key column: row i reads data[sel[i]].
+      /// nullptr for keys that are already dense (e.g. join output buffers),
+      /// which are read as data[i]. Keys of one group-by can mix both kinds
+      /// (TPC-H Q3: l_orderkey via sel, o_orderdate/o_shippriority dense).
+      pos_t* sel = nullptr;
    };
 
    uint32_t totalKeySize = 0;
