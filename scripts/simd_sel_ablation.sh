@@ -87,9 +87,15 @@ for comp in $COMPILERS; do
             -DTARGET_MACHINE="$MACHINE" $(config_flags "$cfg") $extra > "$D/cmake.log" 2>&1; then
         fail "$tag cmake (see $D/cmake.log)"; continue
       fi
-      if ! cmake --build "$B" -j "$JOBS" --target test_all run_selbench run_tpch > "$D/build.log" 2>&1; then
-        fail "$tag build (see $D/build.log)"; continue
-      fi
+      # Build each target on its own so one broken target (e.g. test_all)
+      # does not keep the benchmarks from running.
+      : > "$D/build.log"
+      for tgt in run_selbench run_tpch test_all; do
+        echo "### target $tgt" >> "$D/build.log"
+        if ! cmake --build "$B" -j "$JOBS" --target "$tgt" >> "$D/build.log" 2>&1; then
+          fail "$tag build of $tgt (see $D/build.log)"
+        fi
+      done
       grep -E "VW_SIMD_SEL.*not available" "$D/build.log" && fail "$tag: ISA fallback pragma fired (ARCH_FLAGS lacks AVX-512?)"
     fi
 
@@ -108,14 +114,16 @@ for comp in $COMPILERS; do
     fi
 
     # ---------------------------------------------------------- 3. unit tests
-    if ! "$B/test_all" --gtest_filter='SimdSel*:SimdSelRedirect*:GTEQ*' > "$D/unit.log" 2>&1; then
+    if [ ! -x "$B/test_all" ]; then
+      fail "$tag: test_all not built, skipping unit + TPC-H tests"
+    elif ! "$B/test_all" --gtest_filter='SimdSel*:SimdSelRedirect*:GTEQ*' > "$D/unit.log" 2>&1; then
       fail "$tag unit tests (see $D/unit.log)"
     else
       log "$tag unit tests: $(grep -E '^\[  PASSED  \]|SKIPPED' "$D/unit.log" | tr '\n' ' ')"
     fi
 
     # ------------------------------------------------- 4. TPC-H correctness
-    if [ -n "${DATADIR:-}" ] && [ -d "$DATADIR/tpch/sf1" ]; then
+    if [ -x "$B/test_all" ] && [ -n "${DATADIR:-}" ] && [ -d "$DATADIR/tpch/sf1" ]; then
       for s in 0 1; do
         if ! SIMDsel=$s "$B/test_all" --gtest_filter='TPCH.*' > "$D/tpch_test_simdsel$s.log" 2>&1; then
           fail "$tag TPC-H tests SIMDsel=$s (see $D/tpch_test_simdsel$s.log)"
@@ -128,14 +136,14 @@ for comp in $COMPILERS; do
     fi
 
     # ------------------------------------------------------ 5. microbenchmark
-    if [ "$cfg" = base ] || [ "$cfg" = sel_pos16 ]; then
+    if { [ "$cfg" = base ] || [ "$cfg" = sel_pos16 ]; } && [ -x "$B/run_selbench" ]; then
       log "$tag run_selbench"
       taskset -c "$PIN_CPU" "$B/run_selbench" -v "$VEC" > "$D/selbench.csv" 2> "$D/selbench.err" \
         || fail "$tag run_selbench"
     fi
 
     # --------------------------------------------------------- 6. end to end
-    if [ -n "${TPCH_PATH:-}" ]; then
+    if [ -n "${TPCH_PATH:-}" ] && [ -x "$B/run_tpch" ]; then
       for s in 0 1; do
         log "$tag run_tpch SIMDsel=$s"
         if SIMDsel=$s "$B/run_tpch" -p "$TPCH_PATH" -e v -q 1,3,5,6,9,18 -r "$REPS" \
