@@ -26,6 +26,8 @@
 #   SKIP_BUILD  0                      1 = reuse existing build dirs
 set -u -o pipefail
 
+DATADIR="/tank/alexb/swole/"
+TPCH_PATH="/tank/alexb/swole/tpch/sf1"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILERS=${COMPILERS:-"gcc clang"}
 CONFIGS=${CONFIGS:-"base sel sel_char sel_pos16"}

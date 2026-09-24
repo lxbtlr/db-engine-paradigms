@@ -21,7 +21,7 @@ TEST(Mmap, rwCycle) {
 
    unordered_map<int, vector<uint64_t>> m;
    for (size_t i = 0; i < 1000000; i++)
-      m.insert({i, {i}});
+      m.insert({int(i), {i}});
    HashTable<int, uint64_t>::writeBinary("/tmp/mapx", m);
 
    HashTable<int, uint64_t> h("/tmp/mapx");
