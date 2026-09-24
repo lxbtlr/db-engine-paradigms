@@ -32,6 +32,8 @@ BOOL_OPTIONS = [
     ("HARDWARE_BENCHMARKS",   "Enable hardware benchmark targets",                         False),
     ("NO_HUGE_PAGES",         "Disable huge pages for malloc_huge",                        False),
     ("HUGE_2MB_MALLOC_HUGE",  "Use 2MB hugetlb pages for malloc_huge",                    False),
+    ("VW_SIMD_SEL",           "AVX-512 selection kernels (int32/int64/Date)",              False),
+    ("VW_SIMD_SEL_CHAR",      "AVX-512BW Char<N> == constant selection kernel",            False),
 ]
 
 TARGET_ARCH_CHOICES = [

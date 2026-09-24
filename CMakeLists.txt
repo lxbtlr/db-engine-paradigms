@@ -161,6 +161,21 @@ if(VW_FUSE_HASH)
   message(STATUS "Building with VW_FUSE_HASH")
 endif(VW_FUSE_HASH)
 
+# AVX-512 selection kernels (include/vectorwise/SimdSelection.hpp). The
+# existing sel_*/selsel_* primitive names are redirected to the SIMD kernels
+# for supported types; without AVX-512F in ARCH_FLAGS they stay scalar.
+OPTION(VW_SIMD_SEL "AVX-512 selection kernels for int32/int64/Date (sel/selsel, col_val/col_col)" OFF)
+if(VW_SIMD_SEL)
+  ADD_DEFINITIONS(-DVW_SIMD_SEL=1)
+  message(STATUS "Building with VW_SIMD_SEL")
+endif(VW_SIMD_SEL)
+
+OPTION(VW_SIMD_SEL_CHAR "AVX-512BW Char<N> == constant selection kernel" OFF)
+if(VW_SIMD_SEL_CHAR)
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_CHAR=1)
+  message(STATUS "Building with VW_SIMD_SEL_CHAR")
+endif(VW_SIMD_SEL_CHAR)
+
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
 # add_compile_definitions(GROUP_VERSION=${GROUP_VERSION})
@@ -537,6 +552,15 @@ target_include_directories(run_prim PUBLIC
     PRIVATE src)
 target_link_libraries(run_prim vectorwise common ${TBB_LIBRARIES}  ${JEVENTSLIB})
 
+add_executable(run_selbench
+  src/benchmarks/primitives/selbench.cpp
+  )
+target_include_directories(run_selbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+target_link_libraries(run_selbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
+
 # Enable tests
 enable_testing()
 set(CTEST_OUTPUT_ON_FAILURE "1")
@@ -547,6 +571,7 @@ add_executable(test_all
   src/test/tpch.cpp
   src/test/ssb.cpp
   src/test/vectorwise/primitives.cpp
+  src/test/vectorwise/simd_selection.cpp
   src/test/vectorwise/Operators.cpp
   src/test/common/Hashmap.cpp
   src/test/common/Database.cpp

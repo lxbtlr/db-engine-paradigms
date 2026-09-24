@@ -2,6 +2,7 @@
 #include "common/runtime/SIMD.hpp"
 #include "vectorwise/Operations.hpp"
 #include "vectorwise/Primitives.hpp"
+#include "vectorwise/SimdSelection.hpp"
 #include <functional>
 #ifndef SIMDE_ENABLE_NATIVE_ALIASES
 #define SIMDE_ENABLE_NATIVE_ALIASES
@@ -14,6 +15,56 @@ using namespace std;
 
 namespace vectorwise {
 namespace primitives {
+
+#if defined(VW_SIMD_SEL) && !defined(VW_HAVE_SIMD_SEL)
+#pragma message("VW_SIMD_SEL: AVX-512F not available, using scalar selection")
+#endif
+#if defined(VW_SIMD_SEL_CHAR) && !defined(VW_HAVE_SIMD_SEL_CHAR)
+#pragma message("VW_SIMD_SEL_CHAR: AVX-512BW not available, using scalar Char selection")
+#endif
+
+#if defined(VW_SIMD_SEL) || defined(VW_SIMD_SEL_CHAR)
+// VW_SIMD_SEL / VW_SIMD_SEL_CHAR: the existing primitive names point at the
+// AVX-512 kernels from SimdSelection.hpp where the (type, comparator) is
+// supported, and at the scalar templates otherwise. Branching and _bf names
+// share the SIMD kernel, which has no branches.
+#define MK_SEL_COLCOL(type, op)                                                \
+   F3 sel_##op##_##type##_col_##type##_col =                                   \
+       (F3)simd::pick_sel_col_col<type, op>(&sel_col_col<type, op>);
+
+#define MK_SEL_COLVAL(type, op)                                                \
+   F3 sel_##op##_##type##_col_##type##_val =                                   \
+       (F3)simd::pick_sel_col_val<type, op>(&sel_col_val<type, op>);
+
+#define MK_SEL_COLVALORVAL(type, op)                                           \
+   F4 sel_##op##_##type##_col_##type##_val_or_##type##_val =                   \
+       (F4)&sel_col_val_or_val<type, op>;
+
+#define MK_SELSEL_COLCOL(type, op)                                             \
+   F4 selsel_##op##_##type##_col_##type##_col =                                \
+       (F4)simd::pick_selsel_col_col<type, op>(&selsel_col_col<type, op>);
+
+#define MK_SELSEL_COLVAL(type, op)                                             \
+   F4 selsel_##op##_##type##_col_##type##_val =                                \
+       (F4)simd::pick_selsel_col_val<type, op>(&selsel_col_val<type, op>);
+
+#define MK_SEL_COLCOL_BF(type, op)                                             \
+   F3 sel_##op##_##type##_col_##type##_col_bf =                                \
+       (F3)simd::pick_sel_col_col<type, op>(&sel_col_col_bf<type, op>);
+
+#define MK_SEL_COLVAL_BF(type, op)                                             \
+   F3 sel_##op##_##type##_col_##type##_val_bf =                                \
+       (F3)simd::pick_sel_col_val<type, op>(&sel_col_val_bf<type, op>);
+
+#define MK_SELSEL_COLCOL_BF(type, op)                                          \
+   F4 selsel_##op##_##type##_col_##type##_col_bf =                             \
+       (F4)simd::pick_selsel_col_col<type, op>(&selsel_col_col_bf<type, op>);
+
+#define MK_SELSEL_COLVAL_BF(type, op)                                          \
+   F4 selsel_##op##_##type##_col_##type##_val_bf =                             \
+       (F4)simd::pick_selsel_col_val<type, op>(&selsel_col_val_bf<type, op>);
+
+#else // default: scalar templates only
 
 #define MK_SEL_COLCOL(type, op)                                                \
    F3 sel_##op##_##type##_col_##type##_col = (F3)&sel_col_col<type, op>;
@@ -44,6 +95,8 @@ namespace primitives {
 #define MK_SELSEL_COLVAL_BF(type, op)                                          \
    F4 selsel_##op##_##type##_col_##type##_val_bf =                             \
        (F4)&selsel_col_val_bf<type, op>;
+
+#endif // VW_SIMD_SEL || VW_SIMD_SEL_CHAR
 
 // instantiate selection primitives for each type and for each comparator
 EACH_COMP(EACH_TYPE, MK_SEL_COLCOL)
