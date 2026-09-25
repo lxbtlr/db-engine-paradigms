@@ -210,6 +210,14 @@ set(VW_SIMD_SEL_WIDTH "512" CACHE STRING "VW_SIMD_SEL contiguous vector width: 5
 set_property(CACHE VW_SIMD_SEL_WIDTH PROPERTY STRINGS 512 256)
 if(VW_SIMD_SEL_WIDTH STREQUAL "256")
   ADD_DEFINITIONS(-DVW_SIMD_SEL_WIDTH_256=1)
+  # Without this, clang on hosts tuned for 512-bit vectors (e.g. Zen 4
+  # -march=native) merges the two 4-lane int64 ymm compares into one zmm
+  # compare. Functions using zmm intrinsics (the 512 kernels) keep zmm.
+  set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/src/vectorwise/primitives/Selection.cpp
+    ${CMAKE_SOURCE_DIR}/src/benchmarks/primitives/selbench.cpp
+    ${CMAKE_SOURCE_DIR}/src/test/vectorwise/simd_selection.cpp
+    PROPERTIES COMPILE_OPTIONS "-mprefer-vector-width=256")
 elseif(NOT VW_SIMD_SEL_WIDTH STREQUAL "512")
   message(FATAL_ERROR "VW_SIMD_SEL_WIDTH must be 512 or 256 (got '${VW_SIMD_SEL_WIDTH}')")
 endif()
