@@ -226,8 +226,10 @@ int main(int argc, char** argv) {
    // pre-existing int32 SIMD kernels (SIMDhash=1)
    benchDense<int32_t>("hash", {{"hash4_old", hash4_int32_t_col}});
    benchDense<int32_t>("rehash", {{"hash4_old", rehash4_int32_t_col}});
+#ifndef VW_POS_16 // the old *_sel kernels load inSel as 32-bit entries
    benchSel<int32_t>("hash_sel", {{"hash4_old", hash4_sel_int32_t_col}});
    benchSel<int32_t>("rehash_sel", {{"hash4_old", rehash4_sel_int32_t_col}});
+#endif
 #endif
 
    packedKeys<uint16_t>(); // Q1: two Char<1> keys

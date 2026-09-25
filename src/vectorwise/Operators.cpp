@@ -1130,7 +1130,10 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
       pos_t next = entry->group->size;
       entry->group->pos[next] = i;
 #ifdef VW_GROUP_AGGR_SEL
-      entry->group->sel[next] = sel[i];
+      // selVec is only set when some key has a selection vector; group-bys on
+      // dense keys only (e.g. TPC-H Q9) have none, and the row index itself
+      // is the selection. sel is loop-invariant, so this check is hoisted.
+      entry->group->sel[next] = sel ? sel[i] : i;
 #endif
       ++entry->group->size;
 #else

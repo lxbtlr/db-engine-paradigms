@@ -10,7 +10,8 @@ vectorwise::primitives::F2 ExperimentConfig::hash_int32_t_col() {
    return vectorwise::primitives::hash_int32_t_col;
 }
 vectorwise::primitives::F3 ExperimentConfig::hash_sel_int32_t_col() {
-#ifdef __AVX512F__
+// old *_sel kernels load inSel as 32-bit entries: wrong under VW_POS_16
+#if defined(__AVX512F__) && !defined(VW_POS_16)
    if (useSimdHash) return vectorwise::primitives::hash4_sel_int32_t_col;
 #endif
    return vectorwise::primitives::hash_sel_int32_t_col;
@@ -22,7 +23,8 @@ vectorwise::primitives::F2 ExperimentConfig::rehash_int32_t_col() {
    return vectorwise::primitives::rehash_int32_t_col;
 }
 vectorwise::primitives::F3 ExperimentConfig::rehash_sel_int32_t_col() {
-#ifdef __AVX512F__
+// old *_sel kernels load inSel as 32-bit entries: wrong under VW_POS_16
+#if defined(__AVX512F__) && !defined(VW_POS_16)
    if (useSimdHash) return vectorwise::primitives::rehash4_sel_int32_t_col;
 #endif
    return vectorwise::primitives::rehash_sel_int32_t_col;
