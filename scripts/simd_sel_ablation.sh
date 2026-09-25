@@ -26,6 +26,10 @@
 #   SETTLE      5                      run_tpch -s
 #   PIN_CPU     0                      run_selbench is pinned here with taskset
 #   SKIP_BUILD  0                      1 = reuse existing build dirs
+#   EXTRA_CMAKE ""                     -D flags appended to EVERY config (they override
+#                                      the config's own flags), e.g. a tuned baseline:
+#                                      "-DVW_GROUP_AGGR=ON -DVW_GROUP_AGGR_SEL=ON -DVW_POS_16=ON
+#                                       -DVW_USE_CRC32=ON -DHUGE_2MB_MALLOC_HUGE=ON"
 #   TEST_THREADS <first of THREADS>    worker threads for test_all (the TPC-H tests
 #                                      read env "threads"; unset they use every hw thread)
 #   TIMEOUT     1800                   seconds per test / benchmark step (0 = none)
@@ -86,7 +90,10 @@ config_flags() {
   esac
 }
 # on <cfg> <OPTION>: is OPTION=ON in this config?
-on() { config_flags "$1" | grep -q -- "-D$2=ON"; }
+# the last -D for an option wins, so EXTRA_CMAKE overrides the config
+on() {
+  echo "$(config_flags "$1") ${EXTRA_CMAKE:-}" | tr ' ' '\n' | grep -- "^-D$2=" | tail -1 | grep -q "=ON$"
+}
 
 # ---------------------------------------------------------------- machine info
 {
@@ -101,6 +108,7 @@ on() { config_flags "$1" | grep -q -- "-D$2=ON"; }
 grep -q -w avx512f /proc/cpuinfo || log "WARNING: no avx512f on this CPU; SIMD tests will be skipped and the ON builds fall back to scalar"
 
 log "run_tpch -t $THREADS; test_all threads=$TEST_THREADS; timeout ${TIMEOUT}s per step"
+[ -n "${EXTRA_CMAKE:-}" ] && log "EXTRA_CMAKE (all configs): $EXTRA_CMAKE"
 echo "compiler,config,simdsel,query,threads,median_ms" > "$OUT/summary.csv"
 
 for comp in $COMPILERS; do
@@ -117,7 +125,7 @@ for comp in $COMPILERS; do
       [ -n "${DATADIR:-}" ] && extra="-DDATADIR=$DATADIR"
       # shellcheck disable=SC2046
       if ! cmake -S "$ROOT" -B "$B" -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCOMPILER="$comp" \
-            -DTARGET_MACHINE="$MACHINE" $(config_flags "$cfg") $extra > "$D/cmake.log" 2>&1; then
+            -DTARGET_MACHINE="$MACHINE" $(config_flags "$cfg") ${EXTRA_CMAKE:-} $extra > "$D/cmake.log" 2>&1; then
         fail "$tag cmake (see $D/cmake.log)"; continue
       fi
       # Build each target on its own so one broken target (e.g. test_all)
