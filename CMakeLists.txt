@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 2.8 FATAL_ERROR)
+# CMP0126 NEW: set(CACHE) does not remove a normal variable of the same
+# name, so values set before a cache declaration (e.g. by TARGET_MACHINE
+# presets) are not silently replaced by the cache default.
+if(POLICY CMP0126)
+  cmake_policy(SET CMP0126 NEW)
+endif()
 
 if(UNIX AND NOT APPLE)
   set(LINUX true)
@@ -62,40 +68,40 @@ if(TARGET_MACHINE STREQUAL "dubliner")
   set(SOCKETS_COUNT 4)
   set(CORES_PER_SOCKET 22)
   set(SMT_PER_CORE 2)
-  set(TARGET_ARCH "native")
+  set(PRESET_TARGET_ARCH "native")
 elseif(TARGET_MACHINE STREQUAL "roquefort")
   # 1-socket AMD EPYC 7443P (Zen3), 24 cores, 2-way SMT, 1 NUMA node
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 24)
   set(SMT_PER_CORE 2)
-  set(TARGET_ARCH "native")
+  set(PRESET_TARGET_ARCH "native")
 elseif(TARGET_MACHINE STREQUAL "manchego")
   # 2-socket Intel Xeon Silver 4509Y (Sapphire Rapids), 8 cores/socket,
   # 2-way SMT, interleaved CPU numbering (even=node0, odd=node1)
   set(SOCKETS_COUNT 2)
   set(CORES_PER_SOCKET 8)
   set(SMT_PER_CORE 2)
-  set(TARGET_ARCH "sapphirerapids")
+  set(PRESET_TARGET_ARCH "sapphirerapids")
 elseif(TARGET_MACHINE STREQUAL "burrata")
   # 1-socket ARM Neoverse-N1, 128 cores, no SMT, 1 NUMA node
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 128)
   set(SMT_PER_CORE 1)
-  set(TARGET_ARCH "neoverse-n1")
+  set(PRESET_TARGET_ARCH "neoverse-n1")
 elseif(TARGET_MACHINE STREQUAL "kafir")
   # 8-node Skylake-SP, 24 cores/node, 2-way SMT, contiguous CPU numbering
   set(SOCKETS_COUNT 8)
   set(CORES_PER_SOCKET 24)
   set(SMT_PER_CORE 2)
   set(CPU_LAYOUT_CONTIGUOUS ON)
-  set(TARGET_ARCH "skylake-x")
+  set(PRESET_TARGET_ARCH "skylake-x")
 elseif(TARGET_MACHINE STREQUAL "rpi5")
   # Raspberry Pi 5: Broadcom BCM2712 (4x Cortex-A76), ARMv8.2-A, no SMT, 1 NUMA node
   # -march=native is broken on RPi (missing /proc/cpuinfo fields), so we specify explicitly
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 4)
   set(SMT_PER_CORE 1)
-  set(TARGET_ARCH "cortex-a76")
+  set(PRESET_TARGET_ARCH "cortex-a76")
 elseif(NOT TARGET_MACHINE STREQUAL "custom")
   message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner, roquefort, manchego, burrata, kafir, rpi5")
 endif()
@@ -260,10 +266,19 @@ endif(VW_SIMD_SEL_CHAR)
 
 # Compiler flags for the different targets
 # TARGET_ARCH selects a machine-specific flag profile.
-# "native" (default) auto-detects via -march=native / -mcpu=native.
-# Set to a known profile for cross-compilation or reproducible builds.
-set(TARGET_ARCH "native" CACHE STRING
-    "Target architecture profile: native, skylake-x, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, cortex-a76, armv8.2-generic, armv9-generic")
+# Empty (default) = the TARGET_MACHINE preset's profile, or "native" for
+# custom. "native" auto-detects via -march=native / -mcpu=native.
+# Set to a known profile for cross-compilation or reproducible builds; an
+# explicit -DTARGET_ARCH overrides the preset.
+set(TARGET_ARCH "" CACHE STRING
+    "Target architecture profile (empty = TARGET_MACHINE preset): native, skylake-x, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, cortex-a76, armv8.2-generic, armv9-generic")
+if(TARGET_ARCH STREQUAL "")
+  if(DEFINED PRESET_TARGET_ARCH)
+    set(TARGET_ARCH "${PRESET_TARGET_ARCH}")
+  else()
+    set(TARGET_ARCH "native")
+  endif()
+endif()
 
 if(TARGET_ARCH STREQUAL "native")
   # Auto-detect: -mcpu=native on ARM, -march=native on x86
