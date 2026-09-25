@@ -33,9 +33,11 @@ BOOL_OPTIONS = [
     ("NO_HUGE_PAGES",         "Disable huge pages for malloc_huge",                        False),
     ("HUGE_2MB_MALLOC_HUGE",  "Use 2MB hugetlb pages for malloc_huge",                    False),
     ("VW_SIMD_SEL",           "AVX-512 selection kernels (int32/int64/Date)",              False),
-    ("VW_SIMD_SEL_HWGATHER",  "VW_SIMD_SEL: vpgather for selsel instead of scalar loads",  False),
     ("VW_SIMD_SEL_CHAR",      "AVX-512BW Char<N> == constant selection kernel",            False),
 ]
+
+# VW_SIMD_SEL gathered-input (selsel) kernels
+VW_SIMD_SEL_GATHER_CHOICES = ["scalar", "scalarload", "hwgather"]
 
 TARGET_ARCH_CHOICES = [
     "native",
@@ -122,6 +124,7 @@ def configure():
     opts["DATADIR"] = ""
     opts["BUILD_DIR"] = "build"
     opts["JOBS"] = str(os.cpu_count() or 4)
+    opts["VW_SIMD_SEL_GATHER"] = "scalar"
 
     # Apply preset
     if preset is not None:
@@ -217,6 +220,15 @@ def configure():
         for name, _, _ in BOOL_OPTIONS[3:]:
             opts[name] = name in feature_opts
 
+        if opts.get("VW_SIMD_SEL"):
+            opts["VW_SIMD_SEL_GATHER"] = questionary.select(
+                "VW_SIMD_SEL gathered-input (selsel) kernels:",
+                choices=VW_SIMD_SEL_GATHER_CHOICES,
+                default=opts["VW_SIMD_SEL_GATHER"],
+            ).ask()
+            if opts["VW_SIMD_SEL_GATHER"] is None:
+                sys.exit(1)
+
         # Data directory
         datadir = questionary.text(
             "Data directory (DATADIR, leave empty for default):",
@@ -268,6 +280,7 @@ def build_cmake_args(opts):
     for name, _, _ in BOOL_OPTIONS:
         val = "ON" if opts.get(name, False) else "OFF"
         args.append(f"-D{name}={val}")
+    args.append(f"-DVW_SIMD_SEL_GATHER={opts.get('VW_SIMD_SEL_GATHER', 'scalar')}")
     return args
 
 # ── Build execution ───────────────────────────────────────────────────────

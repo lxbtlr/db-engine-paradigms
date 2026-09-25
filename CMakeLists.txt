@@ -170,11 +170,23 @@ if(VW_SIMD_SEL)
   message(STATUS "Building with VW_SIMD_SEL")
 endif(VW_SIMD_SEL)
 
-OPTION(VW_SIMD_SEL_HWGATHER "VW_SIMD_SEL: use vpgather for selsel (gathered input) instead of scalar loads + compress" OFF)
-if(VW_SIMD_SEL_HWGATHER)
-  ADD_DEFINITIONS(-DVW_SIMD_SEL_HWGATHER=1)
-  message(STATUS "Building with VW_SIMD_SEL_HWGATHER")
-endif(VW_SIMD_SEL_HWGATHER)
+# Gathered-input selection (selsel_*) under VW_SIMD_SEL:
+#   scalar     : keep the scalar _bf templates (default; on GDS-mitigated
+#                Cascade Lake neither SIMD variant beats them)
+#   scalarload : scalar loads through inSel -> mask -> compress
+#   hwgather   : vpgatherdd/vpgatherdq -> compare -> compress
+set(VW_SIMD_SEL_GATHER "scalar" CACHE STRING "VW_SIMD_SEL gathered-input kernels: scalar, scalarload, hwgather")
+set_property(CACHE VW_SIMD_SEL_GATHER PROPERTY STRINGS scalar scalarload hwgather)
+if(VW_SIMD_SEL_GATHER STREQUAL "scalarload")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_GATHER_SCALARLOAD=1)
+elseif(VW_SIMD_SEL_GATHER STREQUAL "hwgather")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_GATHER_HWGATHER=1)
+elseif(NOT VW_SIMD_SEL_GATHER STREQUAL "scalar")
+  message(FATAL_ERROR "VW_SIMD_SEL_GATHER must be scalar, scalarload or hwgather (got '${VW_SIMD_SEL_GATHER}')")
+endif()
+if(VW_SIMD_SEL)
+  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER}")
+endif()
 
 OPTION(VW_SIMD_SEL_CHAR "AVX-512BW Char<N> == constant selection kernel" OFF)
 if(VW_SIMD_SEL_CHAR)

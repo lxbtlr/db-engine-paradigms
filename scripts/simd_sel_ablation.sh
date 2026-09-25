@@ -12,7 +12,7 @@
 #
 # Environment (all optional):
 #   COMPILERS   "gcc clang"            compiler families (CMake COMPILER=...)
-#   CONFIGS     "base sel sel_hwgather sel_char sel_pos16"
+#   CONFIGS     "base sel sel_scalarload sel_hwgather sel_char sel_pos16"
 #   MACHINE     dubliner               CMake TARGET_MACHINE
 #   BUILD_TYPE  Release
 #   JOBS        $(nproc)
@@ -30,7 +30,7 @@ DATADIR="/tank/alexb/swole/"
 TPCH_PATH="/tank/alexb/swole/tpch/sf1"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILERS=${COMPILERS:-"gcc clang"}
-CONFIGS=${CONFIGS:-"base sel sel_hwgather sel_char sel_pos16"}
+CONFIGS=${CONFIGS:-"base sel sel_scalarload sel_hwgather sel_char sel_pos16"}
 MACHINE=${MACHINE:-dubliner}
 BUILD_TYPE=${BUILD_TYPE:-Release}
 JOBS=${JOBS:-$(nproc)}
@@ -50,12 +50,13 @@ fail() { log "FAIL: $*"; FAILS=$((FAILS + 1)); }
 config_flags() {
   case "$1" in
     # every option is set explicitly: CMake caches them across reconfigures
-    base)         echo "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_HWGATHER=OFF -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
-    sel)          echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_HWGATHER=OFF -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
-    sel_hwgather) echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_HWGATHER=ON  -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
-    sel_char)     echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_HWGATHER=OFF -DVW_SIMD_SEL_CHAR=ON  -DVW_POS_16=OFF" ;;
-    sel_pos16)    echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_HWGATHER=OFF -DVW_SIMD_SEL_CHAR=ON  -DVW_POS_16=ON" ;;
-    char_only)    echo "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_HWGATHER=OFF -DVW_SIMD_SEL_CHAR=ON  -DVW_POS_16=OFF" ;;
+    base)         echo "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
+    sel)          echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
+    sel_scalarload) echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=scalarload -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
+    sel_hwgather) echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=hwgather   -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
+    sel_char)     echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=ON  -DVW_POS_16=OFF" ;;
+    sel_pos16)    echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=ON  -DVW_POS_16=ON" ;;
+    char_only)    echo "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=ON  -DVW_POS_16=OFF" ;;
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
@@ -111,7 +112,7 @@ for comp in $COMPILERS; do
       echo "simd::sel_col_val symbols: $nsel, simd::sel_char_eq_col_val symbols: $nchar" | tee "$D/symbols.txt"
       case "$cfg" in
         base)      [ "$nsel" -eq 0 ] && [ "$nchar" -eq 0 ] || fail "$tag: SIMD symbols present in base build" ;;
-        sel|sel_hwgather) [ "$nsel" -gt 0 ] && [ "$nchar" -eq 0 ] || fail "$tag: expected sel kernels only" ;;
+        sel|sel_scalarload|sel_hwgather) [ "$nsel" -gt 0 ] && [ "$nchar" -eq 0 ] || fail "$tag: expected sel kernels only" ;;
         char_only) [ "$nsel" -eq 0 ] && [ "$nchar" -gt 0 ] || fail "$tag: expected char kernels only" ;;
         *)         [ "$nsel" -gt 0 ] && [ "$nchar" -gt 0 ] || fail "$tag: expected sel + char kernels" ;;
       esac

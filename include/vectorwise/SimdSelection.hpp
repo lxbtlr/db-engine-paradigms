@@ -240,15 +240,18 @@ pos_t sel_col_col(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
 
 //--- gather -> compressed ----------------------------------------------------
 //
-// Two implementations of the gathered input:
-//   *_scalarload (default): 16 scalar loads through inSel build a 16-bit
-//       match mask, followed by one register compress of the inSel lanes. This
-//       removes the found-dependent store chain of the scalar _bf loop and
-//       avoids vpgather*, which is slow under the Gather Data Sampling (GDS /
-//       Downfall) microcode mitigation on Skylake..Ice Lake parts.
-//   *_hwgather (VW_SIMD_SEL_HWGATHER): vpgatherdd / vpgatherdq, the better
-//       choice on CPUs without that penalty.
-// selsel_col_val / selsel_col_col below pick one at compile time.
+// Two SIMD implementations of the gathered input, chosen with the CMake
+// option VW_SIMD_SEL_GATHER (scalar | scalarload | hwgather):
+//   *_scalarload: 16 scalar loads through inSel build a 16-bit match mask,
+//       followed by one register compress of the inSel lanes. Avoids vpgather*,
+//       which is slow under the Gather Data Sampling (GDS / Downfall)
+//       microcode mitigation on Skylake..Ice Lake parts.
+//   *_hwgather: vpgatherdd / vpgatherdq, for CPUs without that penalty.
+// With the default (scalar) the selsel primitive names keep the scalar _bf
+// templates: on dubliner (Cascade Lake, GDS mitigated) scalarload only ties
+// gcc's _bf and loses ~15% to clang's; hwgather loses 1.2-3.5x.
+// selsel_col_val / selsel_col_col below pick hwgather when requested, else
+// scalarload (tests and run_selbench call both variants directly).
 
 // Keep the per-group scalar loop scalar: vectorizing it would turn it back
 // into a hardware gather.
@@ -394,7 +397,7 @@ pos_t selsel_col_col_hwgather(pos_t n, pos_t* RES inSel, pos_t* RES result,
 template <typename T, template <typename> class Op>
 pos_t selsel_col_val(pos_t n, pos_t* RES inSel, pos_t* RES result,
                      T* RES param1, T* RES param2) {
-#ifdef VW_SIMD_SEL_HWGATHER
+#ifdef VW_SIMD_SEL_GATHER_HWGATHER
    return selsel_col_val_hwgather<T, Op>(n, inSel, result, param1, param2);
 #else
    return selsel_col_val_scalarload<T, Op>(n, inSel, result, param1, param2);
@@ -404,7 +407,7 @@ pos_t selsel_col_val(pos_t n, pos_t* RES inSel, pos_t* RES result,
 template <typename T, template <typename> class Op>
 pos_t selsel_col_col(pos_t n, pos_t* RES inSel, pos_t* RES result,
                      T* RES param1, T* RES param2) {
-#ifdef VW_SIMD_SEL_HWGATHER
+#ifdef VW_SIMD_SEL_GATHER_HWGATHER
    return selsel_col_col_hwgather<T, Op>(n, inSel, result, param1, param2);
 #else
    return selsel_col_col_scalarload<T, Op>(n, inSel, result, param1, param2);
@@ -491,6 +494,16 @@ template <typename T, template <typename> class Op> constexpr bool use_simd() {
 #endif
 }
 
+/// Gathered input (selsel_*) additionally needs VW_SIMD_SEL_GATHER != scalar.
+template <typename T, template <typename> class Op>
+constexpr bool use_simd_gather() {
+#if defined(VW_SIMD_SEL_GATHER_SCALARLOAD) || defined(VW_SIMD_SEL_GATHER_HWGATHER)
+   return use_simd<T, Op>();
+#else
+   return false;
+#endif
+}
+
 template <typename T, template <typename> class Op> constexpr bool use_char() {
 #if defined(VW_SIMD_SEL_CHAR) && defined(VW_HAVE_SIMD_SEL_CHAR)
    return char_kernel_ok<T, Op>;
@@ -522,7 +535,7 @@ constexpr Fn pick_sel_col_col(Fn scalar) {
 template <typename T, template <typename> class Op, typename Fn>
 constexpr Fn pick_selsel_col_val(Fn scalar) {
 #if defined(VW_HAVE_SIMD_SEL)
-   if constexpr (use_simd<T, Op>()) return &selsel_col_val<T, Op>;
+   if constexpr (use_simd_gather<T, Op>()) return &selsel_col_val<T, Op>;
 #endif
    return scalar;
 }
@@ -530,7 +543,7 @@ constexpr Fn pick_selsel_col_val(Fn scalar) {
 template <typename T, template <typename> class Op, typename Fn>
 constexpr Fn pick_selsel_col_col(Fn scalar) {
 #if defined(VW_HAVE_SIMD_SEL)
-   if constexpr (use_simd<T, Op>()) return &selsel_col_col<T, Op>;
+   if constexpr (use_simd_gather<T, Op>()) return &selsel_col_col<T, Op>;
 #endif
    return scalar;
 }
