@@ -7,6 +7,18 @@
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/SimdSelection.hpp"
 #include <gtest/gtest.h>
+#include <iostream>
+
+// GTEST_SKIP needs googletest >= 1.10; the bundled revision is older.
+#ifdef GTEST_SKIP
+#define VW_TEST_SKIP(msg) GTEST_SKIP() << msg
+#else
+#define VW_TEST_SKIP(msg)                                                      \
+   do {                                                                        \
+      std::cout << "[  SKIPPED ] " << msg << std::endl;                        \
+      return;                                                                  \
+   } while (0)
+#endif
 #include <algorithm>
 #include <climits>
 #include <cstring>
@@ -250,7 +262,7 @@ TEST(SimdSel, Int32) { checkAllOps<int32_t>(); }
 TEST(SimdSel, Int64) { checkAllOps<int64_t>(); }
 TEST(SimdSel, Date) { checkAllOps<Date>(); }
 #else
-TEST(SimdSel, Skipped) { GTEST_SKIP() << "no AVX-512F in this build"; }
+TEST(SimdSel, Skipped) { VW_TEST_SKIP("no AVX-512F in this build"); }
 #endif
 
 #ifdef VW_HAVE_SIMD_SEL_CHAR
@@ -263,7 +275,7 @@ TEST(SimdSel, CharEq) {
    checkCharEq<63>();
 }
 #else
-TEST(SimdSel, CharEqSkipped) { GTEST_SKIP() << "no AVX-512BW in this build"; }
+TEST(SimdSel, CharEqSkipped) { VW_TEST_SKIP("no AVX-512BW in this build"); }
 #endif
 
 // The CMake options must redirect the public primitive names (the ones query

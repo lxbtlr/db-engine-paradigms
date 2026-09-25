@@ -80,10 +80,19 @@ pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES i
 {
   size_t rest = n % 8;
   Vec8u seeds(seed);
-  asm(
+  // The loop advances the selection and result pointers, so they are in/out
+  // operands on copies (modifying input-only operands is undefined behaviour
+  // and broke the tail below). End = result + len, and the do-while loop is
+  // skipped when there is no full group of 8: the old end of
+  // result + 64 + len ran one extra group past n.
+  pos_t* selPos = inSel;
+  hash_t* resPos = result;
+  const size_t fullBytes = (n - rest) * 8;
+  if (fullBytes)
+  asm volatile(
     "movabsq	$29875498475984, %%r8;"
     "vpbroadcastq	%%r8, %%zmm6;"
-    "leaq	64(%2,%3), %%r11;"
+    "leaq	(%1,%3), %%r11;"
     "movl	$-1, %%r8d;"
     "kmovb	%%r8d, %%k1;"
     "movabsq	$-4132994306676758123, %%r8;"
@@ -96,12 +105,12 @@ pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES i
     "vpmullq	%%zmm2, %%zmm5, %%zmm5;"
     "vpbroadcastq	%%r8, %%zmm4;"
     "vpxorq	%%zmm6, %%zmm4, %%zmm4;"
-    ".Hash4SelInner:;"
+    ".Hash4SelInner%=:;"
     "vmovdqu32	(%0), %%ymm1;"
     "kmovb	%%k1, %%k2;"
-    "addq	$64, %2;"
+    "addq	$64, %1;"
     "addq	$32, %0;"
-    "vpgatherdd	(%1,%%ymm1,4), %%ymm0%{%%k2%};"
+    "vpgatherdd	(%2,%%ymm1,4), %%ymm0%{%%k2%};"
     "vpmovzxdq	%%ymm0, %%zmm0;"
     "vpmullq	%%zmm2, %%zmm0, %%zmm1;"
     "vpsrlvq	%%zmm3, %%zmm1, %%zmm7;"
@@ -115,15 +124,14 @@ pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES i
     "vpmullq	%%zmm2, %%zmm14, %%zmm15;"
     "vpsrlvq	%%zmm3, %%zmm15, %%zmm16;"
     "vpxorq	%%zmm15, %%zmm16, %%zmm17;"
-    "vmovdqu64	%%zmm17, -64(%2);"
-    "cmpq	%%r11, %2;"
-    "jne	.Hash4SelInner;"
-    ::
-     "r"(inSel), // pointer to selection vector
-     "r"(input), // pointer to data for gathering
-     "r"(result), // pointer to output vector
-     "r"((n-rest)*8)
-    : "k1", "k2", "r11", "r10", "r8","ymm1",
+    "vmovdqu64	%%zmm17, -64(%1);"
+    "cmpq	%%r11, %1;"
+    "jne	.Hash4SelInner%=;"
+    : "+r"(selPos), // pointer to selection vector (advanced)
+      "+r"(resPos)  // pointer to output vector (advanced)
+    : "r"(input),   // pointer to data for gathering
+      "r"(fullBytes)
+    : "memory", "cc", "k1", "k2", "r11", "r10", "r8","ymm1",
       "zmm0", "zmm1","zmm2","zmm3","zmm4", "zmm5", "zmm6",
       "zmm7", "zmm8","zmm9","zmm10","zmm11", "zmm12", "zmm13",
       "zmm14", "zmm15","zmm16","zmm17");

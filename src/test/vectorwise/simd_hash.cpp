@@ -6,6 +6,18 @@
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/SimdHash.hpp"
 #include <gtest/gtest.h>
+#include <iostream>
+
+// GTEST_SKIP needs googletest >= 1.10; the bundled revision is older.
+#ifdef GTEST_SKIP
+#define VW_TEST_SKIP(msg) GTEST_SKIP() << msg
+#else
+#define VW_TEST_SKIP(msg)                                                      \
+   do {                                                                        \
+      std::cout << "[  SKIPPED ] " << msg << std::endl;                        \
+      return;                                                                  \
+   } while (0)
+#endif
 #include <cstdint>
 #include <limits>
 #include <random>
@@ -128,7 +140,7 @@ TEST(SimdHash, PackedKeys) {
    checkPackedKeys<uint64_t>("u64");
 }
 #else
-TEST(SimdHash, Skipped) { GTEST_SKIP() << "no AVX-512F/DQ or 32-bit hashes"; }
+TEST(SimdHash, Skipped) { VW_TEST_SKIP("no AVX-512F/DQ or 32-bit hashes"); }
 #endif
 
 // The public primitive names must follow VW_SIMD_HASH.
@@ -147,6 +159,6 @@ TEST(SimdHashRedirect, Names) {
    EXPECT_EQ((void*)hash_int32_t_col,
              (void*)(&primitives::hash<int32_t, MurMurHash>));
 #else
-   GTEST_SKIP() << "non-MurMur default hash";
+   VW_TEST_SKIP("non-MurMur default hash");
 #endif
 }
