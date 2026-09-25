@@ -26,6 +26,9 @@
 #   SETTLE      5                      run_tpch -s
 #   PIN_CPU     0                      run_selbench is pinned here with taskset
 #   SKIP_BUILD  0                      1 = reuse existing build dirs
+#   TEST_THREADS <first of THREADS>    worker threads for test_all (the TPC-H tests
+#                                      read env "threads"; unset they use every hw thread)
+#   TIMEOUT     1800                   seconds per test / benchmark step (0 = none)
 set -u -o pipefail
 
 DATADIR="/tank/alexb/swole/"
@@ -42,6 +45,10 @@ VEC=${VEC:-1024}
 SETTLE=${SETTLE:-5}
 PIN_CPU=${PIN_CPU:-0}
 SKIP_BUILD=${SKIP_BUILD:-0}
+TEST_THREADS=${TEST_THREADS:-${THREADS%%,*}}
+TIMEOUT=${TIMEOUT:-1800}
+# run a step with a time limit; a timeout counts as a failure (exit 124)
+tlimit() { if [ "$TIMEOUT" -gt 0 ]; then timeout --kill-after=30 "$TIMEOUT" "$@"; else "$@"; fi; }
 OUT="$ROOT/results/simd_sel_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 FAILS=0
@@ -89,6 +96,7 @@ on() { config_flags "$1" | grep -q -- "-D$2=ON"; }
 } | tee "$OUT/machine.txt"
 grep -q -w avx512f /proc/cpuinfo || log "WARNING: no avx512f on this CPU; SIMD tests will be skipped and the ON builds fall back to scalar"
 
+log "run_tpch -t $THREADS; test_all threads=$TEST_THREADS; timeout ${TIMEOUT}s per step"
 echo "compiler,config,simdsel,query,threads,median_ms" > "$OUT/summary.csv"
 
 for comp in $COMPILERS; do
@@ -148,7 +156,7 @@ for comp in $COMPILERS; do
     # ---------------------------------------------------------- 3. unit tests
     if [ ! -x "$B/test_all" ]; then
       fail "$tag: test_all not built, skipping unit + TPC-H tests"
-    elif ! "$B/test_all" --gtest_filter='SimdSel*:SimdSelRedirect*:SimdHash*:GTEQ*' > "$D/unit.log" 2>&1; then
+    elif ! threads=$TEST_THREADS tlimit "$B/test_all" --gtest_filter='SimdSel*:SimdSelRedirect*:SimdHash*:GTEQ*' > "$D/unit.log" 2>&1; then
       fail "$tag unit tests (see $D/unit.log)"
     else
       log "$tag unit tests: $(grep -E '^\[  PASSED  \]|SKIPPED' "$D/unit.log" | tr '\n' ' ')"
@@ -157,7 +165,7 @@ for comp in $COMPILERS; do
     # ------------------------------------------------- 4. TPC-H correctness
     if [ -x "$B/test_all" ] && [ -n "${DATADIR:-}" ] && [ -d "$DATADIR/tpch/sf1" ]; then
       for s in 0 1; do
-        if ! SIMDsel=$s "$B/test_all" --gtest_filter='TPCH.*' > "$D/tpch_test_simdsel$s.log" 2>&1; then
+        if ! threads=$TEST_THREADS SIMDsel=$s tlimit "$B/test_all" --gtest_filter='TPCH.*' > "$D/tpch_test_simdsel$s.log" 2>&1; then
           fail "$tag TPC-H tests SIMDsel=$s (see $D/tpch_test_simdsel$s.log)"
         else
           log "$tag TPC-H tests SIMDsel=$s passed"
@@ -170,13 +178,13 @@ for comp in $COMPILERS; do
     # ------------------------------------------------------ 5. microbenchmark
     if { [ "$cfg" = base ] || [ "$cfg" = sel_pos16 ]; } && [ -x "$B/run_selbench" ]; then
       log "$tag run_selbench"
-      taskset -c "$PIN_CPU" "$B/run_selbench" -v "$VEC" > "$D/selbench.csv" 2> "$D/selbench.err" \
+      tlimit taskset -c "$PIN_CPU" "$B/run_selbench" -v "$VEC" > "$D/selbench.csv" 2> "$D/selbench.err" \
         || fail "$tag run_selbench"
     fi
 
     if [ "$cfg" = base ] && [ -x "$B/run_hashbench" ]; then
       log "$tag run_hashbench"
-      taskset -c "$PIN_CPU" "$B/run_hashbench" -v "$VEC" > "$D/hashbench.csv" 2> "$D/hashbench.err" \
+      tlimit taskset -c "$PIN_CPU" "$B/run_hashbench" -v "$VEC" > "$D/hashbench.csv" 2> "$D/hashbench.err" \
         || fail "$tag run_hashbench"
     fi
 
@@ -184,7 +192,7 @@ for comp in $COMPILERS; do
     if [ -n "${TPCH_PATH:-}" ] && [ -x "$B/run_tpch" ]; then
       for s in 0 1; do
         log "$tag run_tpch SIMDsel=$s"
-        if SIMDsel=$s "$B/run_tpch" -p "$TPCH_PATH" -e v -q 1,3,5,6,9,18 -r "$REPS" \
+        if SIMDsel=$s tlimit "$B/run_tpch" -p "$TPCH_PATH" -e v -q 1,3,5,6,9,18 -r "$REPS" \
               -t "$THREADS" -v "$VEC" -s "$SETTLE" > "$D/tpch_simdsel$s.csv" 2> "$D/tpch_simdsel$s.err"; then
           # timeAndProfile rows: "<setw(20) label>,<padded median>,..." where the
           # label is "q3 v  t8"; the thread count is parsed from the label.
