@@ -219,12 +219,18 @@ void selColVal(F3 old = nullptr) {
    benchF3<T, Op>("sel_col_val", false,
                   {{"scalar_bf", (F3)&sel_col_val_bf<T, Op>},
                    {"avx512_old", old},
-                   {"simd", SIMD3((simd::sel_col_val<T, Op>))}});
+                   {"simd_reg_u1", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Reg, 1>))},
+                   {"simd_reg_u2", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Reg, 2>))},
+                   {"simd_mem_u1", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Mem, 1>))},
+                   {"simd_mem_u2", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Mem, 2>))}});
 }
 template <typename T, template <typename> class Op> void selColCol() {
    benchF3<T, Op>("sel_col_col", true,
                   {{"scalar_bf", (F3)&sel_col_col_bf<T, Op>},
-                   {"simd", SIMD3((simd::sel_col_col<T, Op>))}});
+                   {"simd_reg_u1", SIMD3((simd::sel_col_col_v<T, Op, simd::Emit::Reg, 1>))},
+                   {"simd_reg_u2", SIMD3((simd::sel_col_col_v<T, Op, simd::Emit::Reg, 2>))},
+                   {"simd_mem_u1", SIMD3((simd::sel_col_col_v<T, Op, simd::Emit::Mem, 1>))},
+                   {"simd_mem_u2", SIMD3((simd::sel_col_col_v<T, Op, simd::Emit::Mem, 2>))}});
 }
 template <typename T, template <typename> class Op>
 void selselColVal(F4 old = nullptr) {

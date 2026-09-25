@@ -111,10 +111,21 @@ template <typename T, template <typename> class Op> void checkColVal() {
    for (size_t n : kSizes) {
       Column<T> col(n, rng);
       for (T c : constants(col.data, n)) {
-         std::vector<pos_t> ref(n + kSlack, kCanary), got(n + kSlack, kCanary);
+         std::vector<pos_t> ref(n + kSlack, kCanary);
          pos_t fr = sel_col_val_bf<T, Op>(n, ref.data(), col.data, &c);
-         pos_t fs = simd::sel_col_val<T, Op>(n, got.data(), col.data, &c);
-         expectSame(fr, ref, fs, got, ctx("sel_col_val", n, num(c)));
+         // every compress form x unroll, whichever the CMake options select
+         const char* names[] = {"reg_u1", "reg_u2", "mem_u1", "mem_u2"};
+         unsigned v = 0;
+         for (auto kernel :
+              {&simd::sel_col_val_v<T, Op, simd::Emit::Reg, 1>,
+               &simd::sel_col_val_v<T, Op, simd::Emit::Reg, 2>,
+               &simd::sel_col_val_v<T, Op, simd::Emit::Mem, 1>,
+               &simd::sel_col_val_v<T, Op, simd::Emit::Mem, 2>}) {
+            std::vector<pos_t> got(n + kSlack, kCanary);
+            pos_t fs = kernel(n, got.data(), col.data, &c);
+            expectSame(fr, ref, fs, got,
+                       ctx(names[v++], n, num(c)) + " sel_col_val");
+         }
       }
    }
 }
@@ -125,10 +136,18 @@ template <typename T, template <typename> class Op> void checkColCol() {
       Column<T> a(n, rng), b(n, rng);
       // make ~1/4 of the pairs equal to exercise the <=/>=/== boundaries
       for (size_t i = 0; i < n; i += 4) b.data[i] = a.data[i];
-      std::vector<pos_t> ref(n + kSlack, kCanary), got(n + kSlack, kCanary);
+      std::vector<pos_t> ref(n + kSlack, kCanary);
       pos_t fr = sel_col_col_bf<T, Op>(n, ref.data(), a.data, b.data);
-      pos_t fs = simd::sel_col_col<T, Op>(n, got.data(), a.data, b.data);
-      expectSame(fr, ref, fs, got, ctx("sel_col_col", n, 0));
+      const char* names[] = {"reg_u1", "reg_u2", "mem_u1", "mem_u2"};
+      unsigned v = 0;
+      for (auto kernel : {&simd::sel_col_col_v<T, Op, simd::Emit::Reg, 1>,
+                          &simd::sel_col_col_v<T, Op, simd::Emit::Reg, 2>,
+                          &simd::sel_col_col_v<T, Op, simd::Emit::Mem, 1>,
+                          &simd::sel_col_col_v<T, Op, simd::Emit::Mem, 2>}) {
+         std::vector<pos_t> got(n + kSlack, kCanary);
+         pos_t fs = kernel(n, got.data(), a.data, b.data);
+         expectSame(fr, ref, fs, got, ctx(names[v++], n, 0) + " sel_col_col");
+      }
    }
 }
 

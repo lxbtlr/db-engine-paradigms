@@ -184,8 +184,27 @@ elseif(VW_SIMD_SEL_GATHER STREQUAL "hwgather")
 elseif(NOT VW_SIMD_SEL_GATHER STREQUAL "scalar")
   message(FATAL_ERROR "VW_SIMD_SEL_GATHER must be scalar, scalarload or hwgather (got '${VW_SIMD_SEL_GATHER}')")
 endif()
+# Contiguous selection kernels under VW_SIMD_SEL:
+#   VW_SIMD_SEL_COMPRESS reg : register vpcompressd + masked store (default;
+#                              safe on Zen 4 where the memory form is slow)
+#                        mem : memory-form vpcompressd, like the old kernels
+#   VW_SIMD_SEL_UNROLL   1|2 : vectors of 16 per loop iteration
+set(VW_SIMD_SEL_COMPRESS "reg" CACHE STRING "VW_SIMD_SEL compress form: reg, mem")
+set_property(CACHE VW_SIMD_SEL_COMPRESS PROPERTY STRINGS reg mem)
+if(VW_SIMD_SEL_COMPRESS STREQUAL "mem")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_COMPRESS_MEM=1)
+elseif(NOT VW_SIMD_SEL_COMPRESS STREQUAL "reg")
+  message(FATAL_ERROR "VW_SIMD_SEL_COMPRESS must be reg or mem (got '${VW_SIMD_SEL_COMPRESS}')")
+endif()
+set(VW_SIMD_SEL_UNROLL "1" CACHE STRING "VW_SIMD_SEL contiguous unroll: 1, 2")
+set_property(CACHE VW_SIMD_SEL_UNROLL PROPERTY STRINGS 1 2)
+if(VW_SIMD_SEL_UNROLL STREQUAL "2")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_UNROLL2=1)
+elseif(NOT VW_SIMD_SEL_UNROLL STREQUAL "1")
+  message(FATAL_ERROR "VW_SIMD_SEL_UNROLL must be 1 or 2 (got '${VW_SIMD_SEL_UNROLL}')")
+endif()
 if(VW_SIMD_SEL)
-  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER}")
+  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER} COMPRESS=${VW_SIMD_SEL_COMPRESS} UNROLL=${VW_SIMD_SEL_UNROLL}")
 endif()
 
 # Software prefetch in the hash join probe loops (joinAllParallel /

@@ -40,6 +40,9 @@ BOOL_OPTIONS = [
 
 # VW_SIMD_SEL gathered-input (selsel) kernels
 VW_SIMD_SEL_GATHER_CHOICES = ["scalar", "scalarload", "hwgather"]
+# VW_SIMD_SEL contiguous kernels: compress form and unroll
+VW_SIMD_SEL_COMPRESS_CHOICES = ["reg", "mem"]
+VW_SIMD_SEL_UNROLL_CHOICES = ["1", "2"]
 
 TARGET_ARCH_CHOICES = [
     "native",
@@ -127,6 +130,8 @@ def configure():
     opts["BUILD_DIR"] = "build"
     opts["JOBS"] = str(os.cpu_count() or 4)
     opts["VW_SIMD_SEL_GATHER"] = "scalar"
+    opts["VW_SIMD_SEL_COMPRESS"] = "reg"
+    opts["VW_SIMD_SEL_UNROLL"] = "1"
 
     # Apply preset
     if preset is not None:
@@ -230,6 +235,13 @@ def configure():
             ).ask()
             if opts["VW_SIMD_SEL_GATHER"] is None:
                 sys.exit(1)
+            for key, label, choices in (
+                ("VW_SIMD_SEL_COMPRESS", "VW_SIMD_SEL compress form:", VW_SIMD_SEL_COMPRESS_CHOICES),
+                ("VW_SIMD_SEL_UNROLL", "VW_SIMD_SEL contiguous unroll:", VW_SIMD_SEL_UNROLL_CHOICES),
+            ):
+                opts[key] = questionary.select(label, choices=choices, default=opts[key]).ask()
+                if opts[key] is None:
+                    sys.exit(1)
 
         # Data directory
         datadir = questionary.text(
@@ -283,6 +295,8 @@ def build_cmake_args(opts):
         val = "ON" if opts.get(name, False) else "OFF"
         args.append(f"-D{name}={val}")
     args.append(f"-DVW_SIMD_SEL_GATHER={opts.get('VW_SIMD_SEL_GATHER', 'scalar')}")
+    args.append(f"-DVW_SIMD_SEL_COMPRESS={opts.get('VW_SIMD_SEL_COMPRESS', 'reg')}")
+    args.append(f"-DVW_SIMD_SEL_UNROLL={opts.get('VW_SIMD_SEL_UNROLL', '1')}")
     return args
 
 # ── Build execution ───────────────────────────────────────────────────────

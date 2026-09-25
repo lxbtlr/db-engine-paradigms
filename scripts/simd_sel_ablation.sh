@@ -56,19 +56,23 @@ FAILS=0
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/driver.log"; }
 fail() { log "FAIL: $*"; FAILS=$((FAILS + 1)); }
 
-# flags <sel> <gather> <char> <pos16> <crc32> <simdhash> <joinpf> [pfdist]
+# flags <sel> <gather> <char> <pos16> <crc32> <simdhash> <joinpf> [pfdist] [compress] [unroll]
 # Every option is passed explicitly: CMake caches them across reconfigures.
 flags() {
   echo "-DVW_SIMD_SEL=$1 -DVW_SIMD_SEL_GATHER=$2 -DVW_SIMD_SEL_CHAR=$3 -DVW_POS_16=$4" \
-       "-DVW_USE_CRC32=$5 -DVW_SIMD_HASH=$6 -DVW_JOIN_PREFETCH=$7 -DVW_JOIN_PREFETCH_DIST=${8:-16}"
+       "-DVW_USE_CRC32=$5 -DVW_SIMD_HASH=$6 -DVW_JOIN_PREFETCH=$7 -DVW_JOIN_PREFETCH_DIST=${8:-16}" \
+       "-DVW_SIMD_SEL_COMPRESS=${9:-reg} -DVW_SIMD_SEL_UNROLL=${10:-1}"
 }
 config_flags() {
   case "$1" in
-    #                     sel gather     char pos16 crc32 hash pf
+    #                     sel gather     char pos16 crc32 hash pf  dist compress unroll
     base)           flags OFF scalar     OFF  OFF   OFF   OFF  OFF ;;
     sel)            flags ON  scalar     OFF  OFF   OFF   OFF  OFF ;;
     sel_scalarload) flags ON  scalarload OFF  OFF   OFF   OFF  OFF ;;
     sel_hwgather)   flags ON  hwgather   OFF  OFF   OFF   OFF  OFF ;;
+    sel_mem)        flags ON  scalar     OFF  OFF   OFF   OFF  OFF 16 mem 1 ;;
+    sel_u2)         flags ON  scalar     OFF  OFF   OFF   OFF  OFF 16 reg 2 ;;
+    sel_mem_u2)     flags ON  scalar     OFF  OFF   OFF   OFF  OFF 16 mem 2 ;;
     sel_char)       flags ON  scalar     ON   OFF   OFF   OFF  OFF ;;
     sel_pos16)      flags ON  scalar     ON   ON    OFF   OFF  OFF ;;
     char_only)      flags OFF scalar     ON   OFF   OFF   OFF  OFF ;;

@@ -85,12 +85,39 @@ inline __m512i lane_ids() {
                             15);
 }
 
+/// How matching positions are written (CMake VW_SIMD_SEL_COMPRESS):
+///   Reg: register vpcompressd + masked store sized to the match count. Fast
+///        everywhere, including AMD Zen 4, where the memory form is microcoded.
+///   Mem: memory-form vpcompressd (_mm512_mask_compressstoreu_epi32), as in the
+///        pre-existing *_avx512 kernels; fewer uops on Intel.
+/// Both write exactly popcount(m) positions and nothing past them. Under
+/// VW_POS_16 a 16-bit memory compress would need AVX512-VBMI2, so Mem falls
+/// back to Reg there.
+enum class Emit { Reg, Mem };
+#ifdef VW_SIMD_SEL_COMPRESS_MEM
+constexpr Emit kEmit = Emit::Mem;
+#else
+constexpr Emit kEmit = Emit::Reg;
+#endif
+/// Vectors of 16 per loop iteration in the contiguous kernels
+/// (CMake VW_SIMD_SEL_UNROLL).
+#ifdef VW_SIMD_SEL_UNROLL2
+constexpr unsigned kUnroll = 2;
+#else
+constexpr unsigned kUnroll = 1;
+#endif
+
 /// Compress the lanes of `ids` selected by `m` and store them at `out`.
-/// Uses a register compress plus a masked store: it never writes past
-/// out[popcount(m)-1], and it avoids the memory-form vpcompressd, which is
-/// microcoded on AMD Zen 4. Returns the number of positions written.
-inline size_t emit(pos_t* RES out, __mmask16 m, __m512i ids) {
+/// Returns the number of positions written.
+template <Emit E>
+inline size_t emit_as(pos_t* RES out, __mmask16 m, __m512i ids) {
    const unsigned cnt = __builtin_popcount((unsigned)m);
+#ifndef VW_POS_16
+   if constexpr (E == Emit::Mem) {
+      _mm512_mask_compressstoreu_epi32(out, m, ids);
+      return cnt;
+   }
+#endif
    const __m512i packed = _mm512_maskz_compress_epi32(m, ids);
    const __mmask16 st = (__mmask16)((1u << cnt) - 1);
 #ifdef VW_POS_16
@@ -99,6 +126,11 @@ inline size_t emit(pos_t* RES out, __mmask16 m, __m512i ids) {
    _mm512_mask_storeu_epi32(out, st, packed);
 #endif
    return cnt;
+}
+
+/// emit with the CMake-selected form (gathered-input and Char kernels).
+inline size_t emit(pos_t* RES out, __mmask16 m, __m512i ids) {
+   return emit_as<kEmit>(out, m, ids);
 }
 
 /// Load 16 selection-vector entries as 32-bit lanes (r valid entries, 1..16).
@@ -192,50 +224,114 @@ template <typename T> inline __m512i broadcast(const T& v) {
 
 //--- continuous -> compressed ------------------------------------------------
 
-/// result = positions i with Op(param1[i], *param2)
-template <typename T, template <typename> class Op>
-pos_t sel_col_val(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+/// result = positions i with Op(param1[i], *param2); E = compress form,
+/// U = vectors of 16 per iteration (1 or 2).
+template <typename T, template <typename> class Op, Emit E, unsigned U>
+pos_t sel_col_val_v(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
    static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   static_assert(U == 1 || U == 2, "unroll must be 1 or 2");
    const __m512i c = broadcast(*param2);
    const __m512i step = _mm512_set1_epi32(16);
    __m512i ids = lane_ids();
    size_t found = 0, i = 0;
+   if constexpr (U == 2) {
+      const __m512i step2 = _mm512_set1_epi32(32);
+      for (; i + 32 <= n; i += 32) {
+         // both compares issue before either store
+         const __mmask16 m0 = cmp_contig_full<T, Op>(param1, i, c);
+         const __mmask16 m1 = cmp_contig_full<T, Op>(param1, i + 16, c);
+         found += emit_as<E>(result + found, m0, ids);
+         found += emit_as<E>(result + found, m1, _mm512_add_epi32(ids, step));
+         ids = _mm512_add_epi32(ids, step2);
+      }
+   }
    for (; i + 16 <= n; i += 16) {
-      found += emit(result + found, cmp_contig_full<T, Op>(param1, i, c), ids);
+      found += emit_as<E>(result + found, cmp_contig_full<T, Op>(param1, i, c),
+                          ids);
       ids = _mm512_add_epi32(ids, step);
    }
    if (i < n) {
       const __mmask16 k = tail_mask(n - i);
-      found += emit(result + found, cmp_contig<T, Op>(param1, i, k, c), ids);
+      found += emit_as<E>(result + found, cmp_contig<T, Op>(param1, i, k, c),
+                          ids);
    }
    return found;
 }
 
-/// result = positions i with Op(param1[i], param2[i])
+/// Compare 16 elements of two columns starting at i, unmasked (hot loop).
 template <typename T, template <typename> class Op>
-pos_t sel_col_col(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+inline __mmask16 cmp_colcol_full(const T* a, const T* b, size_t i) {
+   constexpr int IMM = CmpImm<Op>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      return _mm512_cmp_epi32_mask(_mm512_loadu_si512(a + i),
+                                   _mm512_loadu_si512(b + i), IMM);
+   } else {
+      const __mmask8 mlo = _mm512_cmp_epi64_mask(
+          _mm512_loadu_si512(a + i), _mm512_loadu_si512(b + i), IMM);
+      const __mmask8 mhi = _mm512_cmp_epi64_mask(
+          _mm512_loadu_si512(a + i + 8), _mm512_loadu_si512(b + i + 8), IMM);
+      return (__mmask16)(mlo | ((unsigned)mhi << 8));
+   }
+}
+
+/// Same for the last r < 16 elements (masked loads and compares).
+template <typename T, template <typename> class Op>
+inline __mmask16 cmp_colcol_tail(const T* a, const T* b, size_t i,
+                                 __mmask16 k) {
+   __m512i alo, ahi, blo, bhi;
+   if constexpr (Width<T>::bits == 32) {
+      alo = _mm512_maskz_loadu_epi32(k, a + i);
+      blo = _mm512_maskz_loadu_epi32(k, b + i);
+      ahi = bhi = alo;
+   } else {
+      alo = _mm512_maskz_loadu_epi64((__mmask8)k, a + i);
+      ahi = _mm512_maskz_loadu_epi64((__mmask8)(k >> 8), a + i + 8);
+      blo = _mm512_maskz_loadu_epi64((__mmask8)k, b + i);
+      bhi = _mm512_maskz_loadu_epi64((__mmask8)(k >> 8), b + i + 8);
+   }
+   return cmp_regs<T, Op>(k, alo, ahi, blo, bhi);
+}
+
+/// result = positions i with Op(param1[i], param2[i]); E, U as above.
+template <typename T, template <typename> class Op, Emit E, unsigned U>
+pos_t sel_col_col_v(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
    static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   static_assert(U == 1 || U == 2, "unroll must be 1 or 2");
    const __m512i step = _mm512_set1_epi32(16);
    __m512i ids = lane_ids();
-   size_t found = 0;
-   for (size_t i = 0; i < n; i += 16) {
-      const size_t r = (n - i < 16) ? n - i : 16;
-      const __mmask16 k = tail_mask(r);
-      __m512i alo, ahi, blo, bhi;
-      if constexpr (Width<T>::bits == 32) {
-         alo = _mm512_maskz_loadu_epi32(k, param1 + i);
-         blo = _mm512_maskz_loadu_epi32(k, param2 + i);
-         ahi = bhi = alo;
-      } else {
-         alo = _mm512_maskz_loadu_epi64((__mmask8)k, param1 + i);
-         ahi = _mm512_maskz_loadu_epi64((__mmask8)(k >> 8), param1 + i + 8);
-         blo = _mm512_maskz_loadu_epi64((__mmask8)k, param2 + i);
-         bhi = _mm512_maskz_loadu_epi64((__mmask8)(k >> 8), param2 + i + 8);
+   size_t found = 0, i = 0;
+   if constexpr (U == 2) {
+      const __m512i step2 = _mm512_set1_epi32(32);
+      for (; i + 32 <= n; i += 32) {
+         const __mmask16 m0 = cmp_colcol_full<T, Op>(param1, param2, i);
+         const __mmask16 m1 = cmp_colcol_full<T, Op>(param1, param2, i + 16);
+         found += emit_as<E>(result + found, m0, ids);
+         found += emit_as<E>(result + found, m1, _mm512_add_epi32(ids, step));
+         ids = _mm512_add_epi32(ids, step2);
       }
-      found += emit(result + found, cmp_regs<T, Op>(k, alo, ahi, blo, bhi), ids);
+   }
+   for (; i + 16 <= n; i += 16) {
+      found += emit_as<E>(result + found,
+                          cmp_colcol_full<T, Op>(param1, param2, i), ids);
       ids = _mm512_add_epi32(ids, step);
    }
+   if (i < n) {
+      const __mmask16 k = tail_mask(n - i);
+      found += emit_as<E>(result + found,
+                          cmp_colcol_tail<T, Op>(param1, param2, i, k), ids);
+   }
    return found;
+}
+
+/// The variants selected by VW_SIMD_SEL_COMPRESS / VW_SIMD_SEL_UNROLL; these
+/// are what the redirected primitive names point to.
+template <typename T, template <typename> class Op>
+pos_t sel_col_val(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+   return sel_col_val_v<T, Op, kEmit, kUnroll>(n, result, param1, param2);
+}
+template <typename T, template <typename> class Op>
+pos_t sel_col_col(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+   return sel_col_col_v<T, Op, kEmit, kUnroll>(n, result, param1, param2);
 }
 
 //--- gather -> compressed ----------------------------------------------------
