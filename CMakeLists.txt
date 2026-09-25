@@ -189,6 +189,9 @@ endif()
 #                              safe on Zen 4 where the memory form is slow)
 #                        mem : memory-form vpcompressd, like the old kernels
 #   VW_SIMD_SEL_UNROLL   1|2 : vectors of 16 per loop iteration
+#   VW_SIMD_SEL_WIDTH  512|256 : zmm kernels (default) or ymm kernels
+#                              (AVX512VL; avoids the AVX-512 frequency
+#                              license drop; UNROLL is ignored at 256)
 set(VW_SIMD_SEL_COMPRESS "reg" CACHE STRING "VW_SIMD_SEL compress form: reg, mem")
 set_property(CACHE VW_SIMD_SEL_COMPRESS PROPERTY STRINGS reg mem)
 if(VW_SIMD_SEL_COMPRESS STREQUAL "mem")
@@ -203,8 +206,15 @@ if(VW_SIMD_SEL_UNROLL STREQUAL "2")
 elseif(NOT VW_SIMD_SEL_UNROLL STREQUAL "1")
   message(FATAL_ERROR "VW_SIMD_SEL_UNROLL must be 1 or 2 (got '${VW_SIMD_SEL_UNROLL}')")
 endif()
+set(VW_SIMD_SEL_WIDTH "512" CACHE STRING "VW_SIMD_SEL contiguous vector width: 512, 256")
+set_property(CACHE VW_SIMD_SEL_WIDTH PROPERTY STRINGS 512 256)
+if(VW_SIMD_SEL_WIDTH STREQUAL "256")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_WIDTH_256=1)
+elseif(NOT VW_SIMD_SEL_WIDTH STREQUAL "512")
+  message(FATAL_ERROR "VW_SIMD_SEL_WIDTH must be 512 or 256 (got '${VW_SIMD_SEL_WIDTH}')")
+endif()
 if(VW_SIMD_SEL)
-  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER} COMPRESS=${VW_SIMD_SEL_COMPRESS} UNROLL=${VW_SIMD_SEL_UNROLL}")
+  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER} COMPRESS=${VW_SIMD_SEL_COMPRESS} UNROLL=${VW_SIMD_SEL_UNROLL} WIDTH=${VW_SIMD_SEL_WIDTH}")
 endif()
 
 # Software prefetch in the hash join probe loops (joinAllParallel /

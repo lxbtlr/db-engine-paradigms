@@ -43,6 +43,7 @@ VW_SIMD_SEL_GATHER_CHOICES = ["scalar", "scalarload", "hwgather"]
 # VW_SIMD_SEL contiguous kernels: compress form and unroll
 VW_SIMD_SEL_COMPRESS_CHOICES = ["reg", "mem"]
 VW_SIMD_SEL_UNROLL_CHOICES = ["1", "2"]
+VW_SIMD_SEL_WIDTH_CHOICES = ["512", "256"]
 
 TARGET_ARCH_CHOICES = [
     "native",
@@ -132,6 +133,7 @@ def configure():
     opts["VW_SIMD_SEL_GATHER"] = "scalar"
     opts["VW_SIMD_SEL_COMPRESS"] = "reg"
     opts["VW_SIMD_SEL_UNROLL"] = "1"
+    opts["VW_SIMD_SEL_WIDTH"] = "512"
 
     # Apply preset
     if preset is not None:
@@ -238,6 +240,7 @@ def configure():
             for key, label, choices in (
                 ("VW_SIMD_SEL_COMPRESS", "VW_SIMD_SEL compress form:", VW_SIMD_SEL_COMPRESS_CHOICES),
                 ("VW_SIMD_SEL_UNROLL", "VW_SIMD_SEL contiguous unroll:", VW_SIMD_SEL_UNROLL_CHOICES),
+                ("VW_SIMD_SEL_WIDTH", "VW_SIMD_SEL contiguous vector width:", VW_SIMD_SEL_WIDTH_CHOICES),
             ):
                 opts[key] = questionary.select(label, choices=choices, default=opts[key]).ask()
                 if opts[key] is None:
@@ -297,6 +300,7 @@ def build_cmake_args(opts):
     args.append(f"-DVW_SIMD_SEL_GATHER={opts.get('VW_SIMD_SEL_GATHER', 'scalar')}")
     args.append(f"-DVW_SIMD_SEL_COMPRESS={opts.get('VW_SIMD_SEL_COMPRESS', 'reg')}")
     args.append(f"-DVW_SIMD_SEL_UNROLL={opts.get('VW_SIMD_SEL_UNROLL', '1')}")
+    args.append(f"-DVW_SIMD_SEL_WIDTH={opts.get('VW_SIMD_SEL_WIDTH', '512')}")
     return args
 
 # ── Build execution ───────────────────────────────────────────────────────

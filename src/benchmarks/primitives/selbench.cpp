@@ -201,6 +201,12 @@ void benchF4(const std::string& family, bool colcol,
 #define SIMD3(expr) nullptr
 #define SIMD4(expr) nullptr
 #endif
+// 256-bit (ymm, AVX512VL) contiguous kernels
+#ifdef VW_HAVE_SIMD_SEL_256
+#define SIMD256(expr) (F3) & expr
+#else
+#define SIMD256(expr) nullptr
+#endif
 #ifdef __AVX512F__
 #define OLD(name) name
 #else
@@ -222,7 +228,9 @@ void selColVal(F3 old = nullptr) {
                    {"simd_reg_u1", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Reg, 1>))},
                    {"simd_reg_u2", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Reg, 2>))},
                    {"simd_mem_u1", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Mem, 1>))},
-                   {"simd_mem_u2", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Mem, 2>))}});
+                   {"simd_mem_u2", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Mem, 2>))},
+                   {"simd256_reg", SIMD256((simd::sel_col_val_256<T, Op, simd::Emit::Reg>))},
+                   {"simd256_mem", SIMD256((simd::sel_col_val_256<T, Op, simd::Emit::Mem>))}});
 }
 template <typename T, template <typename> class Op> void selColCol() {
    benchF3<T, Op>("sel_col_col", true,
@@ -230,7 +238,9 @@ template <typename T, template <typename> class Op> void selColCol() {
                    {"simd_reg_u1", SIMD3((simd::sel_col_col_v<T, Op, simd::Emit::Reg, 1>))},
                    {"simd_reg_u2", SIMD3((simd::sel_col_col_v<T, Op, simd::Emit::Reg, 2>))},
                    {"simd_mem_u1", SIMD3((simd::sel_col_col_v<T, Op, simd::Emit::Mem, 1>))},
-                   {"simd_mem_u2", SIMD3((simd::sel_col_col_v<T, Op, simd::Emit::Mem, 2>))}});
+                   {"simd_mem_u2", SIMD3((simd::sel_col_col_v<T, Op, simd::Emit::Mem, 2>))},
+                   {"simd256_reg", SIMD256((simd::sel_col_col_256<T, Op, simd::Emit::Reg>))},
+                   {"simd256_mem", SIMD256((simd::sel_col_col_256<T, Op, simd::Emit::Mem>))}});
 }
 template <typename T, template <typename> class Op>
 void selselColVal(F4 old = nullptr) {

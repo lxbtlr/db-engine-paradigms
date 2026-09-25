@@ -31,6 +31,11 @@
 #if defined(__AVX512BW__)
 #define VW_HAVE_SIMD_SEL_CHAR 1
 #endif
+// 256-bit (ymm) contiguous kernels need AVX512VL for masked ymm compares,
+// compress and narrowing stores.
+#if defined(__AVX512VL__)
+#define VW_HAVE_SIMD_SEL_256 1
+#endif
 #endif
 
 namespace vectorwise {
@@ -323,15 +328,147 @@ pos_t sel_col_col_v(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
    return found;
 }
 
-/// The variants selected by VW_SIMD_SEL_COMPRESS / VW_SIMD_SEL_UNROLL; these
-/// are what the redirected primitive names point to.
+//--- 256-bit (ymm) contiguous kernels (VW_SIMD_SEL_WIDTH=256) ----------------
+// Same algorithm on ymm registers with AVX512VL: 8 lanes per compare and
+// compress. 512-bit instructions drop the core clock on Skylake/Cascade Lake
+// for a while after they run (AVX-512 license levels), which slows the scalar
+// rest of a query; 256-bit integer code mostly avoids that. Each loop
+// iteration still covers 16 elements (2 x 8).
+#ifdef VW_HAVE_SIMD_SEL_256
+
+/// Compress the lanes of `ids` selected by `m` (8 lanes) and store them.
+template <Emit E>
+inline size_t emit8(pos_t* RES out, __mmask8 m, __m256i ids) {
+   const unsigned cnt = __builtin_popcount((unsigned)m);
+#ifndef VW_POS_16
+   if constexpr (E == Emit::Mem) {
+      _mm256_mask_compressstoreu_epi32(out, m, ids);
+      return cnt;
+   }
+#endif
+   const __m256i packed = _mm256_maskz_compress_epi32(m, ids);
+   const __mmask8 st = (__mmask8)((1u << cnt) - 1);
+#ifdef VW_POS_16
+   _mm256_mask_cvtepi32_storeu_epi16(out, st, packed);
+#else
+   _mm256_mask_storeu_epi32(out, st, packed);
+#endif
+   return cnt;
+}
+
+template <typename T> inline __m256i broadcast256(const T& v) {
+   if constexpr (Width<T>::bits == 32)
+      return _mm256_set1_epi32(raw(v));
+   else
+      return _mm256_set1_epi64x(raw(v));
+}
+
+/// 8 elements a[i..i+8) (k = valid lanes) as two 4-lane (64-bit) or one
+/// 8-lane (32-bit) ymm, compared with b via cmp.
+template <typename T, template <typename> class Op>
+inline __mmask8 cmp8_val(const T* a, size_t i, __mmask8 k, __m256i c) {
+   constexpr int IMM = CmpImm<Op>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      const __m256i v = _mm256_maskz_loadu_epi32(k, a + i);
+      return _mm256_mask_cmp_epi32_mask(k, v, c, IMM);
+   } else {
+      const __mmask8 klo = k & 0xF, khi = k >> 4;
+      const __m256i lo = _mm256_maskz_loadu_epi64(klo, a + i);
+      const __m256i hi = _mm256_maskz_loadu_epi64(khi, a + i + 4);
+      const __mmask8 mlo = _mm256_mask_cmp_epi64_mask(klo, lo, c, IMM);
+      const __mmask8 mhi = _mm256_mask_cmp_epi64_mask(khi, hi, c, IMM);
+      return (__mmask8)(mlo | (mhi << 4));
+   }
+}
+
+template <typename T, template <typename> class Op>
+inline __mmask8 cmp8_col(const T* a, const T* b, size_t i, __mmask8 k) {
+   constexpr int IMM = CmpImm<Op>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      const __m256i va = _mm256_maskz_loadu_epi32(k, a + i);
+      const __m256i vb = _mm256_maskz_loadu_epi32(k, b + i);
+      return _mm256_mask_cmp_epi32_mask(k, va, vb, IMM);
+   } else {
+      const __mmask8 klo = k & 0xF, khi = k >> 4;
+      const __mmask8 mlo = _mm256_mask_cmp_epi64_mask(
+          klo, _mm256_maskz_loadu_epi64(klo, a + i),
+          _mm256_maskz_loadu_epi64(klo, b + i), IMM);
+      const __mmask8 mhi = _mm256_mask_cmp_epi64_mask(
+          khi, _mm256_maskz_loadu_epi64(khi, a + i + 4),
+          _mm256_maskz_loadu_epi64(khi, b + i + 4), IMM);
+      return (__mmask8)(mlo | (mhi << 4));
+   }
+}
+
+/// result = positions i with Op(param1[i], *param2), ymm only.
+template <typename T, template <typename> class Op, Emit E>
+pos_t sel_col_val_256(pos_t n, pos_t* RES result, T* RES param1,
+                      T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   const __m256i c = broadcast256(*param2);
+   const __m256i step8 = _mm256_set1_epi32(8), step16 = _mm256_set1_epi32(16);
+   __m256i ids = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16) {
+      const __mmask8 m0 = cmp8_val<T, Op>(param1, i, 0xFF, c);
+      const __mmask8 m1 = cmp8_val<T, Op>(param1, i + 8, 0xFF, c);
+      found += emit8<E>(result + found, m0, ids);
+      found += emit8<E>(result + found, m1, _mm256_add_epi32(ids, step8));
+      ids = _mm256_add_epi32(ids, step16);
+   }
+   for (; i < n; i += 8) {
+      const size_t r = (n - i < 8) ? n - i : 8;
+      const __mmask8 k = (__mmask8)((1u << r) - 1);
+      found += emit8<E>(result + found, cmp8_val<T, Op>(param1, i, k, c), ids);
+      ids = _mm256_add_epi32(ids, step8);
+   }
+   return found;
+}
+
+/// result = positions i with Op(param1[i], param2[i]), ymm only.
+template <typename T, template <typename> class Op, Emit E>
+pos_t sel_col_col_256(pos_t n, pos_t* RES result, T* RES param1,
+                      T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   const __m256i step8 = _mm256_set1_epi32(8), step16 = _mm256_set1_epi32(16);
+   __m256i ids = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16) {
+      const __mmask8 m0 = cmp8_col<T, Op>(param1, param2, i, 0xFF);
+      const __mmask8 m1 = cmp8_col<T, Op>(param1, param2, i + 8, 0xFF);
+      found += emit8<E>(result + found, m0, ids);
+      found += emit8<E>(result + found, m1, _mm256_add_epi32(ids, step8));
+      ids = _mm256_add_epi32(ids, step16);
+   }
+   for (; i < n; i += 8) {
+      const size_t r = (n - i < 8) ? n - i : 8;
+      const __mmask8 k = (__mmask8)((1u << r) - 1);
+      found += emit8<E>(result + found, cmp8_col<T, Op>(param1, param2, i, k),
+                        ids);
+      ids = _mm256_add_epi32(ids, step8);
+   }
+   return found;
+}
+#endif // VW_HAVE_SIMD_SEL_256
+
+/// The variants selected by VW_SIMD_SEL_WIDTH / VW_SIMD_SEL_COMPRESS /
+/// VW_SIMD_SEL_UNROLL; these are what the redirected primitive names point
+/// to. VW_SIMD_SEL_WIDTH=256 without AVX512VL falls back to 512-bit.
 template <typename T, template <typename> class Op>
 pos_t sel_col_val(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+#if defined(VW_SIMD_SEL_WIDTH_256) && defined(VW_HAVE_SIMD_SEL_256)
+   return sel_col_val_256<T, Op, kEmit>(n, result, param1, param2);
+#else
    return sel_col_val_v<T, Op, kEmit, kUnroll>(n, result, param1, param2);
+#endif
 }
 template <typename T, template <typename> class Op>
 pos_t sel_col_col(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+#if defined(VW_SIMD_SEL_WIDTH_256) && defined(VW_HAVE_SIMD_SEL_256)
+   return sel_col_col_256<T, Op, kEmit>(n, result, param1, param2);
+#else
    return sel_col_col_v<T, Op, kEmit, kUnroll>(n, result, param1, param2);
+#endif
 }
 
 //--- gather -> compressed ----------------------------------------------------

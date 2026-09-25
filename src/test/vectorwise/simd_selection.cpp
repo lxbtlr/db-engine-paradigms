@@ -25,6 +25,7 @@
 #include <functional>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace vectorwise;
@@ -106,6 +107,35 @@ void expectSame(pos_t fRef, const std::vector<pos_t>& ref, pos_t fSimd,
       ASSERT_EQ(kCanary, simd[i]) << where << " overwrite at " << i;
 }
 
+/// All contiguous kernel variants: 512-bit reg/mem x u1/u2, plus the 256-bit
+/// reg/mem kernels when AVX512VL is there.
+template <typename T>
+using SelKernel = pos_t (*)(pos_t, pos_t*, T*, T*);
+template <typename T, template <typename> class Op>
+std::vector<std::pair<const char*, SelKernel<T>>> colValKernels() {
+   return {{"reg_u1", &simd::sel_col_val_v<T, Op, simd::Emit::Reg, 1>},
+           {"reg_u2", &simd::sel_col_val_v<T, Op, simd::Emit::Reg, 2>},
+           {"mem_u1", &simd::sel_col_val_v<T, Op, simd::Emit::Mem, 1>},
+           {"mem_u2", &simd::sel_col_val_v<T, Op, simd::Emit::Mem, 2>},
+#ifdef VW_HAVE_SIMD_SEL_256
+           {"w256_reg", &simd::sel_col_val_256<T, Op, simd::Emit::Reg>},
+           {"w256_mem", &simd::sel_col_val_256<T, Op, simd::Emit::Mem>},
+#endif
+   };
+}
+template <typename T, template <typename> class Op>
+std::vector<std::pair<const char*, SelKernel<T>>> colColKernels() {
+   return {{"reg_u1", &simd::sel_col_col_v<T, Op, simd::Emit::Reg, 1>},
+           {"reg_u2", &simd::sel_col_col_v<T, Op, simd::Emit::Reg, 2>},
+           {"mem_u1", &simd::sel_col_col_v<T, Op, simd::Emit::Mem, 1>},
+           {"mem_u2", &simd::sel_col_col_v<T, Op, simd::Emit::Mem, 2>},
+#ifdef VW_HAVE_SIMD_SEL_256
+           {"w256_reg", &simd::sel_col_col_256<T, Op, simd::Emit::Reg>},
+           {"w256_mem", &simd::sel_col_col_256<T, Op, simd::Emit::Mem>},
+#endif
+   };
+}
+
 template <typename T, template <typename> class Op> void checkColVal() {
    std::mt19937_64 rng(42);
    for (size_t n : kSizes) {
@@ -113,18 +143,12 @@ template <typename T, template <typename> class Op> void checkColVal() {
       for (T c : constants(col.data, n)) {
          std::vector<pos_t> ref(n + kSlack, kCanary);
          pos_t fr = sel_col_val_bf<T, Op>(n, ref.data(), col.data, &c);
-         // every compress form x unroll, whichever the CMake options select
-         const char* names[] = {"reg_u1", "reg_u2", "mem_u1", "mem_u2"};
-         unsigned v = 0;
-         for (auto kernel :
-              {&simd::sel_col_val_v<T, Op, simd::Emit::Reg, 1>,
-               &simd::sel_col_val_v<T, Op, simd::Emit::Reg, 2>,
-               &simd::sel_col_val_v<T, Op, simd::Emit::Mem, 1>,
-               &simd::sel_col_val_v<T, Op, simd::Emit::Mem, 2>}) {
+         // every width x compress form x unroll, whichever the CMake
+         // options select
+         for (auto& [name, kernel] : colValKernels<T, Op>()) {
             std::vector<pos_t> got(n + kSlack, kCanary);
             pos_t fs = kernel(n, got.data(), col.data, &c);
-            expectSame(fr, ref, fs, got,
-                       ctx(names[v++], n, num(c)) + " sel_col_val");
+            expectSame(fr, ref, fs, got, ctx(name, n, num(c)) + " sel_col_val");
          }
       }
    }
@@ -138,15 +162,10 @@ template <typename T, template <typename> class Op> void checkColCol() {
       for (size_t i = 0; i < n; i += 4) b.data[i] = a.data[i];
       std::vector<pos_t> ref(n + kSlack, kCanary);
       pos_t fr = sel_col_col_bf<T, Op>(n, ref.data(), a.data, b.data);
-      const char* names[] = {"reg_u1", "reg_u2", "mem_u1", "mem_u2"};
-      unsigned v = 0;
-      for (auto kernel : {&simd::sel_col_col_v<T, Op, simd::Emit::Reg, 1>,
-                          &simd::sel_col_col_v<T, Op, simd::Emit::Reg, 2>,
-                          &simd::sel_col_col_v<T, Op, simd::Emit::Mem, 1>,
-                          &simd::sel_col_col_v<T, Op, simd::Emit::Mem, 2>}) {
+      for (auto& [name, kernel] : colColKernels<T, Op>()) {
          std::vector<pos_t> got(n + kSlack, kCanary);
          pos_t fs = kernel(n, got.data(), a.data, b.data);
-         expectSame(fr, ref, fs, got, ctx(names[v++], n, 0) + " sel_col_col");
+         expectSame(fr, ref, fs, got, ctx(name, n, 0) + " sel_col_col");
       }
    }
 }

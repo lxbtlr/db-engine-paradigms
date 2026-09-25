@@ -19,6 +19,10 @@ namespace primitives {
 #if defined(VW_SIMD_SEL) && !defined(VW_HAVE_SIMD_SEL)
 #pragma message("VW_SIMD_SEL: AVX-512F not available, using scalar selection")
 #endif
+#if defined(VW_SIMD_SEL) && defined(VW_HAVE_SIMD_SEL) &&                     \
+    defined(VW_SIMD_SEL_WIDTH_256) && !defined(VW_HAVE_SIMD_SEL_256)
+#pragma message("VW_SIMD_SEL_WIDTH=256: AVX-512VL not available, using 512-bit selection")
+#endif
 #if defined(VW_SIMD_SEL_CHAR) && !defined(VW_HAVE_SIMD_SEL_CHAR)
 #pragma message("VW_SIMD_SEL_CHAR: AVX-512BW not available, using scalar Char selection")
 #endif
