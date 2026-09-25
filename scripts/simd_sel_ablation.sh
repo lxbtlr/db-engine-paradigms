@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Ablation driver for the AVX-512 selection kernels (VW_SIMD_SEL, VW_SIMD_SEL_CHAR).
+# Ablation driver for the VectorWise kernel options: AVX-512 selection
+# (VW_SIMD_SEL*), hashing (VW_SIMD_HASH vs VW_USE_CRC32) and join-probe
+# prefetching (VW_JOIN_PREFETCH). See config_flags for the configs.
 #
 # For every compiler x config it:
-#   1. configures + builds test_all, run_selbench, run_tpch into build_ablation/<compiler>_<config>
-#   2. checks via nm that the SIMD kernels are linked in exactly when the option is ON
-#   3. runs the differential unit tests (SimdSel*, SimdSelRedirect*, GTEQ*)
+#   1. configures + builds test_all, run_selbench, run_hashbench, run_tpch into build_ablation/<compiler>_<config>
+#   2. checks via nm/objdump that SIMD kernels / prefetches exist exactly when their option is ON
+#   3. runs the differential unit tests (SimdSel*, SimdSelRedirect*, SimdHash*, GTEQ*)
 #   4. runs the TPC-H correctness tests (TPCH.*) with SIMDsel=0 and SIMDsel=1   [needs DATADIR sf1]
-#   5. runs run_selbench (per-tuple kernel cost, CSV)                            [base + sel_pos16 builds]
+#   5. runs run_selbench [base, sel_pos16] and run_hashbench [base] (per-tuple kernel cost)
 #   6. runs run_tpch -e v on Q1,3,5,6,9,18 with SIMDsel=0 and SIMDsel=1         [needs TPCH_PATH]
 # and writes everything plus summary.csv / speedup.csv to results/simd_sel_<timestamp>/.
 #
@@ -47,19 +49,33 @@ FAILS=0
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/driver.log"; }
 fail() { log "FAIL: $*"; FAILS=$((FAILS + 1)); }
 
+# flags <sel> <gather> <char> <pos16> <crc32> <simdhash> <joinpf> [pfdist]
+# Every option is passed explicitly: CMake caches them across reconfigures.
+flags() {
+  echo "-DVW_SIMD_SEL=$1 -DVW_SIMD_SEL_GATHER=$2 -DVW_SIMD_SEL_CHAR=$3 -DVW_POS_16=$4" \
+       "-DVW_USE_CRC32=$5 -DVW_SIMD_HASH=$6 -DVW_JOIN_PREFETCH=$7 -DVW_JOIN_PREFETCH_DIST=${8:-16}"
+}
 config_flags() {
   case "$1" in
-    # every option is set explicitly: CMake caches them across reconfigures
-    base)         echo "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
-    sel)          echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
-    sel_scalarload) echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=scalarload -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
-    sel_hwgather) echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=hwgather   -DVW_SIMD_SEL_CHAR=OFF -DVW_POS_16=OFF" ;;
-    sel_char)     echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=ON  -DVW_POS_16=OFF" ;;
-    sel_pos16)    echo "-DVW_SIMD_SEL=ON  -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=ON  -DVW_POS_16=ON" ;;
-    char_only)    echo "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_GATHER=scalar     -DVW_SIMD_SEL_CHAR=ON  -DVW_POS_16=OFF" ;;
+    #                     sel gather     char pos16 crc32 hash pf
+    base)           flags OFF scalar     OFF  OFF   OFF   OFF  OFF ;;
+    sel)            flags ON  scalar     OFF  OFF   OFF   OFF  OFF ;;
+    sel_scalarload) flags ON  scalarload OFF  OFF   OFF   OFF  OFF ;;
+    sel_hwgather)   flags ON  hwgather   OFF  OFF   OFF   OFF  OFF ;;
+    sel_char)       flags ON  scalar     ON   OFF   OFF   OFF  OFF ;;
+    sel_pos16)      flags ON  scalar     ON   ON    OFF   OFF  OFF ;;
+    char_only)      flags OFF scalar     ON   OFF   OFF   OFF  OFF ;;
+    crc32)          flags OFF scalar     OFF  OFF   ON    OFF  OFF ;;
+    simd_hash)      flags OFF scalar     OFF  OFF   OFF   ON   OFF ;;
+    join_pf)        flags OFF scalar     OFF  OFF   OFF   OFF  ON  16 ;;
+    join_pf32)      flags OFF scalar     OFF  OFF   OFF   OFF  ON  32 ;;
+    all)            flags ON  scalar     ON   OFF   OFF   ON   ON  16 ;;
+    all_crc32)      flags ON  scalar     ON   OFF   ON    OFF  ON  16 ;;
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
+# on <cfg> <OPTION>: is OPTION=ON in this config?
+on() { config_flags "$1" | grep -q -- "-D$2=ON"; }
 
 # ---------------------------------------------------------------- machine info
 {
@@ -95,33 +111,44 @@ for comp in $COMPILERS; do
       # Build each target on its own so one broken target (e.g. test_all)
       # does not keep the benchmarks from running.
       : > "$D/build.log"
-      for tgt in run_selbench run_tpch test_all; do
+      for tgt in run_selbench run_hashbench run_tpch test_all; do
         echo "### target $tgt" >> "$D/build.log"
         if ! cmake --build "$B" -j "$JOBS" --target "$tgt" >> "$D/build.log" 2>&1; then
           fail "$tag build of $tgt (see $D/build.log)"
         fi
       done
-      grep -E "VW_SIMD_SEL.*not available" "$D/build.log" && fail "$tag: ISA fallback pragma fired (ARCH_FLAGS lacks AVX-512?)"
+      grep -E "VW_SIMD_(SEL|HASH).*(not available|needs AVX)" "$D/build.log" && fail "$tag: ISA fallback pragma fired (ARCH_FLAGS lacks AVX-512?)"
     fi
 
     # ------------------------------------------------------- 2. symbol check
-    obj=$(find "$B" -name 'Selection.cpp.o' | head -1)
-    if [ -z "$obj" ]; then fail "$tag: Selection.cpp.o not found"; else
-      nsel=$(nm -C "$obj" | grep -c 'simd::sel_col_val<' || true)
-      nchar=$(nm -C "$obj" | grep -c 'simd::sel_char_eq_col_val<' || true)
-      echo "simd::sel_col_val symbols: $nsel, simd::sel_char_eq_col_val symbols: $nchar" | tee "$D/symbols.txt"
-      case "$cfg" in
-        base)      [ "$nsel" -eq 0 ] && [ "$nchar" -eq 0 ] || fail "$tag: SIMD symbols present in base build" ;;
-        sel|sel_scalarload|sel_hwgather) [ "$nsel" -gt 0 ] && [ "$nchar" -eq 0 ] || fail "$tag: expected sel kernels only" ;;
-        char_only) [ "$nsel" -eq 0 ] && [ "$nchar" -gt 0 ] || fail "$tag: expected char kernels only" ;;
-        *)         [ "$nsel" -gt 0 ] && [ "$nchar" -gt 0 ] || fail "$tag: expected sel + char kernels" ;;
-      esac
+    # SIMD kernels / prefetches must be present exactly when their option is ON.
+    check_count() { # <what> <count> <yes|no>
+      if [ "$3" = yes ]; then [ "$2" -gt 0 ] || fail "$tag: expected $1 (count $2)"
+      else [ "$2" -eq 0 ] || fail "$tag: unexpected $1 (count $2)"; fi
+    }
+    yn() { if on "$cfg" "$1"; then echo yes; else echo no; fi; }
+    sel_o=$(find "$B" -name 'Selection.cpp.o' | head -1)
+    hash_o=$(find "$B" -path '*primitives*' -name 'Hash.cpp.o' | head -1)
+    ops_o=$(find "$B" -path '*vectorwise.dir*' -name 'Operators.cpp.o' | head -1)
+    if [ -z "$sel_o" ] || [ -z "$hash_o" ] || [ -z "$ops_o" ]; then
+      fail "$tag: object files not found"
+    else
+      nsel=$(nm -C "$sel_o" | grep -c 'simd::sel_col_val<' || true)
+      nchar=$(nm -C "$sel_o" | grep -c 'simd::sel_char_eq_col_val<' || true)
+      nhash=$(nm -C "$hash_o" | grep -c 'simd_hash::' || true)
+      npf=$(objdump -d "$ops_o" | grep -c 'prefetcht0' || true)
+      echo "sel_col_val: $nsel  sel_char_eq: $nchar  simd_hash: $nhash  prefetcht0: $npf" | tee "$D/symbols.txt"
+      check_count "SIMD selection kernels" "$nsel" "$(yn VW_SIMD_SEL)"
+      check_count "Char kernels" "$nchar" "$(yn VW_SIMD_SEL_CHAR)"
+      if on "$cfg" VW_USE_CRC32; then check_count "SIMD hash kernels" "$nhash" no
+      else check_count "SIMD hash kernels" "$nhash" "$(yn VW_SIMD_HASH)"; fi
+      check_count "join prefetches" "$npf" "$(yn VW_JOIN_PREFETCH)"
     fi
 
     # ---------------------------------------------------------- 3. unit tests
     if [ ! -x "$B/test_all" ]; then
       fail "$tag: test_all not built, skipping unit + TPC-H tests"
-    elif ! "$B/test_all" --gtest_filter='SimdSel*:SimdSelRedirect*:GTEQ*' > "$D/unit.log" 2>&1; then
+    elif ! "$B/test_all" --gtest_filter='SimdSel*:SimdSelRedirect*:SimdHash*:GTEQ*' > "$D/unit.log" 2>&1; then
       fail "$tag unit tests (see $D/unit.log)"
     else
       log "$tag unit tests: $(grep -E '^\[  PASSED  \]|SKIPPED' "$D/unit.log" | tr '\n' ' ')"
@@ -145,6 +172,12 @@ for comp in $COMPILERS; do
       log "$tag run_selbench"
       taskset -c "$PIN_CPU" "$B/run_selbench" -v "$VEC" > "$D/selbench.csv" 2> "$D/selbench.err" \
         || fail "$tag run_selbench"
+    fi
+
+    if [ "$cfg" = base ] && [ -x "$B/run_hashbench" ]; then
+      log "$tag run_hashbench"
+      taskset -c "$PIN_CPU" "$B/run_hashbench" -v "$VEC" > "$D/hashbench.csv" 2> "$D/hashbench.err" \
+        || fail "$tag run_hashbench"
     fi
 
     # --------------------------------------------------------- 6. end to end

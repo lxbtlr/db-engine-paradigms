@@ -188,6 +188,29 @@ if(VW_SIMD_SEL)
   message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER}")
 endif()
 
+# Software prefetch in the hash join probe loops (joinAllParallel /
+# joinSelParallel): directory slot 2*DIST probes ahead, first chain entry
+# DIST ahead.
+OPTION(VW_JOIN_PREFETCH "Software prefetch in VectorWise hash join probes" OFF)
+set(VW_JOIN_PREFETCH_DIST 16 CACHE STRING "VW_JOIN_PREFETCH: prefetch distance in probes")
+if(VW_JOIN_PREFETCH)
+  ADD_DEFINITIONS(-DVW_JOIN_PREFETCH=1 -DVW_JOIN_PREFETCH_DIST=${VW_JOIN_PREFETCH_DIST})
+  message(STATUS "Building with VW_JOIN_PREFETCH (distance ${VW_JOIN_PREFETCH_DIST})")
+endif(VW_JOIN_PREFETCH)
+
+# AVX-512 MurmurHash64A kernels (include/vectorwise/SimdHash.hpp) for the
+# hash/hash_sel/rehash/rehash_sel primitives and HashGroup's packed-key hash.
+# Bit-identical to the scalar hash. Only applies to the default MurMurHash
+# (not with VW_USE_CRC32 or HASH_SIZE_32); needs AVX512F + AVX512DQ.
+OPTION(VW_SIMD_HASH "AVX-512 MurmurHash64A kernels for VectorWise hashing" OFF)
+if(VW_SIMD_HASH)
+  if(VW_USE_CRC32 OR HASH_SIZE_32)
+    message(WARNING "VW_SIMD_HASH only affects MurMurHash; it is a no-op with VW_USE_CRC32 / HASH_SIZE_32")
+  endif()
+  ADD_DEFINITIONS(-DVW_SIMD_HASH=1)
+  message(STATUS "Building with VW_SIMD_HASH")
+endif(VW_SIMD_HASH)
+
 OPTION(VW_SIMD_SEL_CHAR "AVX-512BW Char<N> == constant selection kernel" OFF)
 if(VW_SIMD_SEL_CHAR)
   ADD_DEFINITIONS(-DVW_SIMD_SEL_CHAR=1)
@@ -579,6 +602,15 @@ target_include_directories(run_selbench PUBLIC
     PRIVATE src)
 target_link_libraries(run_selbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
 
+add_executable(run_hashbench
+  src/benchmarks/primitives/hashbench.cpp
+  )
+target_include_directories(run_hashbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+target_link_libraries(run_hashbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
+
 # Enable tests
 enable_testing()
 set(CTEST_OUTPUT_ON_FAILURE "1")
@@ -590,6 +622,7 @@ add_executable(test_all
   src/test/ssb.cpp
   src/test/vectorwise/primitives.cpp
   src/test/vectorwise/simd_selection.cpp
+  src/test/vectorwise/simd_hash.cpp
   src/test/vectorwise/Operators.cpp
   src/test/common/Hashmap.cpp
   src/test/common/Database.cpp

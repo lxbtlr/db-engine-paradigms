@@ -34,6 +34,8 @@ BOOL_OPTIONS = [
     ("HUGE_2MB_MALLOC_HUGE",  "Use 2MB hugetlb pages for malloc_huge",                    False),
     ("VW_SIMD_SEL",           "AVX-512 selection kernels (int32/int64/Date)",              False),
     ("VW_SIMD_SEL_CHAR",      "AVX-512BW Char<N> == constant selection kernel",            False),
+    ("VW_SIMD_HASH",          "AVX-512 MurmurHash64A hashing kernels",                     False),
+    ("VW_JOIN_PREFETCH",      "Software prefetch in VectorWise hash join probes",          False),
 ]
 
 # VW_SIMD_SEL gathered-input (selsel) kernels

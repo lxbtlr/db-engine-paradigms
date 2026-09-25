@@ -4,6 +4,7 @@
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/SIMD.hpp"
+#include "vectorwise/SimdHash.hpp"
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
@@ -155,13 +156,50 @@ pos_t Hashjoin::joinAll() {
    return found;
 }
 
+// VW_JOIN_PREFETCH: two-stage software prefetch over a probe vector whose
+// hashes are all known up front. Stage 1 prefetches the directory slot 2*D
+// probes ahead; stage 2 (D ahead) reads that slot, now cached, and prefetches
+// the first chain entry when the tag filter matches.
+#ifdef VW_JOIN_PREFETCH
+#ifndef VW_JOIN_PREFETCH_DIST
+#define VW_JOIN_PREFETCH_DIST 16
+#endif
+namespace {
+constexpr size_t kJoinPfDist = VW_JOIN_PREFETCH_DIST;
+static_assert(kJoinPfDist > 0, "VW_JOIN_PREFETCH_DIST must be positive");
+
+inline void joinPrefetchWarmup(runtime::Hashmap& ht,
+                               const runtime::Hashmap::hash_t* hashes,
+                               size_t n) {
+   for (size_t i = 0, e = std::min(n, 2 * kJoinPfDist); i < e; ++i)
+      ht.prefetch_slot(hashes[i]);
+   for (size_t i = 0, e = std::min(n, kJoinPfDist); i < e; ++i)
+      ht.prefetch_chain_tagged(hashes[i]);
+}
+
+inline void joinPrefetchStep(runtime::Hashmap& ht,
+                             const runtime::Hashmap::hash_t* hashes, size_t i,
+                             size_t n) {
+   if (i + 2 * kJoinPfDist < n) ht.prefetch_slot(hashes[i + 2 * kJoinPfDist]);
+   if (i + kJoinPfDist < n) ht.prefetch_chain_tagged(hashes[i + kJoinPfDist]);
+}
+} // namespace
+#define VW_JOIN_PF_WARMUP(ht, hashes, n) joinPrefetchWarmup(ht, hashes, n)
+#define VW_JOIN_PF_STEP(ht, hashes, i, n) joinPrefetchStep(ht, hashes, i, n)
+#else
+#define VW_JOIN_PF_WARMUP(ht, hashes, n) ((void)0)
+#define VW_JOIN_PF_STEP(ht, hashes, i, n) ((void)0)
+#endif
+
 pos_t Hashjoin::joinAllParallel() {
    size_t found = 0;
    auto followup = contCon.followup;
    auto followupWrite = contCon.followupWrite;
 
    if (followup == followupWrite) {
+      VW_JOIN_PF_WARMUP(shared.ht, probeHashes, cont.numProbes);
       for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
+         VW_JOIN_PF_STEP(shared.ht, probeHashes, i, end);
          auto hash = probeHashes[i];
          auto entry = shared.ht.find_chain_tagged(hash);
          if (entry != shared.ht.end()) {
@@ -458,7 +496,9 @@ pos_t Hashjoin::joinSelParallel() {
    auto followupWrite = contCon.followupWrite;
 
    if (followup == followupWrite) {
+      VW_JOIN_PF_WARMUP(shared.ht, probeHashes, cont.numProbes);
       for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
+         VW_JOIN_PF_STEP(shared.ht, probeHashes, i, end);
          auto hash = probeHashes[i];
          auto entry = shared.ht.find_chain_tagged(hash);
          if (entry != shared.ht.end()) {
@@ -983,6 +1023,15 @@ void HashGroup::Hash(pos_t n) {
 }
 
 template <typename T> void HashGroup::Hash_T(pos_t n) {
+#if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH) && !defined(VW_USE_CRC32)
+   // packed 1/2/4/8-byte keys: AVX-512 MurmurHash64A, bit-identical to
+   // hashFn.hashKey(key) below
+   if constexpr (!std::is_same_v<T, char*>) {
+      primitives::simd_hash::hash_keys<T>(n, packedKeys.data(),
+                                          preAggregation.groupHashes);
+      return;
+   }
+#endif
    uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
    char* __restrict__ keys = packedKeys.data();
    hash_t* __restrict__ hashes = preAggregation.groupHashes;

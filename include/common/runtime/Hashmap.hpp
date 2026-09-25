@@ -51,6 +51,12 @@ class Hashmap {
    /// contained
    inline EntryHeader* find_chain_tagged(hash_t hash);
    inline Vec8uM find_chain_tagged(Vec8u hashes);
+   /// Software prefetch (VW_JOIN_PREFETCH): the directory slot for hash
+   inline void prefetch_slot(hash_t hash) const;
+   /// Software prefetch: the first chain entry for hash, if the slot's tag
+   /// filter matches (the slot itself should already be cached by
+   /// prefetch_slot); otherwise re-touches the slot. Branch-free.
+   inline void prefetch_chain_tagged(hash_t hash);
    /// Insert entry into chain for the given hash
    template <bool concurrentInsert = true>
    inline void insert(EntryHeader* entry, hash_t hash);
@@ -155,6 +161,18 @@ inline Hashmap::EntryHeader* Hashmap::find_chain_tagged(hash_t hash) {
       return ptr(candidate);
    else
       return end();
+}
+
+inline void Hashmap::prefetch_slot(hash_t hash) const {
+   __builtin_prefetch(&entries[hash & mask], 0, 3);
+}
+
+inline void Hashmap::prefetch_chain_tagged(hash_t hash) {
+   auto slot = &entries[hash & mask];
+   auto candidate = slot->load(std::memory_order_relaxed);
+   const bool match = ((size_t)candidate & tag(hash)) != 0;
+   const void* target = match ? (const void*)ptr(candidate) : (const void*)slot;
+   __builtin_prefetch(target, 0, 3);
 }
 
 inline Vec8uM Hashmap::find_chain_tagged(Vec8u hashes) {

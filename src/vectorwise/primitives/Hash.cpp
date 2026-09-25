@@ -2,6 +2,7 @@
 #include "common/runtime/Hash.hpp"
 #include "vectorwise/Operations.hpp"
 #include "vectorwise/Primitives.hpp"
+#include "vectorwise/SimdHash.hpp"
 #include <functional>
 
 using namespace types;
@@ -20,6 +21,29 @@ namespace primitives {
 #endif
 
 
+#if defined(VW_SIMD_HASH) && !defined(VW_HAVE_SIMD_HASH)
+#pragma message("VW_SIMD_HASH: needs AVX-512F+DQ and 64-bit hashes, using scalar hashing")
+#endif
+
+#ifdef VW_SIMD_HASH
+// VW_SIMD_HASH: the public names point at the AVX-512 MurmurHash64A kernels
+// (SimdHash.hpp) for supported key types when DEFAULT_HASH is MurMurHash;
+// otherwise at the scalar templates. Results are bit-identical.
+#define MK_HASH(type)                                                          \
+   F2 hash_##type##_col = (F2)simd_hash::pick_hash<type, DEFAULT_HASH>(        \
+       &hash<type, DEFAULT_HASH>);
+#define MK_HASH_SEL(type)                                                      \
+   F3 hash_sel_##type##_col =                                                  \
+       (F3)simd_hash::pick_hash_sel<type, DEFAULT_HASH>(                       \
+           &hash_sel<type, DEFAULT_HASH>);
+#define MK_REHASH(type)                                                        \
+   F2 rehash_##type##_col = (F2)simd_hash::pick_rehash<type, DEFAULT_HASH>(    \
+       &rehash<type, DEFAULT_HASH>);
+#define MK_REHASH_SEL(type)                                                    \
+   F3 rehash_sel_##type##_col =                                                \
+       (F3)simd_hash::pick_rehash_sel<type, DEFAULT_HASH>(                     \
+           &rehash_sel<type, DEFAULT_HASH>);
+#else
 #define MK_HASH(type) F2 hash_##type##_col = (F2)&hash<type, DEFAULT_HASH>;
 #define MK_HASH_SEL(type)                                                      \
    F3 hash_sel_##type##_col = (F3)&hash_sel<type, DEFAULT_HASH>;
@@ -27,6 +51,7 @@ namespace primitives {
    F2 rehash_##type##_col = (F2)&rehash<type, DEFAULT_HASH>;
 #define MK_REHASH_SEL(type)                                                    \
    F3 rehash_sel_##type##_col = (F3)&rehash_sel<type, DEFAULT_HASH>;
+#endif
 
 EACH_TYPE(NIL, MK_HASH)
 EACH_TYPE(NIL, MK_HASH_SEL)
