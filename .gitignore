@@ -60,3 +60,14 @@ scripts/
 
 # offline machine registration notes (not tracked)
 OFFLINE_MACHINE_REGISTRATION.md
+
+# per-flag ablation build/results trees (regenerated per run)
+build_ablation/
+build_flags/
+build_width/
+build_q1ab_head/
+results/
+
+# ad-hoc analysis scripts
+rselbench.sh
+run_vw_prof.sh
