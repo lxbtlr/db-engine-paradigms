@@ -10,7 +10,7 @@
 #   w256_mem  VW_SIMD_SEL=ON  WIDTH=256 COMPRESS=mem
 # it
 #   1. configures + builds run_tpch, run_selbench, test_all into build_width/<compiler>_<config>
-#      and checks the TARGET_MACHINE preset resolved (dubliner: -march=native)
+#      and logs the arch flags the TARGET_MACHINE preset resolved to
 #   2. checks codegen: the redirected sel_col_val/sel_col_col kernels in
 #      Selection.cpp.o use zmm only for w512, ymm vpcompressd for w256*
 #   3. runs the unit tests (SimdSel*) and the TPC-H correctness tests (TPCH.*)
@@ -25,7 +25,7 @@
 #   COMPILERS  "gcc clang"
 #   CONFIGS    "base w512 w256 w256_mem"
 #   TUNED      "-DVW_GROUP_AGGR=ON -DVW_GROUP_AGGR_SEL=ON -DVW_POS_16=ON -DVW_USE_CRC32=ON -DHUGE_2MB_MALLOC_HUGE=ON"
-#   MACHINE    dubliner
+#   MACHINE    $(hostname -s) if it is a preset (dubliner, roquefort, manchego, burrata, kafir, rpi5), else custom
 #   DATADIR    /tank/alexb/swole/          test_all reads $DATADIR/tpch/sf1/
 #   TPCH_PATH  /tank/alexb/swole/tpch/sf1  run_tpch -p
 #   QUERIES    1,6,3,5,18
@@ -33,19 +33,28 @@
 #   ROUNDS     3         alternating rounds per query
 #   SETTLE     2         run_tpch -s
 #   CPU        0         CPU for every timed run (single thread)
-#   NUMA       "numactl --physcpubind=$CPU --membind=0"  ("" = none)
+#   NODE       NUMA node of CPU (from sysfs)
+#   NUMA       "numactl --physcpubind=$CPU --membind=$NODE"; taskset -c $CPU
+#              without numactl; "" = no pinning
 #   PERF       1         0 = skip perf stat counters
 #   TEST_THREADS 4       worker threads for test_all
 #   JOBS       $(nproc)
 #   SKIP_BUILD 0         1 = reuse build dirs
 #   TIMEOUT    1800      seconds per step (0 = none)
+#   FORCE      0         1 = run even without AVX-512VL (x86); results are meaningless there
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILERS=${COMPILERS:-"gcc clang"}
 CONFIGS=${CONFIGS:-"base w512 w256 w256_mem"}
 TUNED=${TUNED:-"-DVW_GROUP_AGGR=ON -DVW_GROUP_AGGR_SEL=ON -DVW_POS_16=ON -DVW_USE_CRC32=ON -DHUGE_2MB_MALLOC_HUGE=ON"}
-MACHINE=${MACHINE:-dubliner}
+# MACHINE defaults to this host's short name when it is a TARGET_MACHINE
+# preset, else "custom" (-march=native, CMake topology defaults).
+detect_machine() {
+  local h; h=$(hostname -s 2>/dev/null || hostname)
+  case "$h" in dubliner|roquefort|manchego|burrata|kafir|rpi5) echo "$h" ;; *) echo custom ;; esac
+}
+MACHINE=${MACHINE:-$(detect_machine)}
 DATADIR=${DATADIR:-/tank/alexb/swole/}
 TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf1}
 QUERIES=${QUERIES:-1,6,3,5,18}
@@ -53,13 +62,31 @@ REPS=${REPS:-30}
 ROUNDS=${ROUNDS:-3}
 SETTLE=${SETTLE:-2}
 CPU=${CPU:-0}
-NUMA=${NUMA-"numactl --physcpubind=$CPU --membind=0"}
+# NUMA node of CPU from sysfs (0 if the kernel exposes none)
+cpu_node() {
+  local d
+  for d in /sys/devices/system/cpu/cpu"$1"/node[0-9]*; do [ -e "$d" ] && { echo "${d##*node}"; return; }; done
+  echo 0
+}
+NODE=${NODE:-$(cpu_node "$CPU")}
+# pin with numactl (CPU + its local memory), else taskset (CPU only), else none
+if [ -z "${NUMA+x}" ]; then
+  if command -v numactl > /dev/null; then NUMA="numactl --physcpubind=$CPU --membind=$NODE"
+  elif command -v taskset > /dev/null; then NUMA="taskset -c $CPU"
+  else NUMA=""; fi
+fi
 PERF=${PERF:-1}
 TEST_THREADS=${TEST_THREADS:-4}
 JOBS=${JOBS:-$(nproc)}
 SKIP_BUILD=${SKIP_BUILD:-0}
 TIMEOUT=${TIMEOUT:-1800}
 
+# The script compares AVX-512 (zmm) against AVX-512VL (ymm) kernels, so it
+# needs an x86 CPU with AVX-512VL (not Zen 3 or ARM).
+if ! grep -q -w avx512vl /proc/cpuinfo && [ "${FORCE:-0}" != 1 ]; then
+  echo "simd_sel_width.sh: this CPU ($(uname -m)) has no AVX-512VL; nothing to compare (FORCE=1 to run anyway)" >&2
+  exit 2
+fi
 OUT="$ROOT/results/simd_sel_width_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 FAILS=0
@@ -79,10 +106,14 @@ config_flags() {
   esac
 }
 bdir() { echo "$ROOT/build_width/$1_$2"; }
+# reject unknown config names before building (exit inside $(config_flags)
+# only leaves the subshell)
+for cfg in $CONFIGS; do (config_flags "$cfg") > /dev/null || { rm -rf "$OUT"; exit 2; }; done
 
 # ---------------------------------------------------------------- machine info
 {
   echo "host: $(hostname)"
+  echo "MACHINE: $MACHINE  CPU: $CPU  NODE: $NODE  pin: ${NUMA:-none}"
   echo "date: $(date -Is)"
   echo "git:  $(git -C "$ROOT" rev-parse --short HEAD) $(git -C "$ROOT" status --porcelain --untracked-files=no | wc -l) dirty tracked files"
   lscpu | grep -E 'Model name|Socket|Core|Thread|NUMA node\(s\)|MHz' || true
@@ -91,7 +122,8 @@ bdir() { echo "$ROOT/build_width/$1_$2"; }
   echo -n "turbo (intel_pstate no_turbo): "; cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || echo n/a
   echo "TUNED: $TUNED"
 } | tee "$OUT/machine.txt"
-grep -q -w avx512vl /proc/cpuinfo || log "WARNING: no avx512vl; w256 builds fall back to 512-bit kernels"
+[ "$MACHINE" = custom ] && log "WARNING: host $(hostname -s) is not a TARGET_MACHINE preset; building with MACHINE=custom (-march=native, default topology). Set MACHINE= to override."
+grep -q -w avx512vl /proc/cpuinfo || log "WARNING: no avx512vl (FORCE=1); SIMD kernels fall back and the codegen checks will fail"
 
 # perf events: license counters exist on Skylake-SP / Cascade Lake
 EVENTS="cycles,ref-cycles,instructions"
@@ -207,27 +239,35 @@ else
 fi
 
 # ------------------------------------------------------------------ summaries
-# speedup = base mean-of-medians / config mean-of-medians (same compiler, query)
-awk -F, 'NR > 1 { k = $1 "," $2 "," $4; s[k] += $5; n[k]++; if (!(k in mn) || $6 < mn[k]) mn[k] = $6 }
-  END { for (k in s) { split(k, p, ","); mean[k] = s[k] / n[k]; b = p[1] ",base," p[3]
-          if (b in s) base[k] = s[b] / n[b] }
-        print "compiler,config,query,mean_median_ms,best_ms,speedup_vs_base"
-        for (k in s) printf "%s,%.2f,%.2f,%s\n", k, mean[k], mn[k], (k in base) ? sprintf("%.3f", base[k] / mean[k]) : "" }' \
-  "$OUT/timing.csv" | sort -t, -k1,1 -k3,3 -k2,2 > "$OUT/speedup.csv"
+# speedup = base median / config median (same compiler, query), where median
+# is over rounds of the per-invocation medians, so one disturbed invocation
+# does not skew it. Headers are printed outside sort so they stay on line 1.
+{ echo "compiler,config,query,median_ms,best_ms,speedup_vs_base"
+  awk -F, '
+    function median(str,   a, n, i, j, t) {
+      n = split(str, a, " ")
+      for (i = 2; i <= n; i++) { t = a[i] + 0; for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]; a[j + 1] = t }
+      return (n % 2) ? a[(n + 1) / 2] : (a[n / 2] + a[n / 2 + 1]) / 2
+    }
+    NR > 1 { k = $1 "," $2 "," $4; v[k] = v[k] " " $5; if (!(k in mn) || $6 < mn[k]) mn[k] = $6 }
+    END { for (k in v) m[k] = median(v[k])
+          for (k in m) { split(k, p, ","); b = p[1] ",base," p[3]
+            printf "%s,%.2f,%.2f,%s\n", k, m[k], mn[k], (b in m) ? sprintf("%.3f", m[b] / m[k]) : "" } }' \
+    "$OUT/timing.csv" | sort -t, -k1,1 -k3,3 -k2,2; } > "$OUT/speedup.csv"
 
 # license.csv: effective clock ratio (cycles/ref-cycles) and share of cycles in
 # AVX license level 1 (AVX2 heavy / AVX-512 light) and level 2 (AVX-512 heavy).
 # Counts cover the whole run_tpch invocation including data load; the load
 # phase is scalar, so lvl1/lvl2 cycles come from the queries.
+{ echo "compiler,config,query,cycles_per_refcycle,lvl1_share_pct,lvl2_share_pct"
 awk -F, 'NR > 1 { k = $1 "," $2 "," $4; v[k "," $5] += $6; keys[k] = 1 }
-  END { print "compiler,config,query,cycles_per_refcycle,lvl1_share_pct,lvl2_share_pct"
-        for (k in keys) { c = v[k ",cycles"]; rc = v[k ",ref-cycles"]
+  END { for (k in keys) { c = v[k ",cycles"]; rc = v[k ",ref-cycles"]
           l1 = v[k ",core_power.lvl1_turbo_license"]; l2 = v[k ",core_power.lvl2_turbo_license"]
           printf "%s,%s,%s,%s\n", k, rc ? sprintf("%.3f", c / rc) : "",
                  c ? sprintf("%.2f", 100 * l1 / c) : "", c ? sprintf("%.2f", 100 * l2 / c) : "" } }' \
-  "$OUT/perf.csv" | sort -t, -k1,1 -k3,3 -k2,2 > "$OUT/license.csv"
+  "$OUT/perf.csv" | sort -t, -k1,1 -k3,3 -k2,2; } > "$OUT/license.csv"
 
-log "speedup vs base (mean of per-invocation medians, t=1):"
+log "speedup vs base (median over rounds of per-invocation medians, t=1):"
 column -t -s, "$OUT/speedup.csv" | tee -a "$OUT/driver.log"
 if [ "$PERF" = 1 ]; then
   log "clock / AVX license:"

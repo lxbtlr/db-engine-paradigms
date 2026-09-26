@@ -28,8 +28,10 @@
 # Environment (all optional):
 #   COMPILERS  "gcc clang"
 #   CONFIGS    all 12 (see config_flags)
-#   SEL        "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg"
-#   MACHINE    dubliner
+#   SEL        by CPU: AVX-512VL "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg",
+#              AVX-512F only "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg",
+#              otherwise (Zen 3, ARM, ...) "-DVW_SIMD_SEL=OFF"
+#   MACHINE    $(hostname -s) if it is a preset (dubliner, roquefort, manchego, burrata, kafir, rpi5), else custom
 #   DATADIR    /tank/alexb/swole/          test_all reads $DATADIR/tpch/sf1/
 #   TPCH_PATH  /tank/alexb/swole/tpch/sf1  run_tpch -p
 #   QUERIES    1,3,6,9,18
@@ -37,11 +39,14 @@
 #   ROUNDS     3
 #   SETTLE     2         run_tpch -s
 #   CPU        0
-#   NUMA       "numactl --physcpubind=$CPU --membind=0"  ("" = none)
+#   NODE       NUMA node of CPU (from sysfs)
+#   NUMA       "numactl --physcpubind=$CPU --membind=$NODE"; taskset -c $CPU
+#              without numactl; "" = no pinning
 #   TEST_THREADS 4       worker threads for test_all
 #   JOBS       $(nproc)
 #   SKIP_BUILD 0         1 = reuse build dirs
 #   TIMEOUT    1800      seconds per step (0 = none)
+#   SUMMARIZE_ONLY <dir> recompute matrix/effects/best from <dir>/timing.csv and exit
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -49,8 +54,20 @@ COMPILERS=${COMPILERS:-"gcc clang"}
 ALL_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
 CONFIGS=${CONFIGS:-$ALL_CONFIGS}
-SEL=${SEL:-"-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg"}
-MACHINE=${MACHINE:-dubliner}
+# SIMD selection only where the CPU has the kernels' ISA, so a config never
+# claims SIMD selection while silently running the scalar fallback
+if [ -z "${SEL:-}" ]; then
+  if grep -q -w avx512vl /proc/cpuinfo; then SEL="-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg"
+  elif grep -q -w avx512f /proc/cpuinfo; then SEL="-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg"
+  else SEL="-DVW_SIMD_SEL=OFF"; fi
+fi
+# MACHINE defaults to this host's short name when it is a TARGET_MACHINE
+# preset, else "custom" (-march=native, CMake topology defaults).
+detect_machine() {
+  local h; h=$(hostname -s 2>/dev/null || hostname)
+  case "$h" in dubliner|roquefort|manchego|burrata|kafir|rpi5) echo "$h" ;; *) echo custom ;; esac
+}
+MACHINE=${MACHINE:-$(detect_machine)}
 DATADIR=${DATADIR:-/tank/alexb/swole/}
 TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf1}
 QUERIES=${QUERIES:-1,3,6,9,18}
@@ -58,11 +75,61 @@ REPS=${REPS:-30}
 ROUNDS=${ROUNDS:-3}
 SETTLE=${SETTLE:-2}
 CPU=${CPU:-0}
-NUMA=${NUMA-"numactl --physcpubind=$CPU --membind=0"}
+# NUMA node of CPU from sysfs (0 if the kernel exposes none)
+cpu_node() {
+  local d
+  for d in /sys/devices/system/cpu/cpu"$1"/node[0-9]*; do [ -e "$d" ] && { echo "${d##*node}"; return; }; done
+  echo 0
+}
+NODE=${NODE:-$(cpu_node "$CPU")}
+# pin with numactl (CPU + its local memory), else taskset (CPU only), else none
+if [ -z "${NUMA+x}" ]; then
+  if command -v numactl > /dev/null; then NUMA="numactl --physcpubind=$CPU --membind=$NODE"
+  elif command -v taskset > /dev/null; then NUMA="taskset -c $CPU"
+  else NUMA=""; fi
+fi
 TEST_THREADS=${TEST_THREADS:-4}
 JOBS=${JOBS:-$(nproc)}
 SKIP_BUILD=${SKIP_BUILD:-0}
 TIMEOUT=${TIMEOUT:-1800}
+
+# matrix.csv: compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned
+# median_ms is the median over rounds of the per-invocation medians, so one
+# disturbed invocation (seen on dubliner: 2-3x slower rounds) does not skew it.
+# The header is printed outside sort so it stays on line 1.
+summarize() {
+  awk -F, '
+    function median(str,   a, n, i, j, t) {
+      n = split(str, a, " ")
+      for (i = 2; i <= n; i++) { t = a[i] + 0; for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]; a[j + 1] = t }
+      return (n % 2) ? a[(n + 1) / 2] : (a[n / 2] + a[n / 2 + 1]) / 2
+    }
+    NR > 1 { k = $1 "," $4 "," $2; v[k] = v[k] " " $5; if (!(k in mn) || $6 < mn[k]) mn[k] = $6 }
+    END { for (k in v) m[k] = median(v[k])
+          for (k in m) { split(k, p, ","); d = p[1] "," p[2] ",default"; t = p[1] "," p[2] ",tuned"
+            printf "%s,%.2f,%.2f,%s,%s\n", k, m[k], mn[k],
+                   (d in m) ? sprintf("%.3f", m[d] / m[k]) : "", (t in m) ? sprintf("%.3f", m[t] / m[k]) : "" } }' \
+    "$OUT/timing.csv" | sort -t, -k1,1 -k2,2V -k3,3 > "$OUT/matrix.body"
+  { echo "compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned"; cat "$OUT/matrix.body"; } > "$OUT/matrix.csv"
+
+  # effects.csv: add_speedup = default / add_<flag>, drop_speedup = drop_<flag> / tuned
+  { echo "compiler,query,flag,add_speedup,drop_speedup"
+    awk -F, '{ m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
+      END { split("group_aggr group_aggr_sel pos16 crc32 huge2mb", fl, " ")
+            for (k in cq) for (i = 1; i <= 5; i++) { f = fl[i]
+              d = m[k ",default"]; a = m[k ",add_" f]; t = m[k ",tuned"]; x = m[k ",drop_" f]
+              printf "%s,%s,%s,%s\n", k, f, (d && a) ? sprintf("%.3f", d / a) : "", (t && x) ? sprintf("%.3f", x / t) : "" } }' \
+      "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/effects.csv"
+
+  # best.csv: fastest config per compiler x query (by median_ms)
+  { echo "compiler,query,best_config,median_ms,vs_default,vs_tuned"
+    awk -F, '{ k = $1 "," $2; if (!(k in b) || $4 < b[k]) { b[k] = $4; c[k] = $3; d[k] = $6; t[k] = $7 } }
+      END { for (k in b) printf "%s,%s,%.2f,%s,%s\n", k, c[k], b[k], d[k], t[k] }' "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/best.csv"
+  rm -f "$OUT/matrix.body"
+}
+# SUMMARIZE_ONLY=<results dir>: recompute the summaries from its timing.csv
+if [ -n "${SUMMARIZE_ONLY:-}" ]; then OUT=$SUMMARIZE_ONLY; summarize
+  column -t -s, "$OUT/effects.csv"; column -t -s, "$OUT/best.csv"; exit 0; fi
 
 OUT="$ROOT/results/flag_ablation_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
@@ -99,16 +166,21 @@ config_flags() {
   esac
 }
 bdir() { echo "$ROOT/build_flags/$1_$2"; }
+# reject unknown config names before building (exit inside $(config_flags)
+# only leaves the subshell)
+for cfg in $CONFIGS; do (config_flags "$cfg") > /dev/null || { rm -rf "$OUT"; exit 2; }; done
 
 {
   echo "host: $(hostname)"
+  echo "MACHINE: $MACHINE  CPU: $CPU  NODE: $NODE  pin: ${NUMA:-none}"
   echo "date: $(date -Is)"
   echo "git:  $(git -C "$ROOT" rev-parse --short HEAD) $(git -C "$ROOT" status --porcelain --untracked-files=no | wc -l) dirty tracked files"
   lscpu | grep -E 'Model name|Socket|Core|Thread|NUMA node\(s\)|MHz' || true
   echo -n "governor cpu$CPU: "; cat "/sys/devices/system/cpu/cpu$CPU/cpufreq/scaling_governor" 2>/dev/null || echo n/a
-  echo "SEL: $SEL"
-  echo "QUERIES: $QUERIES  REPS: $REPS  ROUNDS: $ROUNDS  CPU: $CPU  NUMA: $NUMA"
+  echo "SEL: $SEL  (avx512: $(grep -o -w -E 'avx512(f|vl)' /proc/cpuinfo | sort -u | tr '\n' ' '))"
+  echo "QUERIES: $QUERIES  REPS: $REPS  ROUNDS: $ROUNDS"
 } | tee "$OUT/machine.txt"
+[ "$MACHINE" = custom ] && log "WARNING: host $(hostname -s) is not a TARGET_MACHINE preset; building with MACHINE=custom (-march=native, default topology). Set MACHINE= to override."
 
 # ------------------------------------------------------- build + correctness
 for comp in $COMPILERS; do
@@ -168,28 +240,7 @@ else
 fi
 
 # ---------------------------------------------------------------- summaries
-# matrix.csv: compiler,query,config,mean_median_ms,best_ms,speedup_vs_default,speedup_vs_tuned
-awk -F, 'NR > 1 { k = $1 "," $4 "," $2; s[k] += $5; n[k]++; if (!(k in mn) || $6 < mn[k]) mn[k] = $6 }
-  END { for (k in s) m[k] = s[k] / n[k]
-        print "compiler,query,config,mean_median_ms,best_ms,speedup_vs_default,speedup_vs_tuned"
-        for (k in m) { split(k, p, ","); d = p[1] "," p[2] ",default"; t = p[1] "," p[2] ",tuned"
-          printf "%s,%.2f,%.2f,%s,%s\n", k, m[k], mn[k],
-                 (d in m) ? sprintf("%.3f", m[d] / m[k]) : "", (t in m) ? sprintf("%.3f", m[t] / m[k]) : "" } }' \
-  "$OUT/timing.csv" | sort -t, -k1,1 -k2,2V -k3,3 > "$OUT/matrix.csv"
-
-# effects.csv: add_speedup = default / add_<flag>, drop_speedup = drop_<flag> / tuned
-awk -F, 'NR > 1 { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-  END { split("group_aggr group_aggr_sel pos16 crc32 huge2mb", fl, " ")
-        print "compiler,query,flag,add_speedup,drop_speedup"
-        for (k in cq) for (i = 1; i <= 5; i++) { f = fl[i]
-          d = m[k ",default"]; a = m[k ",add_" f]; t = m[k ",tuned"]; x = m[k ",drop_" f]
-          printf "%s,%s,%s,%s\n", k, f, (d && a) ? sprintf("%.3f", d / a) : "", (t && x) ? sprintf("%.3f", x / t) : "" } }' \
-  "$OUT/matrix.csv" | sort -t, -k1,1 -k2,2V > "$OUT/effects.csv"
-
-# best.csv: fastest config per compiler x query (by mean of medians)
-awk -F, 'NR > 1 { k = $1 "," $2; if (!(k in b) || $4 < b[k]) { b[k] = $4; c[k] = $3 } }
-  END { print "compiler,query,best_config,mean_median_ms"; for (k in b) printf "%s,%s,%.2f\n", k, c[k], b[k] }' \
-  "$OUT/matrix.csv" | sort -t, -k1,1 -k2,2V > "$OUT/best.csv"
+summarize
 
 log "per-flag effect (>1 = flag helps; add = vs default, drop = vs tuned):"
 column -t -s, "$OUT/effects.csv" | tee -a "$OUT/driver.log"
