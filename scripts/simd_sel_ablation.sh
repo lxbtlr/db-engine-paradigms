@@ -4,7 +4,7 @@
 # prefetching (VW_JOIN_PREFETCH). See config_flags for the configs.
 #
 # For every compiler x config it:
-#   1. configures + builds test_all, run_selbench, run_hashbench, run_tpch into build_ablation/<compiler>_<config>
+#   1. configures + builds test_all, run_selbench, run_hashbench, run_tpch into build_ablation/<host>/<compiler>_<config>
 #   2. checks via nm/objdump that SIMD kernels / prefetches exist exactly when their option is ON
 #   3. runs the differential unit tests (SimdSel*, SimdSelRedirect*, SimdHash*, GTEQ*)
 #   4. runs the TPC-H correctness tests (TPCH.*) with SIMDsel=0 and SIMDsel=1   [needs DATADIR sf1]
@@ -38,6 +38,9 @@ set -u -o pipefail
 DATADIR="/tank/alexb/swole/"
 TPCH_PATH="/tank/alexb/swole/tpch/sf1"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# per-host build/results paths: several machines may share this checkout
+# over NFS, and must never write the same build tree
+BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 COMPILERS=${COMPILERS:-"gcc clang"}
 CONFIGS=${CONFIGS:-"base sel sel_scalarload sel_hwgather sel_char sel_pos16"}
 MACHINE=${MACHINE:-dubliner}
@@ -53,7 +56,7 @@ TEST_THREADS=${TEST_THREADS:-${THREADS%%,*}}
 TIMEOUT=${TIMEOUT:-1800}
 # run a step with a time limit; a timeout counts as a failure (exit 124)
 tlimit() { if [ "$TIMEOUT" -gt 0 ]; then timeout --kill-after=30 "$TIMEOUT" "$@"; else "$@"; fi; }
-OUT="$ROOT/results/simd_sel_$(date +%Y%m%d_%H%M%S)"
+OUT="$ROOT/results/simd_sel_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 FAILS=0
 
@@ -116,7 +119,7 @@ echo "compiler,config,simdsel,query,threads,median_ms" > "$OUT/summary.csv"
 for comp in $COMPILERS; do
   for cfg in $CONFIGS; do
     tag="${comp}_${cfg}"
-    B="$ROOT/build_ablation/$tag"
+    B="$ROOT/build_ablation/$BENCH_HOST/$tag"
     D="$OUT/$tag"
     mkdir -p "$D"
     log "===== $tag ====="

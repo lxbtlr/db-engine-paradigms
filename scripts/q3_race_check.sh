@@ -3,7 +3,7 @@
 #
 # Answers two questions:
 #   1. Is it a race?        TPCH.q3 at several thread counts, several times each,
-#                           on an existing build (default: build_ablation/gcc_base).
+#                           on an existing build (default: build_ablation/<host>/gcc_base).
 #   2. Is it pre-existing?  Same test on a clean worktree of PRE_COMMIT (default
 #                           e841b30, the commit before the SIMD selection work).
 #   3. Is it the restrict?  Same test on HEAD with only the lookup_sel_
@@ -11,7 +11,7 @@
 #
 # Environment:
 #   DATADIR       (required for part 2) CMake DATADIR; tests read $DATADIR/tpch/sf1/
-#   BUILD         build_ablation/gcc_base      existing build dir with test_all
+#   BUILD         build_ablation/<host>/gcc_base  existing build dir with test_all
 #   THREADS_LIST  "1 2 4 8 22 44 $(nproc)"
 #   REPEAT        3                            runs per thread count
 #   PRE_COMMIT    e841b30                      set PRE_COMMIT= to skip part 2
@@ -22,14 +22,17 @@
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD=${BUILD:-$ROOT/build_ablation/gcc_base}
+# per-host build/results paths: several machines may share this checkout
+# over NFS, and must never write the same build tree
+BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
+BUILD=${BUILD:-$ROOT/build_ablation/$BENCH_HOST/gcc_base}
 THREADS_LIST=${THREADS_LIST:-"1 2 4 8 22 44 $(nproc)"}
 REPEAT=${REPEAT:-3}
 PRE_COMMIT=${PRE_COMMIT-e841b30}
 COMPILER=${COMPILER:-gcc}
 MACHINE=${MACHINE:-dubliner}
 KEEP_WORKTREE=${KEEP_WORKTREE:-0}
-OUT="$ROOT/results/q3_check_$(date +%Y%m%d_%H%M%S)"
+OUT="$ROOT/results/q3_check_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/driver.log"; }
@@ -87,7 +90,7 @@ run_q3 current "$BUILD/test_all"
 # patch function inside it, build test_all, run the sweep. Worktree is removed
 # afterwards unless KEEP_WORKTREE=1.
 build_variant() {
-  local name=$1 commit=$2 patch=$3 wt="$ROOT/../q3_$1" pb
+  local name=$1 commit=$2 patch=$3 wt="$ROOT/../q3_$1_$BENCH_HOST" pb
   log "$name: worktree of $commit at $wt"
   if [ ! -d "$wt" ]; then
     git -C "$ROOT" worktree add --detach "$wt" "$commit" > "$OUT/${name}_worktree.log" 2>&1       || { log "$name: git worktree add failed (see $OUT/${name}_worktree.log)"; return 1; }

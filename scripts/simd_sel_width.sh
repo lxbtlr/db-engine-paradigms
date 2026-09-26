@@ -9,7 +9,7 @@
 #   w256      VW_SIMD_SEL=ON  WIDTH=256 COMPRESS=reg
 #   w256_mem  VW_SIMD_SEL=ON  WIDTH=256 COMPRESS=mem
 # it
-#   1. configures + builds run_tpch, run_selbench, test_all into build_width/<compiler>_<config>
+#   1. configures + builds run_tpch, run_selbench, test_all into build_width/<host>/<compiler>_<config>
 #      and logs the arch flags the TARGET_MACHINE preset resolved to
 #   2. checks codegen: the redirected sel_col_val/sel_col_col kernels in
 #      Selection.cpp.o use zmm only for w512, ymm vpcompressd for w256*
@@ -45,6 +45,9 @@
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# per-host build/results paths: several machines may share this checkout
+# over NFS, and must never write the same build tree
+BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 COMPILERS=${COMPILERS:-"gcc clang"}
 CONFIGS=${CONFIGS:-"base w512 w256 w256_mem"}
 TUNED=${TUNED:-"-DVW_GROUP_AGGR=ON -DVW_GROUP_AGGR_SEL=ON -DVW_POS_16=ON -DVW_USE_CRC32=ON -DHUGE_2MB_MALLOC_HUGE=ON"}
@@ -87,7 +90,7 @@ if ! grep -q -w avx512vl /proc/cpuinfo && [ "${FORCE:-0}" != 1 ]; then
   echo "simd_sel_width.sh: this CPU ($(uname -m)) has no AVX-512VL; nothing to compare (FORCE=1 to run anyway)" >&2
   exit 2
 fi
-OUT="$ROOT/results/simd_sel_width_$(date +%Y%m%d_%H%M%S)"
+OUT="$ROOT/results/simd_sel_width_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 FAILS=0
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/driver.log"; }
@@ -105,7 +108,7 @@ config_flags() {
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
-bdir() { echo "$ROOT/build_width/$1_$2"; }
+bdir() { echo "$ROOT/build_width/$BENCH_HOST/$1_$2"; }
 # reject unknown config names before building (exit inside $(config_flags)
 # only leaves the subshell)
 for cfg in $CONFIGS; do (config_flags "$cfg") > /dev/null || { rm -rf "$OUT"; exit 2; }; done

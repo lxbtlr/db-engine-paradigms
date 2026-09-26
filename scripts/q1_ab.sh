@@ -20,6 +20,9 @@
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# per-host build/results paths: several machines may share this checkout
+# over NFS, and must never write the same build tree
+BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 BASE=${BASE:-01adaeb}
 TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf1}
 COMPILER=${COMPILER:-gcc}
@@ -29,11 +32,11 @@ THREADS=${THREADS:-1}
 REPS=${REPS:-30}
 ROUNDS=${ROUNDS:-5}
 NUMA=${NUMA-"numactl --cpunodebind=0 --membind=0"}
-OUT="$ROOT/results/q1_ab_$(date +%Y%m%d_%H%M%S)"
+OUT="$ROOT/results/q1_ab_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/driver.log"; }
 
-WT="$ROOT/../q1_ab_base_$BASE"
+WT="$ROOT/../q1_ab_base_${BASE}_$BENCH_HOST"
 log "BASE=$BASE HEAD=$(git -C "$ROOT" rev-parse --short HEAD) compiler=$COMPILER extra='$EXTRA'"
 [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ] && \
   log "WARNING: working tree has uncommitted changes; HEAD build uses them"
@@ -55,7 +58,7 @@ build() { # <src> <builddir> <tag>
         -DTARGET_MACHINE="$MACHINE" $EXTRA > "$OUT/$3_cmake.log" 2>&1 &&
   cmake --build "$2" -j "$(nproc)" --target run_tpch > "$OUT/$3_build.log" 2>&1
 }
-BB="$WT/build_q1ab"; HB="$ROOT/build_q1ab_head"
+BB="$WT/build_q1ab"; HB="$ROOT/build_q1ab_head/$BENCH_HOST"
 build "$WT" "$BB" base || { log "BASE build failed (see $OUT/base_build.log)"; exit 1; }
 build "$ROOT" "$HB" head || { log "HEAD build failed (see $OUT/head_build.log)"; exit 1; }
 # identical compile flags?

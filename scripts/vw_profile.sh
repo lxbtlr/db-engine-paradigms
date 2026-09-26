@@ -9,7 +9,7 @@
 #
 # Environment:
 #   TPCH_PATH  (required) run_tpch -p path, e.g. .../tpch/sf10/
-#   BUILDS     "build_ablation/gcc_base build_ablation/gcc_sel_char"
+#   BUILDS     "build_ablation/<host>/gcc_base build_ablation/<host>/gcc_sel_char"
 #   QUERIES    "1 3 5 6 9 18"
 #   THREADS    "1"          space-separated; 1 keeps symbols clean of scheduling noise
 #   REPS       20           run_tpch -r; the TPC-H load is sampled too, so more
@@ -19,14 +19,17 @@
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# per-host build/results paths: several machines may share this checkout
+# over NFS, and must never write the same build tree
+BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 : "${TPCH_PATH:?set TPCH_PATH to the run_tpch data dir (e.g. .../tpch/sf10/)}"
-BUILDS=${BUILDS:-"build_ablation/gcc_base build_ablation/gcc_sel_char"}
+BUILDS=${BUILDS:-"build_ablation/$BENCH_HOST/gcc_base build_ablation/$BENCH_HOST/gcc_sel_char"}
 QUERIES=${QUERIES:-"1 3 5 6 9 18"}
 THREADS=${THREADS:-"1"}
 REPS=${REPS:-20}
 FREQ=${FREQ:-2999}
 PERF=${PERF:-perf}
-OUT="$ROOT/results/vw_profile_$(date +%Y%m%d_%H%M%S)"
+OUT="$ROOT/results/vw_profile_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/driver.log"; }
 

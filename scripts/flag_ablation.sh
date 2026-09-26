@@ -15,7 +15,7 @@
 # the same in every config.
 #
 # For every compiler x config it builds run_tpch + test_all into
-# build_flags/<compiler>_<config>, runs the TPC-H correctness tests, then
+# build_flags/<host>/<compiler>_<config>, runs the TPC-H correctness tests, then
 # times run_tpch -e v on QUERIES at 1 thread pinned to one CPU, ROUNDS rounds
 # with all builds alternating in each round.
 # Output: results/flag_ablation_<timestamp>/
@@ -50,6 +50,9 @@
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# per-host build/results paths: several machines may share this checkout
+# over NFS, and must never write the same build tree
+BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 COMPILERS=${COMPILERS:-"gcc clang"}
 ALL_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
@@ -131,7 +134,7 @@ summarize() {
 if [ -n "${SUMMARIZE_ONLY:-}" ]; then OUT=$SUMMARIZE_ONLY; summarize
   column -t -s, "$OUT/effects.csv"; column -t -s, "$OUT/best.csv"; exit 0; fi
 
-OUT="$ROOT/results/flag_ablation_$(date +%Y%m%d_%H%M%S)"
+OUT="$ROOT/results/flag_ablation_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 FAILS=0
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/driver.log"; }
@@ -165,7 +168,7 @@ config_flags() {
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
-bdir() { echo "$ROOT/build_flags/$1_$2"; }
+bdir() { echo "$ROOT/build_flags/$BENCH_HOST/$1_$2"; }
 # reject unknown config names before building (exit inside $(config_flags)
 # only leaves the subshell)
 for cfg in $CONFIGS; do (config_flags "$cfg") > /dev/null || { rm -rf "$OUT"; exit 2; }; done
