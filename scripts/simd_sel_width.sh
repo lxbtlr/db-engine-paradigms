@@ -128,16 +128,28 @@ for cfg in $CONFIGS; do (config_flags "$cfg") > /dev/null || { rm -rf "$OUT"; ex
 [ "$MACHINE" = custom ] && log "WARNING: host $(hostname -s) is not a TARGET_MACHINE preset; building with MACHINE=custom (-march=native, default topology). Set MACHINE= to override."
 grep -q -w avx512vl /proc/cpuinfo || log "WARNING: no avx512vl (FORCE=1); SIMD kernels fall back and the codegen checks will fail"
 
-# perf events: license counters exist on Skylake-SP / Cascade Lake
+# perf events: AVX frequency-license counters. Their names differ by core:
+# Skylake-SP / Cascade Lake / Ice Lake-SP use core_power.lvl{0,1,2}_turbo_license,
+# Sapphire Rapids and later use core_power.license_{1,2,3}. Every name perf
+# accepts on this CPU is counted; LICENSE_EVENTS lists them for license.csv.
 EVENTS="cycles,ref-cycles,instructions"
+LICENSE_EVENTS=""
 if [ "$PERF" = 1 ]; then
   if ! command -v perf > /dev/null; then log "perf not found; counters skipped"; PERF=0
-  elif perf stat -e core_power.lvl0_turbo_license true > /dev/null 2>&1; then
-    EVENTS="$EVENTS,core_power.lvl0_turbo_license,core_power.lvl1_turbo_license,core_power.lvl2_turbo_license"
+  elif ! perf stat -e cycles true > /dev/null 2>&1; then
+    log "perf stat not permitted (perf_event_paranoid?); counters skipped"; PERF=0
   else
-    log "core_power.lvl*_turbo_license not available; counting cycles/ref-cycles only"
+    for ev in core_power.lvl0_turbo_license core_power.lvl1_turbo_license core_power.lvl2_turbo_license \
+              core_power.license_1 core_power.license_2 core_power.license_3; do
+      perf stat -e "$ev" true > /dev/null 2>&1 && LICENSE_EVENTS="$LICENSE_EVENTS $ev"
+    done
+    if [ -n "$LICENSE_EVENTS" ]; then
+      for ev in $LICENSE_EVENTS; do EVENTS="$EVENTS,$ev"; done
+      log "AVX license events:$LICENSE_EVENTS"
+    else
+      log "no core_power license events on this CPU (check: perf list | grep -i license); counting cycles/ref-cycles only"
+    fi
   fi
-  perf stat -e cycles true > /dev/null 2>&1 || { log "perf stat not permitted (perf_event_paranoid?); counters skipped"; PERF=0; }
 fi
 
 # ------------------------------------------------------ 1-3. build and check
@@ -258,16 +270,20 @@ fi
             printf "%s,%.2f,%.2f,%s\n", k, m[k], mn[k], (b in m) ? sprintf("%.3f", m[b] / m[k]) : "" } }' \
     "$OUT/timing.csv" | sort -t, -k1,1 -k3,3 -k2,2; } > "$OUT/speedup.csv"
 
-# license.csv: effective clock ratio (cycles/ref-cycles) and share of cycles in
-# AVX license level 1 (AVX2 heavy / AVX-512 light) and level 2 (AVX-512 heavy).
+# license.csv: effective clock ratio (cycles/ref-cycles) and, for each license
+# event this CPU has, its share of cycles. On Cascade Lake lvl1 = AVX2 heavy /
+# AVX-512 light and lvl2 = AVX-512 heavy; on Sapphire Rapids license_1..3 are
+# the corresponding levels 0..2 (check perf list for the exact meaning).
 # Counts cover the whole run_tpch invocation including data load; the load
-# phase is scalar, so lvl1/lvl2 cycles come from the queries.
-{ echo "compiler,config,query,cycles_per_refcycle,lvl1_share_pct,lvl2_share_pct"
-awk -F, 'NR > 1 { k = $1 "," $2 "," $4; v[k "," $5] += $6; keys[k] = 1 }
-  END { for (k in keys) { c = v[k ",cycles"]; rc = v[k ",ref-cycles"]
-          l1 = v[k ",core_power.lvl1_turbo_license"]; l2 = v[k ",core_power.lvl2_turbo_license"]
-          printf "%s,%s,%s,%s\n", k, rc ? sprintf("%.3f", c / rc) : "",
-                 c ? sprintf("%.2f", 100 * l1 / c) : "", c ? sprintf("%.2f", 100 * l2 / c) : "" } }' \
+# phase is scalar, so license cycles above level 0 come from the queries.
+{ printf "compiler,config,query,cycles_per_refcycle"
+  for ev in $LICENSE_EVENTS; do printf ",%s_share_pct" "${ev#core_power.}"; done; echo
+awk -F, -v evs="$LICENSE_EVENTS" 'NR > 1 { k = $1 "," $2 "," $4; v[k "," $5] += $6; keys[k] = 1 }
+  END { ne = split(evs, ev, " ")
+        for (k in keys) { c = v[k ",cycles"]; rc = v[k ",ref-cycles"]
+          line = k "," (rc ? sprintf("%.3f", c / rc) : "")
+          for (i = 1; i <= ne; i++) line = line "," (c ? sprintf("%.2f", 100 * v[k "," ev[i]] / c) : "")
+          print line } }' \
   "$OUT/perf.csv" | sort -t, -k1,1 -k3,3 -k2,2; } > "$OUT/license.csv"
 
 log "speedup vs base (median over rounds of per-invocation medians, t=1):"
