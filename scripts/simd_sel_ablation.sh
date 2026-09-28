@@ -15,16 +15,20 @@
 # Environment (all optional):
 #   COMPILERS   "gcc clang"            compiler families (CMake COMPILER=...)
 #   CONFIGS     "base sel sel_scalarload sel_hwgather sel_char sel_pos16"
-#   MACHINE     dubliner               CMake TARGET_MACHINE
+#   MACHINE     $(hostname -s) if it is a preset (dubliner, roquefort, manchego, burrata, kafir, rpi5), else custom
 #   BUILD_TYPE  Release
 #   JOBS        $(nproc)
-#   DATADIR     (unset)                CMake DATADIR; test_all reads $DATADIR/tpch/sf1/
-#   TPCH_PATH   (unset)                run_tpch -p path (e.g. .../tpch/sf10/)
+#   DATADIR     /tank/alexb/swole/     CMake DATADIR; test_all reads $DATADIR/tpch/sf1/
+#   TPCH_PATH   /tank/alexb/swole/tpch/sf1  run_tpch -p path (e.g. .../tpch/sf10/)
 #   THREADS     "1,$(nproc)"           run_tpch -t
 #   REPS        10                     run_tpch -r
 #   VEC         1024                   run_tpch -v and run_selbench -v
 #   SETTLE      5                      run_tpch -s
-#   PIN_CPU     0                      run_selbench is pinned here with taskset
+#   PIN_CPU     0                      CPU for run_selbench, run_hashbench and 1-thread run_tpch
+#   NODE        NUMA node of PIN_CPU (from sysfs)
+#   NUMA        "numactl --physcpubind=$PIN_CPU --membind=$NODE" (taskset -c $PIN_CPU
+#               without numactl; "" = no pinning). Always used for the
+#               microbenchmarks; used for run_tpch only when THREADS=1
 #   SKIP_BUILD  0                      1 = reuse existing build dirs
 #   EXTRA_CMAKE ""                     -D flags appended to EVERY config (they override
 #                                      the config's own flags), e.g. a tuned baseline:
@@ -35,15 +39,21 @@
 #   TIMEOUT     1800                   seconds per test / benchmark step (0 = none)
 set -u -o pipefail
 
-DATADIR="/tank/alexb/swole/"
-TPCH_PATH="/tank/alexb/swole/tpch/sf1"
+DATADIR=${DATADIR:-/tank/alexb/swole/}
+TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf1}
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # per-host build/results paths: several machines may share this checkout
 # over NFS, and must never write the same build tree
 BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 COMPILERS=${COMPILERS:-"gcc clang"}
 CONFIGS=${CONFIGS:-"base sel sel_scalarload sel_hwgather sel_char sel_pos16"}
-MACHINE=${MACHINE:-dubliner}
+# MACHINE defaults to this host's short name when it is a TARGET_MACHINE
+# preset, else "custom" (-march=native, CMake topology defaults).
+detect_machine() {
+  local h; h=$(hostname -s 2>/dev/null || hostname)
+  case "$h" in dubliner|roquefort|manchego|burrata|kafir|rpi5) echo "$h" ;; *) echo custom ;; esac
+}
+MACHINE=${MACHINE:-$(detect_machine)}
 BUILD_TYPE=${BUILD_TYPE:-Release}
 JOBS=${JOBS:-$(nproc)}
 THREADS=${THREADS:-"1,$(nproc)"}
@@ -54,6 +64,23 @@ PIN_CPU=${PIN_CPU:-0}
 SKIP_BUILD=${SKIP_BUILD:-0}
 TEST_THREADS=${TEST_THREADS:-${THREADS%%,*}}
 TIMEOUT=${TIMEOUT:-1800}
+# NUMA node of PIN_CPU from sysfs (0 if the kernel exposes none)
+cpu_node() {
+  local d
+  for d in /sys/devices/system/cpu/cpu"$1"/node[0-9]*; do [ -e "$d" ] && { echo "${d##*node}"; return; }; done
+  echo 0
+}
+NODE=${NODE:-$(cpu_node "$PIN_CPU")}
+# Pin every timed run to PIN_CPU and its local memory. A multi-socket host
+# (manchego, dubliner) otherwise lets the scheduler move the thread or place
+# its pages on a remote node. run_tpch can only be pinned to one CPU when
+# every requested thread count is 1.
+if [ -z "${NUMA+x}" ]; then
+  if command -v numactl > /dev/null; then NUMA="numactl --physcpubind=$PIN_CPU --membind=$NODE"
+  elif command -v taskset > /dev/null; then NUMA="taskset -c $PIN_CPU"
+  else NUMA=""; fi
+fi
+if [ "$THREADS" = 1 ]; then TPCH_PIN=$NUMA; else TPCH_PIN=""; fi
 # run a step with a time limit; a timeout counts as a failure (exit 124)
 tlimit() { if [ "$TIMEOUT" -gt 0 ]; then timeout --kill-after=30 "$TIMEOUT" "$@"; else "$@"; fi; }
 OUT="$ROOT/results/simd_sel_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
@@ -109,7 +136,12 @@ on() {
   echo -n "avx512 flags: "; grep -o -w -E 'avx512(f|bw|vl|dq|cd|vbmi2)' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
   echo -n "microcode: "; grep -m1 microcode /proc/cpuinfo | awk '{print $3}'
   echo -n "gather_data_sampling: "; cat /sys/devices/system/cpu/vulnerabilities/gather_data_sampling 2>/dev/null || echo n/a
+  echo -n "governor cpu$PIN_CPU: "; cat "/sys/devices/system/cpu/cpu$PIN_CPU/cpufreq/scaling_governor" 2>/dev/null || echo n/a
+  echo -n "turbo (intel_pstate no_turbo): "; cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || echo n/a
+  echo "MACHINE: $MACHINE  PIN_CPU: $PIN_CPU  NODE: $NODE  microbench pin: ${NUMA:-none}  run_tpch pin: ${TPCH_PIN:-none}"
 } | tee "$OUT/machine.txt"
+[ "$MACHINE" = custom ] && log "WARNING: host $(hostname -s) is not a TARGET_MACHINE preset; building with MACHINE=custom (-march=native, default topology). Set MACHINE= to override."
+[ "$THREADS" != 1 ] && log "WARNING: THREADS=$THREADS, run_tpch is not pinned (only THREADS=1 is pinned to PIN_CPU)"
 grep -q -w avx512f /proc/cpuinfo || log "WARNING: no avx512f on this CPU; SIMD tests will be skipped and the ON builds fall back to scalar"
 
 log "run_tpch -t $THREADS; test_all threads=$TEST_THREADS; timeout ${TIMEOUT}s per step"
@@ -195,13 +227,13 @@ for comp in $COMPILERS; do
     # ------------------------------------------------------ 5. microbenchmark
     if { [ "$cfg" = base ] || [ "$cfg" = sel_pos16 ]; } && [ -x "$B/run_selbench" ]; then
       log "$tag run_selbench"
-      tlimit taskset -c "$PIN_CPU" "$B/run_selbench" -v "$VEC" > "$D/selbench.csv" 2> "$D/selbench.err" \
+      tlimit $NUMA "$B/run_selbench" -v "$VEC" > "$D/selbench.csv" 2> "$D/selbench.err" \
         || fail "$tag run_selbench"
     fi
 
     if [ "$cfg" = base ] && [ -x "$B/run_hashbench" ]; then
       log "$tag run_hashbench"
-      tlimit taskset -c "$PIN_CPU" "$B/run_hashbench" -v "$VEC" > "$D/hashbench.csv" 2> "$D/hashbench.err" \
+      tlimit $NUMA "$B/run_hashbench" -v "$VEC" > "$D/hashbench.csv" 2> "$D/hashbench.err" \
         || fail "$tag run_hashbench"
     fi
 
@@ -209,7 +241,7 @@ for comp in $COMPILERS; do
     if [ -n "${TPCH_PATH:-}" ] && [ -x "$B/run_tpch" ]; then
       for s in 0 1; do
         log "$tag run_tpch SIMDsel=$s"
-        if SIMDsel=$s tlimit "$B/run_tpch" -p "$TPCH_PATH" -e v -q 1,3,5,6,9,18 -r "$REPS" \
+        if SIMDsel=$s tlimit $TPCH_PIN "$B/run_tpch" -p "$TPCH_PATH" -e v -q 1,3,5,6,9,18 -r "$REPS" \
               -t "$THREADS" -v "$VEC" -s "$SETTLE" > "$D/tpch_simdsel$s.csv" 2> "$D/tpch_simdsel$s.err"; then
           # timeAndProfile rows: "<setw(20) label>,<padded median>,..." where the
           # label is "q3 v  t8"; the thread count is parsed from the label.
