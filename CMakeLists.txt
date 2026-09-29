@@ -332,7 +332,7 @@ else()
   if(COMPILER_VERSION STREQUAL "old")
     set(WARN_FLAGS "-Wall -Wextra -Wno-psabi -Wno-unknown-pragmas")
   else()
-    set(WARN_FLAGS "-Wchanges-meaning -Wall -Wextra -Wno-psabi -Wno-unknown-pragmas")
+    set(WARN_FLAGS "-fno-tree-coalesce-vars  -Wchanges-meaning -Wall -Wextra -Wno-psabi -Wno-unknown-pragmas") # -fno-tree-coalesce-vars 
   endif()
 endif()
 
