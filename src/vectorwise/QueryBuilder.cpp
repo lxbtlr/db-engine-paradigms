@@ -12,6 +12,16 @@ size_t padding(size_t size, size_t align) {
    return pad;
 }
 
+#ifdef VW_JOIN_ALIGN_FIELDS
+/// Natural alignment of a hash join entry field, from its size alone (a DS
+/// carries no type): the largest power of two dividing size, capped at 8.
+/// int32 -> 4, int64 -> 8, Char<25> (26 bytes) -> 2.
+static size_t joinFieldAlign(size_t size) {
+   size_t align = size & (~size + 1);
+   return align == 0 ? 1 : (align > 8 ? 8 : align);
+}
+#endif
+
 size_t QueryBuilder::nextOpNr() { return opNr++; }
 size_t QueryBuilder::nextOnceNr() { return onceNr++; }
 QueryBuilder::~QueryBuilder() {
@@ -218,7 +228,13 @@ operator std::unique_ptr<vectorwise::Aggregates>() {
 
 QueryBuilder::HashJoinBuilder::HashJoinBuilder(QueryBuilder& b) : base(b) {}
 QueryBuilder::HashJoinBuilder::~HashJoinBuilder() {
+#ifdef VW_JOIN_ENTRY_PAD
+   // 16/32/64: entries start on that boundary (allocations are 64-aligned),
+   // so an entry's header never straddles a cache line
+   join->ht_entry_size += padding(join->ht_entry_size, VW_JOIN_ENTRY_PAD);
+#else
    join->ht_entry_size += padding(join->ht_entry_size, 8);
+#endif
 }
 
 QueryBuilder::HashJoinBuilder
@@ -234,7 +250,15 @@ QueryBuilder::HashJoin(DS probeMatches, pos_t (Hashjoin::*joinFun)()) {
    join->followupBufferSize = vecs.getVecSize() + 1;
    b.join = join.get();
    b.join->join = joinFun;
+#ifdef VW_JOIN_SLIM_HEADER
+   // join entries only use EntryHeader::next and ::hash; the group pointer
+   // VW_GROUP_AGGR appends belongs to HashGroup, so the payload starts after
+   // hash (== sizeof(EntryHeader) without VW_GROUP_AGGR)
+   b.join->ht_entry_size = offsetof(runtime::Hashmap::EntryHeader, hash) +
+                           sizeof(runtime::Hashmap::hash_t);
+#else
    b.join->ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
+#endif
    b.join->batchSize = vecs.getVecSize();
    b.join->buildMatches = static_cast<runtime::Hashmap::EntryHeader**>(
        vecs.get(sizeof(runtime::Hashmap::EntryHeader*)));
@@ -257,6 +281,9 @@ QueryBuilder::HashJoinBuilder&
 QueryBuilder::HashJoinBuilder::addBuildKey(DS col, primitives::F2 hash,
                                            primitives::FScatter scatter) {
 
+#ifdef VW_JOIN_ALIGN_FIELDS
+   join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(col.dataSize));
+#endif
    auto entryOffset = join->ht_entry_size;
    keyOffsets.push_back(entryOffset);
    join->ht_entry_size += col.dataSize;
@@ -279,6 +306,9 @@ QueryBuilder::HashJoinBuilder&
 QueryBuilder::HashJoinBuilder::addBuildKey(DS col, DS sel, primitives::F3 hash,
                                            primitives::FScatterSel scatter) {
 
+#ifdef VW_JOIN_ALIGN_FIELDS
+   join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(col.dataSize));
+#endif
    auto entryOffset = join->ht_entry_size;
    keyOffsets.push_back(entryOffset);
    join->ht_entry_size += col.dataSize;
@@ -376,6 +406,9 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, DS sel, primitives::F3 hash,
 QueryBuilder::HashJoinBuilder& QueryBuilder::HashJoinBuilder::addBuildValue(
     DS source, primitives::FScatter scatter, DS target,
     primitives::FGather gather) {
+#ifdef VW_JOIN_ALIGN_FIELDS
+   join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(source.dataSize));
+#endif
    auto entryOffset = join->ht_entry_size;
    join->ht_entry_size += source.dataSize;
 
@@ -396,6 +429,9 @@ QueryBuilder::HashJoinBuilder& QueryBuilder::HashJoinBuilder::addBuildValue(
     DS source, DS sel, primitives::FScatterSel scatter, DS target,
     primitives::FGather gather) {
 
+#ifdef VW_JOIN_ALIGN_FIELDS
+   join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(source.dataSize));
+#endif
    auto entryOffset = join->ht_entry_size;
    join->ht_entry_size += source.dataSize;
 
