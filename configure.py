@@ -36,6 +36,9 @@ BOOL_OPTIONS = [
     ("VW_SIMD_SEL_CHAR",      "AVX-512BW Char<N> == constant selection kernel",            False),
     ("VW_SIMD_HASH",          "AVX-512 MurmurHash64A hashing kernels",                     False),
     ("VW_JOIN_PREFETCH",      "Software prefetch in VectorWise hash join probes",          False),
+    ("VW_JOIN_ALIGN_FIELDS",  "Align hash join entry fields to their natural alignment",  False),
+    ("VW_JOIN_SLIM_HEADER",   "Hash join entries skip EntryHeader::group (VW_GROUP_AGGR)", False),
+    ("VW_Q9_FIELD_ORDER",     "TPC-H Q9: ps_supplycost before n_name in partsupp join",    False),
 ]
 
 # VW_SIMD_SEL gathered-input (selsel) kernels
@@ -44,6 +47,8 @@ VW_SIMD_SEL_GATHER_CHOICES = ["scalar", "scalarload", "hwgather"]
 VW_SIMD_SEL_COMPRESS_CHOICES = ["reg", "mem"]
 VW_SIMD_SEL_UNROLL_CHOICES = ["1", "2"]
 VW_SIMD_SEL_WIDTH_CHOICES = ["512", "256"]
+# hash join entry stride alignment in bytes
+VW_JOIN_ENTRY_PAD_CHOICES = ["8", "16", "32", "64"]
 
 TARGET_ARCH_CHOICES = [
     "native",
@@ -134,6 +139,7 @@ def configure():
     opts["VW_SIMD_SEL_COMPRESS"] = "reg"
     opts["VW_SIMD_SEL_UNROLL"] = "1"
     opts["VW_SIMD_SEL_WIDTH"] = "512"
+    opts["VW_JOIN_ENTRY_PAD"] = "8"
 
     # Apply preset
     if preset is not None:
@@ -246,6 +252,14 @@ def configure():
                 if opts[key] is None:
                     sys.exit(1)
 
+        opts["VW_JOIN_ENTRY_PAD"] = questionary.select(
+            "Hash join entry stride alignment (bytes):",
+            choices=VW_JOIN_ENTRY_PAD_CHOICES,
+            default=opts["VW_JOIN_ENTRY_PAD"],
+        ).ask()
+        if opts["VW_JOIN_ENTRY_PAD"] is None:
+            sys.exit(1)
+
         # Data directory
         datadir = questionary.text(
             "Data directory (DATADIR, leave empty for default):",
@@ -301,6 +315,7 @@ def build_cmake_args(opts):
     args.append(f"-DVW_SIMD_SEL_COMPRESS={opts.get('VW_SIMD_SEL_COMPRESS', 'reg')}")
     args.append(f"-DVW_SIMD_SEL_UNROLL={opts.get('VW_SIMD_SEL_UNROLL', '1')}")
     args.append(f"-DVW_SIMD_SEL_WIDTH={opts.get('VW_SIMD_SEL_WIDTH', '512')}")
+    args.append(f"-DVW_JOIN_ENTRY_PAD={opts.get('VW_JOIN_ENTRY_PAD', '8')}")
     return args
 
 # ── Build execution ───────────────────────────────────────────────────────

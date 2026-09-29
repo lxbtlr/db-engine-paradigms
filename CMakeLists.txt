@@ -241,6 +241,47 @@ if(VW_JOIN_PREFETCH)
   message(STATUS "Building with VW_JOIN_PREFETCH (distance ${VW_JOIN_PREFETCH_DIST})")
 endif(VW_JOIN_PREFETCH)
 
+# Hash join entry layout (QueryBuilder::HashJoinBuilder). All OFF / 8 keeps
+# the existing layout: header, then fields packed in add* call order, stride
+# rounded up to 8.
+#   VW_JOIN_ALIGN_FIELDS  align each field to its natural alignment, taken
+#                         from its size (largest power of two dividing it,
+#                         capped at 8): int32 4, int64 8, Char<25> 2
+#   VW_JOIN_ENTRY_PAD     round the entry stride up to 8 (default), 16, 32 or
+#                         64 bytes, so entry headers do not straddle cache lines
+#   VW_JOIN_SLIM_HEADER   join entries start their payload right after
+#                         EntryHeader::hash; drops the 8-byte group pointer
+#                         VW_GROUP_AGGR adds (no effect without VW_GROUP_AGGR)
+#   VW_Q9_FIELD_ORDER     TPC-H Q9 partsupp join: scatter ps_supplycost before
+#                         the Char<25> n_name, so the int64 is 8-aligned
+OPTION(VW_JOIN_ALIGN_FIELDS "Align hash join entry fields to their natural alignment" OFF)
+if(VW_JOIN_ALIGN_FIELDS)
+  ADD_DEFINITIONS(-DVW_JOIN_ALIGN_FIELDS=1)
+  message(STATUS "Building with VW_JOIN_ALIGN_FIELDS")
+endif()
+set(VW_JOIN_ENTRY_PAD "8" CACHE STRING "Hash join entry stride alignment in bytes: 8, 16, 32, 64")
+set_property(CACHE VW_JOIN_ENTRY_PAD PROPERTY STRINGS 8 16 32 64)
+if(VW_JOIN_ENTRY_PAD MATCHES "^(16|32|64)$")
+  ADD_DEFINITIONS(-DVW_JOIN_ENTRY_PAD=${VW_JOIN_ENTRY_PAD})
+  message(STATUS "Building with VW_JOIN_ENTRY_PAD=${VW_JOIN_ENTRY_PAD}")
+elseif(NOT VW_JOIN_ENTRY_PAD STREQUAL "8")
+  message(FATAL_ERROR "VW_JOIN_ENTRY_PAD must be 8, 16, 32 or 64 (got '${VW_JOIN_ENTRY_PAD}')")
+endif()
+OPTION(VW_JOIN_SLIM_HEADER "Hash join entries skip EntryHeader::group (VW_GROUP_AGGR)" OFF)
+if(VW_JOIN_SLIM_HEADER)
+  ADD_DEFINITIONS(-DVW_JOIN_SLIM_HEADER=1)
+  if(VW_GROUP_AGGR)
+    message(STATUS "Building with VW_JOIN_SLIM_HEADER")
+  else()
+    message(STATUS "Building with VW_JOIN_SLIM_HEADER (no effect: VW_GROUP_AGGR is OFF, the header has no group pointer)")
+  endif()
+endif()
+OPTION(VW_Q9_FIELD_ORDER "TPC-H Q9: scatter ps_supplycost before n_name in the partsupp join" OFF)
+if(VW_Q9_FIELD_ORDER)
+  ADD_DEFINITIONS(-DVW_Q9_FIELD_ORDER=1)
+  message(STATUS "Building with VW_Q9_FIELD_ORDER")
+endif()
+
 # AVX-512 MurmurHash64A kernels (include/vectorwise/SimdHash.hpp) for the
 # hash/hash_sel/rehash/rehash_sel primitives and HashGroup's packed-key hash.
 # Bit-identical to the scalar hash. Only applies to the default MurMurHash

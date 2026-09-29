@@ -288,15 +288,25 @@ std::unique_ptr<Q9Builder::Q9> Q9Builder::getQuery(){
                     Buffer(pspp),                       //
                     conf.rehash_sel_int32_t_col(),
                     primitives::scatter_sel_int32_t_col)
-       .addBuildValue(Buffer(n_name),                  //
-                      primitives::scatter_Char_25_col, //
-                      Buffer(n_name),                  //
-                      primitives::gather_col_Char_25_col)
+#ifdef VW_Q9_FIELD_ORDER
+       // int64 before the 26-byte Char<25>, so it is not left at offset 50
        .addBuildValue(Column(partsupp, "ps_supplycost"), //
                       Buffer(pspp),                      //
                       primitives::scatter_sel_int64_t_col,
                       Buffer(ps_supplycost, sizeof(int64_t)), //
                       primitives::gather_col_int64_t_col)
+#endif
+       .addBuildValue(Buffer(n_name),                  //
+                      primitives::scatter_Char_25_col, //
+                      Buffer(n_name),                  //
+                      primitives::gather_col_Char_25_col)
+#ifndef VW_Q9_FIELD_ORDER
+       .addBuildValue(Column(partsupp, "ps_supplycost"), //
+                      Buffer(pspp),                      //
+                      primitives::scatter_sel_int64_t_col,
+                      Buffer(ps_supplycost, sizeof(int64_t)), //
+                      primitives::gather_col_int64_t_col)
+#endif
        .addProbeKey(Column(lineitem, "l_partkey"), //
                     conf.hash_int32_t_col(),
                     primitives::keys_equal_int32_t_col)
