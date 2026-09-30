@@ -471,11 +471,43 @@ elseif(PGO STREQUAL "use")
 endif()
 
 # Download and unpack googletest at configure time
-configure_file(3rdparty/GTest.CMakeLists.txt googletest-download/CMakeLists.txt)
-execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" .
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download" )
-execute_process(COMMAND "${CMAKE_COMMAND}" --build .
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download" )
+# GTEST_SOURCE_DIR: use an existing googletest checkout instead of cloning
+# (e.g. on nodes without network). Empty = clone into the build directory.
+set(GTEST_SOURCE_DIR "" CACHE PATH "Existing googletest source tree (skips the download)")
+if(GTEST_SOURCE_DIR)
+  if(NOT EXISTS "${GTEST_SOURCE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "GTEST_SOURCE_DIR=${GTEST_SOURCE_DIR} has no CMakeLists.txt")
+  endif()
+  set(GTEST_SRC "${GTEST_SOURCE_DIR}")
+else()
+  set(GTEST_SRC "${CMAKE_BINARY_DIR}/googletest-src")
+  # A configure that died mid-download leaves stamp files saying the clone is
+  # done while googletest-src is empty; ExternalProject then never retries.
+  if(NOT EXISTS "${GTEST_SRC}/CMakeLists.txt")
+    file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/googletest-download"
+                        "${CMAKE_BINARY_DIR}/googletest-src"
+                        "${CMAKE_BINARY_DIR}/googletest-build")
+  endif()
+  configure_file(3rdparty/GTest.CMakeLists.txt googletest-download/CMakeLists.txt)
+  # The download project declares an old cmake_minimum_required, which
+  # CMake 4 rejects unless CMAKE_POLICY_VERSION_MINIMUM is set.
+  execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}"
+                          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 .
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download"
+      RESULT_VARIABLE gtest_cfg_result
+      OUTPUT_VARIABLE gtest_cfg_log ERROR_VARIABLE gtest_cfg_log)
+  if(NOT gtest_cfg_result EQUAL 0)
+    message(FATAL_ERROR "googletest download project failed to configure:\n${gtest_cfg_log}")
+  endif()
+  execute_process(COMMAND "${CMAKE_COMMAND}" --build .
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download"
+      RESULT_VARIABLE gtest_dl_result
+      OUTPUT_VARIABLE gtest_dl_log ERROR_VARIABLE gtest_dl_log)
+  if(NOT gtest_dl_result EQUAL 0 OR NOT EXISTS "${GTEST_SRC}/CMakeLists.txt")
+    message(FATAL_ERROR "googletest download (git clone) failed; no network? "
+                        "Set -DGTEST_SOURCE_DIR=<checkout> to use an existing tree.\n${gtest_dl_log}")
+  endif()
+endif()
 
 # Prevent GoogleTest from overriding our compiler/linker options
 # when building with Visual Studio
@@ -484,7 +516,7 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 # Add googletest directly to our build. This adds
 # the following targets: gtest, gtest_main, gmock
 # and gmock_main
-add_subdirectory("${CMAKE_BINARY_DIR}/googletest-src"
+add_subdirectory("${GTEST_SRC}"
                  "${CMAKE_BINARY_DIR}/googletest-build")
 
 # Suppress -Werror for googletest/googlemock (old gtest triggers warnings with newer GCC)
