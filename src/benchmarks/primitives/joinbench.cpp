@@ -21,7 +21,16 @@
 //   J1+J3  run dedup on top of J3
 //   J4     Hashjoin::joinAllSIMD's AVX-512 gather loop (x86 AVX-512 only)
 //
-// Shapes (sf1, int32 keys, MurMurHash with the primitives' seed):
+// Every variant runs with each hash of -H (keys sign-extended to 64 bits,
+// the primitives' seed, as the engine's hash primitives):
+//   murmur    MurMurHash, the default
+//   crc       CRC32Hash, 2 crc32 per key (VW_USE_CRC32)
+//   crc_fast  CRC32Hash, 1 crc32 per key (VW_USE_CRC32 + VW_CRC32_FAST)
+// The CRC hashes are written out here, so the results do not depend on the
+// build's VW_* options. speedup_vs_T0 is against T0 with the same hash,
+// speedup_vs_T0_murmur against today's default (T0, murmur).
+//
+// Shapes (sf1, int32 keys):
 //   q3      Q3 J2: build 10% of 1.5M orders, probe lineitem-like sorted runs (~4/key)
 //   q5      Q5 J4: build 15% of 1.5M orders, sorted runs
 //   q18     Q18 J1/J3: build ~57 orders, probe lineitem sorted runs (almost no hits)
@@ -31,7 +40,8 @@
 //   fk_all  full FK join: build all 1.5M orders, probe sorted runs (100% hits)
 //   dim     build 10k suppliers, probe random keys
 //
-// Usage: run_joinbench [-s scale] [-r reps] [-q shape,...]   (CSV on stdout)
+// Usage: run_joinbench [-s scale] [-r reps] [-q shape,...] [-H murmur,crc,crc_fast]
+//        (CSV on stdout)
 #include "common/runtime/Hash.hpp"
 #include "common/runtime/Hashmap.hpp"
 #include <algorithm>
@@ -45,6 +55,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <unistd.h>
 #include <vector>
 #if defined(__x86_64__)
@@ -67,7 +78,37 @@ struct Entry {
    int64_t payload = 0;
 };
 
-inline hash_t hashKey(int32_t k) { return runtime::MurMurHash().hashKey((uint64_t)(int64_t)k, kSeed); }
+struct MurmurH {
+   static constexpr const char* name = "murmur";
+   static inline hash_t hash(int32_t k) { return runtime::MurMurHash().hashKey((uint64_t)(int64_t)k, kSeed); }
+};
+/// CRC32Hash::hashKey(k, seed): crc32(seed, k) and crc32(0x04c11db7, k)
+struct CrcH {
+   static constexpr const char* name = "crc";
+   static inline hash_t hash(int32_t k) {
+      const uint64_t r1 = _mm_crc32_u64(kSeed, (uint64_t)(int64_t)k);
+      const uint64_t r2 = _mm_crc32_u64(0x04c11db7, (uint64_t)(int64_t)k);
+      return ((r2 << 32) | r1) * 0x2545F4914F6CDD1Dull;
+   }
+};
+/// crc32q(crc, v) at compile time (bitwise, reflected CRC-32C)
+constexpr uint64_t crc32cConst(uint32_t crc, uint64_t v) {
+   for (int i = 0; i < 8; ++i) {
+      crc ^= uint32_t(v >> (8 * i)) & 0xff;
+      for (int j = 0; j < 8; ++j) crc = (crc & 1) ? (crc >> 1) ^ 0x82F63B78u : crc >> 1;
+   }
+   return crc;
+}
+/// VW_CRC32_FAST: the second crc32 from the first (CRC linearity),
+/// bit-identical; the seed term is a constant, as in the engine
+struct CrcFastH {
+   static constexpr const char* name = "crc_fast";
+   static constexpr uint64_t kTerm = crc32cConst(uint32_t(kSeed) ^ 0x04c11db7u, 0);
+   static inline hash_t hash(int32_t k) {
+      const uint64_t r1 = _mm_crc32_u64(kSeed, (uint64_t)(int64_t)k);
+      return (((r1 ^ kTerm) << 32) | r1) * 0x2545F4914F6CDD1Dull;
+   }
+};
 inline uint64_t mix(uint64_t pos, int64_t payload) {
    uint64_t x = pos * 0x9E3779B97F4A7C15ull ^ (uint64_t)payload;
    x ^= x >> 31; x *= 0xBF58476D1CE4E5B9ull; x ^= x >> 29;
@@ -124,6 +165,7 @@ Workload makeWorkload(const std::string& shape, double scale, std::mt19937_64& r
 }
 
 //--- today's table: runtime::Hashmap with chained entries -------------------------
+template <class H>
 struct ChainTable {
    Hashmap ht;
    std::vector<Entry> entries;
@@ -131,7 +173,7 @@ struct ChainTable {
       for (size_t i = 0; i < entries.size(); ++i) {
          entries[i].key = w.buildKeys[i];
          entries[i].payload = w.buildPayload[i];
-         entries[i].h.hash = hashKey(w.buildKeys[i]);
+         entries[i].h.hash = H::hash(w.buildKeys[i]);
          entries[i].h.next = nullptr;
       }
       ht.setSize(entries.size());
@@ -182,12 +224,13 @@ inline size_t chainLookup(Hashmap& ht, const hash_t* hashes, size_t n, Bufs& b) 
    return found;
 }
 
-Result probeT0(ChainTable& t, const Workload& w, Bufs& b) {
+template <class H>
+Result probeT0(ChainTable<H>& t, const Workload& w, Bufs& b) {
    Result res;
    const int32_t* keys = w.probeKeys.data();
    for (size_t base = 0; base < w.probeKeys.size(); base += kVec) {
       const size_t n = std::min(kVec, w.probeKeys.size() - base);
-      for (size_t i = 0; i < n; ++i) b.hashes[i] = hashKey(keys[base + i]);
+      for (size_t i = 0; i < n; ++i) b.hashes[i] = H::hash(keys[base + i]);
       const size_t found = chainLookup(t.ht, b.hashes, n, b);
       finish(keys + base, base, b.bm, b.pm, found, res);
    }
@@ -195,7 +238,8 @@ Result probeT0(ChainTable& t, const Workload& w, Bufs& b) {
 }
 
 /// J1: runs of equal probe keys -> one hash + lookup per run
-Result probeJ1(ChainTable& t, const Workload& w, Bufs& b) {
+template <class H>
+Result probeJ1(ChainTable<H>& t, const Workload& w, Bufs& b) {
    Result res;
    const int32_t* keys = w.probeKeys.data();
    for (size_t base = 0; base < w.probeKeys.size(); base += kVec) {
@@ -204,7 +248,7 @@ Result probeJ1(ChainTable& t, const Workload& w, Bufs& b) {
       for (size_t i = 0; i < n; ++i)
          if (i == 0 || keys[base + i] != keys[base + i - 1]) b.runKeys[runs] = keys[base + i], b.runStart[runs++] = uint32_t(i);
       b.runStart[runs] = uint32_t(n);
-      for (size_t r = 0; r < runs; ++r) b.hashes[r] = hashKey(b.runKeys[r]);
+      for (size_t r = 0; r < runs; ++r) b.hashes[r] = H::hash(b.runKeys[r]);
       const size_t found = chainLookup(t.ht, b.hashes, runs, b);
       for (size_t j = 0; j < found; ++j) {
          const Entry* e = reinterpret_cast<const Entry*>(b.bm[j]);
@@ -222,7 +266,8 @@ Result probeJ1(ChainTable& t, const Workload& w, Bufs& b) {
 /// J2's lookup: group prefetching over n hashes. Phase A loads every
 /// directory slot (prefetched) with no entry access; phase B touches only the
 /// tag-filter candidates (prefetched in phase A), then the chains.
-inline size_t twoPassLookup(ChainTable& t, const hash_t* hashes, size_t n, Bufs& b) {
+template <class H>
+inline size_t twoPassLookup(ChainTable<H>& t, const hash_t* hashes, size_t n, Bufs& b) {
    auto* dir = reinterpret_cast<const uint64_t*>(t.ht.entries);
    const uint64_t mask = t.ht.mask, maskPtr = t.ht.maskPointer;
    for (size_t i = 0; i < n; ++i) __builtin_prefetch(&dir[hashes[i] & mask]);
@@ -253,12 +298,13 @@ inline size_t twoPassLookup(ChainTable& t, const hash_t* hashes, size_t n, Bufs&
 }
 
 /// J2: group prefetching over the vector
-Result probeJ2(ChainTable& t, const Workload& w, Bufs& b) {
+template <class H>
+Result probeJ2(ChainTable<H>& t, const Workload& w, Bufs& b) {
    Result res;
    const int32_t* keys = w.probeKeys.data();
    for (size_t base = 0; base < w.probeKeys.size(); base += kVec) {
       const size_t n = std::min(kVec, w.probeKeys.size() - base);
-      for (size_t i = 0; i < n; ++i) b.hashes[i] = hashKey(keys[base + i]);
+      for (size_t i = 0; i < n; ++i) b.hashes[i] = H::hash(keys[base + i]);
       const size_t found = twoPassLookup(t, b.hashes, n, b);
       finish(keys + base, base, b.bm, b.pm, found, res);
    }
@@ -267,7 +313,8 @@ Result probeJ2(ChainTable& t, const Workload& w, Bufs& b) {
 
 /// J2+J1a: J2's lookup, with run dedup only for vectors where >= 25% of the
 /// keys repeat their predecessor (sorted probe streams); otherwise plain J2
-Result probeJ2J1a(ChainTable& t, const Workload& w, Bufs& b) {
+template <class H>
+Result probeJ2J1a(ChainTable<H>& t, const Workload& w, Bufs& b) {
    Result res;
    const int32_t* keys = w.probeKeys.data();
    for (size_t base = 0; base < w.probeKeys.size(); base += kVec) {
@@ -276,7 +323,7 @@ Result probeJ2J1a(ChainTable& t, const Workload& w, Bufs& b) {
       size_t runs = 1;
       for (size_t i = 1; i < n; ++i) runs += k[i] != k[i - 1];
       if (runs * 4 > n * 3) { // few repeats: plain J2
-         for (size_t i = 0; i < n; ++i) b.hashes[i] = hashKey(k[i]);
+         for (size_t i = 0; i < n; ++i) b.hashes[i] = H::hash(k[i]);
          finish(k, base, b.bm, b.pm, twoPassLookup(t, b.hashes, n, b), res);
          continue;
       }
@@ -284,7 +331,7 @@ Result probeJ2J1a(ChainTable& t, const Workload& w, Bufs& b) {
       for (size_t i = 0; i < n; ++i)
          if (i == 0 || k[i] != k[i - 1]) b.runKeys[runs] = k[i], b.runStart[runs++] = uint32_t(i);
       b.runStart[runs] = uint32_t(n);
-      for (size_t r = 0; r < runs; ++r) b.hashes[r] = hashKey(b.runKeys[r]);
+      for (size_t r = 0; r < runs; ++r) b.hashes[r] = H::hash(b.runKeys[r]);
       const size_t found = twoPassLookup(t, b.hashes, runs, b);
       for (size_t j = 0; j < found; ++j) {
          const Entry* e = reinterpret_cast<const Entry*>(b.bm[j]);
@@ -301,7 +348,8 @@ Result probeJ2J1a(ChainTable& t, const Workload& w, Bufs& b) {
 
 #if defined(__x86_64__) && defined(__AVX512F__) && !(defined(HASH_SIZE) && HASH_SIZE == 32)
 /// J4: Hashjoin::joinAllSIMD's 8-wide loop (64-bit hash path)
-Result probeJ4(ChainTable& t, const Workload& w, Bufs& b) {
+template <class H>
+Result probeJ4(ChainTable<H>& t, const Workload& w, Bufs& b) {
    Result res;
    const int32_t* keys = w.probeKeys.data();
    Hashmap& ht = t.ht;
@@ -309,7 +357,7 @@ Result probeJ4(ChainTable& t, const Workload& w, Bufs& b) {
    std::vector<Hashmap::EntryHeader*> fuEntries(kVec * 8);
    for (size_t base = 0; base < w.probeKeys.size(); base += kVec) {
       const size_t n = std::min(kVec, w.probeKeys.size() - base);
-      for (size_t i = 0; i < n; ++i) b.hashes[i] = hashKey(keys[base + i]);
+      for (size_t i = 0; i < n; ++i) b.hashes[i] = H::hash(keys[base + i]);
       size_t found = 0, fw = 0;
       const size_t rest = n % 8;
       auto ids = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 7, 6, 5, 4, 3, 2, 1, 0);
@@ -355,6 +403,7 @@ Result probeJ4(ChainTable& t, const Workload& w, Bufs& b) {
 #endif
 
 //--- J3: bucketized table, 16 keys per 64-byte bucket ------------------------------
+template <class H>
 struct BucketTable {
    uint64_t mask = 0;
    int32_t* keys = nullptr;    // 16 per bucket, 64-byte aligned
@@ -368,7 +417,7 @@ struct BucketTable {
       rows = static_cast<uint32_t*>(std::aligned_alloc(64, nb * 64));
       std::fill(keys, keys + nb * 16, kEmpty);
       for (size_t r = 0; r < w.buildKeys.size(); ++r) {
-         for (uint64_t bkt = hashKey(w.buildKeys[r]) & mask;; bkt = (bkt + 1) & mask) {
+         for (uint64_t bkt = H::hash(w.buildKeys[r]) & mask;; bkt = (bkt + 1) & mask) {
             int32_t* k = keys + bkt * 16;
             int s = 0;
             while (s < 16 && k[s] != kEmpty) ++s;
@@ -412,8 +461,8 @@ inline BucketMatch compareBucket(const int32_t* bucket, int32_t k) {
 }
 
 /// all build rows with key k: walk buckets from the hash's bucket until one has an empty slot
-template <typename Emit>
-inline void bucketProbe(const BucketTable& t, int32_t k, hash_t h, Emit&& emit) {
+template <class H, typename Emit>
+inline void bucketProbe(const BucketTable<H>& t, int32_t k, hash_t h, Emit&& emit) {
    for (uint64_t bkt = h & t.mask;; bkt = (bkt + 1) & t.mask) {
       const BucketMatch m = compareBucket(t.keys + bkt * 16, k);
       for (uint32_t mm = m.match; mm; mm &= mm - 1) emit(t.rows[bkt * 16 + __builtin_ctz(mm)]);
@@ -421,14 +470,14 @@ inline void bucketProbe(const BucketTable& t, int32_t k, hash_t h, Emit&& emit) 
    }
 }
 
-template <bool Prefetch>
-Result probeJ3(BucketTable& t, const Workload& w, Bufs& b) {
+template <class H, bool Prefetch>
+Result probeJ3(BucketTable<H>& t, const Workload& w, Bufs& b) {
    Result res;
    const int32_t* keys = w.probeKeys.data();
    for (size_t base = 0; base < w.probeKeys.size(); base += kVec) {
       const size_t n = std::min(kVec, w.probeKeys.size() - base);
       for (size_t i = 0; i < n; ++i) {
-         b.hashes[i] = hashKey(keys[base + i]);
+         b.hashes[i] = H::hash(keys[base + i]);
          if (Prefetch) __builtin_prefetch(t.keys + (b.hashes[i] & t.mask) * 16);
       }
       for (size_t i = 0; i < n; ++i)
@@ -440,7 +489,8 @@ Result probeJ3(BucketTable& t, const Workload& w, Bufs& b) {
    return res;
 }
 
-Result probeJ1J3(BucketTable& t, const Workload& w, Bufs& b) {
+template <class H>
+Result probeJ1J3(BucketTable<H>& t, const Workload& w, Bufs& b) {
    Result res;
    const int32_t* keys = w.probeKeys.data();
    for (size_t base = 0; base < w.probeKeys.size(); base += kVec) {
@@ -449,7 +499,7 @@ Result probeJ1J3(BucketTable& t, const Workload& w, Bufs& b) {
       for (size_t i = 0; i < n; ++i)
          if (i == 0 || keys[base + i] != keys[base + i - 1]) b.runKeys[runs] = keys[base + i], b.runStart[runs++] = uint32_t(i);
       b.runStart[runs] = uint32_t(n);
-      for (size_t r = 0; r < runs; ++r) b.hashes[r] = hashKey(b.runKeys[r]);
+      for (size_t r = 0; r < runs; ++r) b.hashes[r] = H::hash(b.runKeys[r]);
       for (size_t r = 0; r < runs; ++r)
          bucketProbe(t, b.runKeys[r], b.hashes[r], [&](uint32_t row) {
             for (uint32_t i = b.runStart[r]; i < b.runStart[r + 1]; ++i) {
@@ -472,22 +522,83 @@ template <typename F> double bestNs(F&& f, int reps, size_t rows) {
    return best / double(rows);
 }
 
+
+/// every variant with hash H on workload w; checks against ref, prints CSV,
+/// returns T0's ns per probe row (the baseline of this hash)
+template <class H>
+double runVariants(const std::string& shape, const Workload& w, const Result& ref, double murmurT0,
+                   int reps, Bufs& bufs, int& fails) {
+   ChainTable<H> chain(w);
+   BucketTable<H> bucket(w);
+   struct V { const char* name; std::function<Result()> fn; };
+   std::vector<V> vs = {
+       {"T0 today", [&] { return probeT0(chain, w, bufs); }},
+       {"J1 run dedup", [&] { return probeJ1(chain, w, bufs); }},
+       {"J2 two-pass prefetch", [&] { return probeJ2(chain, w, bufs); }},
+       {"J2+J1a two-pass + gated dedup", [&] { return probeJ2J1a(chain, w, bufs); }},
+       {"J3 bucketized", [&] { return probeJ3<H, false>(bucket, w, bufs); }},
+       {"J3P bucketized+prefetch", [&] { return probeJ3<H, true>(bucket, w, bufs); }},
+       {"J1+J3", [&] { return probeJ1J3(bucket, w, bufs); }},
+#ifdef HAVE_J4
+       {"J4 existing SIMD join", [&] { return probeJ4(chain, w, bufs); }},
+#endif
+   };
+   double t0ns = 0;
+   for (auto& v : vs) {
+      Result r;
+      const double ns = bestNs([&] { r = v.fn(); }, reps, w.probeKeys.size());
+      const bool ok = r == ref;
+      fails += !ok;
+      if (t0ns == 0) t0ns = ns;
+      // vs (T0, murmur): "-" when murmur was not run
+      const double base = std::is_same<H, MurmurH>::value ? t0ns : murmurT0;
+      char vsMurmur[16] = "-";
+      if (base > 0) std::snprintf(vsMurmur, sizeof vsMurmur, "%.2f", base / ns);
+      std::printf("%s,%s,%zu,%zu,%llu,%s,%.3f,%.2f,%s,%s\n", shape.c_str(), H::name, w.buildKeys.size(),
+                  w.probeKeys.size(), (unsigned long long)ref.count, v.name, ns, t0ns / ns, vsMurmur,
+                  ok ? "ok" : "MISMATCH");
+      std::fflush(stdout);
+   }
+   return t0ns;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
    double scale = 1.0;
    int reps = 5;
-   std::string shapes = "q3,q5,q18,q9,q9j5,fk_all,dim";
+   std::string shapes = "q3,q5,q18,q9,q9j5,fk_all,dim", hashes = "murmur,crc,crc_fast";
    int opt;
-   while ((opt = getopt(argc, argv, "s:r:q:")) != -1) {
+   while ((opt = getopt(argc, argv, "s:r:q:H:")) != -1) {
       switch (opt) {
       case 's': scale = std::atof(optarg); break;
       case 'r': reps = std::atoi(optarg); break;
       case 'q': shapes = optarg; break;
-      default: std::fprintf(stderr, "usage: %s [-s scale] [-r reps] [-q q3,q5,q18,q9,q9j5,fk_all,dim]\n", argv[0]); return 1;
+      case 'H': hashes = optarg; break;
+      default:
+         std::fprintf(stderr, "usage: %s [-s scale] [-r reps] [-q q3,q5,q18,q9,q9j5,fk_all,dim] [-H murmur,crc,crc_fast]\n",
+                      argv[0]);
+         return 1;
       }
    }
-   std::printf("shape,build_rows,probe_rows,matches,variant,ns_per_probe_row,speedup_vs_T0,check\n");
+   // the constant-folded CRC seed term must equal the instruction's
+   if (CrcFastH::kTerm != _mm_crc32_u64((uint32_t)kSeed ^ 0x04c11db7u, 0)) {
+      std::fprintf(stderr, "run_joinbench: crc32cConst disagrees with the crc32 instruction\n");
+      return 1;
+   }
+   std::vector<std::string> hlist;
+   {
+      std::stringstream hs(hashes);
+      for (std::string h; std::getline(hs, h, ',');) {
+         if (h != "murmur" && h != "crc" && h != "crc_fast") {
+            std::fprintf(stderr, "unknown hash %s (murmur, crc, crc_fast)\n", h.c_str());
+            return 1;
+         }
+         hlist.push_back(h);
+      }
+   }
+   std::printf("shape,hash,build_rows,probe_rows,matches,variant,ns_per_probe_row,speedup_vs_T0,"
+               "speedup_vs_T0_murmur,check\n");
    int fails = 0;
    std::stringstream ss(shapes);
    std::string shape;
@@ -495,32 +606,19 @@ int main(int argc, char** argv) {
    while (std::getline(ss, shape, ',')) {
       std::mt19937_64 rng(std::hash<std::string>{}(shape));
       const Workload w = makeWorkload(shape, scale, rng);
-      ChainTable chain(w);
-      BucketTable bucket(w);
-      const Result ref = probeT0(chain, w, *bufs);
-      struct V { const char* name; std::function<Result()> fn; };
-      std::vector<V> vs = {
-          {"T0 today", [&] { return probeT0(chain, w, *bufs); }},
-          {"J1 run dedup", [&] { return probeJ1(chain, w, *bufs); }},
-          {"J2 two-pass prefetch", [&] { return probeJ2(chain, w, *bufs); }},
-          {"J2+J1a two-pass + gated dedup", [&] { return probeJ2J1a(chain, w, *bufs); }},
-          {"J3 bucketized", [&] { return probeJ3<false>(bucket, w, *bufs); }},
-          {"J3P bucketized+prefetch", [&] { return probeJ3<true>(bucket, w, *bufs); }},
-          {"J1+J3", [&] { return probeJ1J3(bucket, w, *bufs); }},
-#ifdef HAVE_J4
-          {"J4 existing SIMD join", [&] { return probeJ4(chain, w, *bufs); }},
-#endif
-      };
-      double t0ns = 0;
-      for (auto& v : vs) {
-         Result r;
-         const double ns = bestNs([&] { r = v.fn(); }, reps, w.probeKeys.size());
-         const bool ok = r == ref;
-         fails += !ok;
-         if (t0ns == 0) t0ns = ns;
-         std::printf("%s,%zu,%zu,%llu,%s,%.3f,%.2f,%s\n", shape.c_str(), w.buildKeys.size(), w.probeKeys.size(),
-                     (unsigned long long)ref.count, v.name, ns, t0ns / ns, ok ? "ok" : "MISMATCH");
-         std::fflush(stdout);
+      // the join result does not depend on the hash: one reference for all
+      Result ref;
+      {
+         ChainTable<MurmurH> chain(w);
+         ref = probeT0(chain, w, *bufs);
+      }
+      // murmur first when listed, so the other hashes get a vs-default column
+      double murmurT0 = 0;
+      if (std::find(hlist.begin(), hlist.end(), "murmur") != hlist.end())
+         murmurT0 = runVariants<MurmurH>(shape, w, ref, 0, reps, *bufs, fails);
+      for (auto& h : hlist) {
+         if (h == "crc") runVariants<CrcH>(shape, w, ref, murmurT0, reps, *bufs, fails);
+         else if (h == "crc_fast") runVariants<CrcFastH>(shape, w, ref, murmurT0, reps, *bufs, fails);
       }
    }
 #ifndef HAVE_J4
