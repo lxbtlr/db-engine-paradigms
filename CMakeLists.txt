@@ -744,8 +744,8 @@ target_include_directories(run_aggrbench PUBLIC
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
 
-# run_crcbench: CRC-32C lowerings (x86 only: SSE4.2/PCLMUL/AVX-512 intrinsics)
-if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+# run_crcbench: CRC-32C lowerings (x86-64 and aarch64)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|aarch64|arm64|ARM64")
   add_executable(run_crcbench
     src/benchmarks/primitives/crcbench.cpp
     )
