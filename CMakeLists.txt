@@ -773,6 +773,16 @@ target_include_directories(run_aggrbench PUBLIC
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
 
+# run_joinbench: hash join probe variants on TPC-H-shaped joins
+add_executable(run_joinbench
+  src/benchmarks/primitives/joinbench.cpp
+  )
+target_include_directories(run_joinbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+target_link_libraries(run_joinbench common ${TBB_LIBRARIES})
+
 # run_crcbench: CRC-32C lowerings (x86-64 and aarch64)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|aarch64|arm64|ARM64")
   add_executable(run_crcbench
