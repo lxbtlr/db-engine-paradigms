@@ -1036,6 +1036,13 @@ template <typename T> void HashGroup::Hash_T(pos_t n) {
    char* __restrict__ keys = packedKeys.data();
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
 
+#if defined(VW_CRC32_FAST) && defined(VW_USE_CRC32)
+   // wide keys: 4 keys' chunk chains interleaved, bit-identical to the loop
+   if constexpr (std::is_same_v<T, char*>) {
+      hashFn.hashKeys(keys, keySize, n, 0, hashes);
+      return;
+   }
+#endif
    for (pos_t i = 0; i < n; i++) {
       if constexpr (std::is_same_v<T, char*>) {
          hashes[i] = hashFn.hashKey(keys + i * keySize, keySize, 0);

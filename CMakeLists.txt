@@ -125,6 +125,20 @@ if (VW_USE_CRC32)
 else ()
   message(STATUS "Building with MurMurHash")
 endif (VW_USE_CRC32)
+# VW_CRC32_FAST: bit-identical speedups of CRC32Hash (see Hash.hpp):
+#   - fixed seeds (HashGroup keys <= 8 bytes, hash/hash_sel primitives): the
+#     second crc32 per key is derived from the first (CRC linearity)
+#   - HashGroup keys > 8 bytes: 4 keys' chunk chains interleaved
+# Only affects builds with VW_USE_CRC32.
+OPTION(VW_CRC32_FAST "Bit-identical CRC32Hash speedups (linearity, interleaved wide keys)" OFF)
+if(VW_CRC32_FAST)
+  ADD_DEFINITIONS(-DVW_CRC32_FAST=1)
+  if(VW_USE_CRC32)
+    message(STATUS "Building with VW_CRC32_FAST")
+  else()
+    message(STATUS "Building with VW_CRC32_FAST (no effect: VW_USE_CRC32 is OFF)")
+  endif()
+endif()
 
 
 
@@ -769,6 +783,7 @@ add_executable(test_all
   src/test/vectorwise/simd_selection.cpp
   src/test/vectorwise/simd_hash.cpp
   src/test/vectorwise/simd_aggr.cpp
+  src/test/vectorwise/crc32_fast.cpp
   src/test/vectorwise/Operators.cpp
   src/test/common/Hashmap.cpp
   src/test/common/Database.cpp
