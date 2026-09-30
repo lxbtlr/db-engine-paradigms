@@ -4,6 +4,7 @@
 #include "common/defs.hpp"
 #include "common/runtime/SIMD.hpp"
 #include "common/runtime/Types.hpp"
+#include <cstring>
 #ifndef SIMDE_ENABLE_NATIVE_ALIASES
 #define SIMDE_ENABLE_NATIVE_ALIASES
 #endif
@@ -193,11 +194,16 @@ class MurMurHash : public Hash<MurMurHash> {
 
       uint64_t h = seed ^ (len * m);
 
-      const uint64_t* data = (const uint64_t*)key;
-      const uint64_t* end = data + (len / 8);
+      // keys are packed at arbitrary offsets: walk bytes and memcpy each
+      // 8-byte chunk, not an (unaligned, UB) uint64_t load; compiles to the
+      // same single load
+      const unsigned char* data = (const unsigned char*)key;
+      const unsigned char* end = data + (len / 8) * 8;
 
       while (data != end) {
-         uint64_t k = *data++;
+         uint64_t k;
+         std::memcpy(&k, data, sizeof(k));
+         data += sizeof(k);
 
          k *= m;
          k ^= k >> r;
@@ -216,7 +222,7 @@ class MurMurHash : public Hash<MurMurHash> {
       case 4: h ^= uint64_t(data2[3]) << 24;FALLTHROUGH
       case 3: h ^= uint64_t(data2[2]) << 16;FALLTHROUGH
       case 2: h ^= uint64_t(data2[1]) << 8;FALLTHROUGH
-      case 1: h ^= uint64_t(data2[0]); h *= m;FALLTHROUGH
+      case 1: h ^= uint64_t(data2[0]); h *= m;
       };
 
       h ^= h >> r;
@@ -467,19 +473,25 @@ class CRC32Hash : public Hash<CRC32Hash> {
       auto data = reinterpret_cast<const uint8_t*>(key);
       uint64_t s = seed;
       while (len >= 8) {
-         s = hashKey(*reinterpret_cast<const uint64_t*>(data), s);
+         // packed keys sit at arbitrary offsets: memcpy, not an (unaligned,
+         // UB) uint64_t load; compiles to the same single load
+         uint64_t k;
+         std::memcpy(&k, data, sizeof(k));
+         s = hashKey(k, s);
          data += 8;
          len -= 8;
       }
       if (len >= 4) {
-         s = hashKey((uint32_t) * reinterpret_cast<const uint32_t*>(data), s);
+         uint32_t k;
+         std::memcpy(&k, data, sizeof(k));
+         s = hashKey(k, s);
          data += 4;
          len -= 4;
       }
       switch (len) {
       case 3: s ^= ((uint64_t)data[2]) << 16;FALLTHROUGH
       case 2: s ^= ((uint64_t)data[1]) << 8;FALLTHROUGH
-      case 1: s ^= data[0];FALLTHROUGH
+      case 1: s ^= data[0];
       }
       return s;
    }
