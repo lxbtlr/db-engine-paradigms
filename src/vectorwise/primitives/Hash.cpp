@@ -2,6 +2,7 @@
 #include "common/runtime/Hash.hpp"
 #include "vectorwise/Operations.hpp"
 #include "vectorwise/Primitives.hpp"
+#include "vectorwise/SimdCrc.hpp"
 #include "vectorwise/SimdHash.hpp"
 #include <functional>
 
@@ -51,6 +52,23 @@ namespace primitives {
    F2 rehash_##type##_col = (F2)&rehash<type, DEFAULT_HASH>;
 #define MK_REHASH_SEL(type)                                                    \
    F3 rehash_sel_##type##_col = (F3)&rehash_sel<type, DEFAULT_HASH>;
+#endif
+
+#if defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32) && !defined(VW_HAVE_SIMD_CRC)
+#pragma message("VW_CRC32_VPCLMUL: needs AVX-512F/DQ/VL/BW + VPCLMULQDQ and 64-bit hashes, using scalar CRC32 hashing")
+#endif
+#if defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32)
+// VW_CRC32_VPCLMUL: hash/hash_sel of supported key types point at the
+// VPCLMULQDQ CRC32Hash kernels (SimdCrc.hpp) when the ISA is there;
+// bit-identical. rehash stays as above.
+#undef MK_HASH
+#undef MK_HASH_SEL
+#define MK_HASH(type)                                                          \
+   F2 hash_##type##_col = (F2)simd_crc::pick_hash<type, DEFAULT_HASH>(         \
+       &hash<type, DEFAULT_HASH>);
+#define MK_HASH_SEL(type)                                                      \
+   F3 hash_sel_##type##_col = (F3)simd_crc::pick_hash_sel<type, DEFAULT_HASH>( \
+       &hash_sel<type, DEFAULT_HASH>);
 #endif
 
 EACH_TYPE(NIL, MK_HASH)

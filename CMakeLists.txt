@@ -139,6 +139,21 @@ if(VW_CRC32_FAST)
     message(STATUS "Building with VW_CRC32_FAST (no effect: VW_USE_CRC32 is OFF)")
   endif()
 endif()
+# VW_CRC32_VPCLMUL: CRC32Hash with VPCLMULQDQ, 8 keys per zmm, bit-identical
+# (SimdCrc.hpp): hash/hash_sel primitives and HashGroup keys <= 8 bytes.
+# Needs AVX-512F/DQ/VL/BW + VPCLMULQDQ (Ice Lake+, Sapphire Rapids, Zen 4)
+# in the target flags, else scalar with a warning. Combines with
+# VW_CRC32_FAST, which still covers wide keys and the fixed-seed scalar
+# paths. Only affects builds with VW_USE_CRC32.
+OPTION(VW_CRC32_VPCLMUL "CRC32Hash with VPCLMULQDQ (8 keys per zmm, bit-identical)" OFF)
+if(VW_CRC32_VPCLMUL)
+  ADD_DEFINITIONS(-DVW_CRC32_VPCLMUL=1)
+  if(VW_USE_CRC32)
+    message(STATUS "Building with VW_CRC32_VPCLMUL")
+  else()
+    message(STATUS "Building with VW_CRC32_VPCLMUL (no effect: VW_USE_CRC32 is OFF)")
+  endif()
+endif()
 
 
 

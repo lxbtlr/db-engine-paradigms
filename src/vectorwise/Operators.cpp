@@ -4,6 +4,7 @@
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/SIMD.hpp"
+#include "vectorwise/SimdCrc.hpp"
 #include "vectorwise/SimdHash.hpp"
 #include <algorithm>
 #include <iostream>
@@ -1036,6 +1037,14 @@ template <typename T> void HashGroup::Hash_T(pos_t n) {
    char* __restrict__ keys = packedKeys.data();
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
 
+#if defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32) && defined(VW_HAVE_SIMD_CRC)
+   // packed 1/2/4/8-byte keys: VPCLMULQDQ CRC32Hash, 8 keys per zmm,
+   // bit-identical to hashFn.hashKey(key) below
+   if constexpr (!std::is_same_v<T, char*>) {
+      primitives::simd_crc::hash_keys<T>(n, keys, hashes);
+      return;
+   }
+#endif
 #if defined(VW_CRC32_FAST) && defined(VW_USE_CRC32)
    // wide keys: 4 keys' chunk chains interleaved, bit-identical to the loop
    if constexpr (std::is_same_v<T, char*>) {
