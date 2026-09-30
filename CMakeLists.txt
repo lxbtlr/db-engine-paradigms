@@ -704,6 +704,11 @@ target_include_directories(run_hashbench PUBLIC
     PRIVATE src)
 target_link_libraries(run_hashbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
 
+# run_compressbench: memory side effects of masked / compress stores with mask 0
+add_executable(run_compressbench
+  src/benchmarks/primitives/compressbench.cpp
+  )
+
 # Enable tests
 enable_testing()
 set(CTEST_OUTPUT_ON_FAILURE "1")
