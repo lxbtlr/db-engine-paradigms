@@ -30,7 +30,8 @@
 // build's VW_* options. speedup_vs_T0 is against T0 with the same hash,
 // speedup_vs_T0_murmur against today's default (T0, murmur).
 //
-// Shapes (sf1, int32 keys):
+// Shapes (sf1, int32 keys; order keys sparse as dbgen's o_orderkey, 8 used
+// in every 32; partsupp and supplier keys dense 0..n-1):
 //   q3      Q3 J2: build 10% of 1.5M orders, probe lineitem-like sorted runs (~4/key)
 //   q5      Q5 J4: build 15% of 1.5M orders, sorted runs
 //   q18     Q18 J1/J3: build ~57 orders, probe lineitem sorted runs (almost no hits)
@@ -132,29 +133,38 @@ Workload makeWorkload(const std::string& shape, double scale, std::mt19937_64& r
          if (frac >= 1.0 || std::uniform_real_distribution<double>(0, 1)(rng) < frac) w.buildKeys.push_back(k);
       std::shuffle(w.buildKeys.begin(), w.buildKeys.end(), rng);
    };
+   // o_orderkey as dbgen makes it: sparse, 8 used keys in every 32. The key
+   // pattern matters: CRC32Hash's directory slot is linear in the key bits,
+   // so dense 0..n-1 keys spread perfectly and sparse subsets need not
+   auto okey = [](int32_t i) { return (i / 8) * 32 + (i % 8) + 1; };
+   auto pickOrders = [&](int32_t orders, double frac) {
+      for (int32_t i = 0; i < orders; ++i)
+         if (frac >= 1.0 || std::uniform_real_distribution<double>(0, 1)(rng) < frac) w.buildKeys.push_back(okey(i));
+      std::shuffle(w.buildKeys.begin(), w.buildKeys.end(), rng);
+   };
    auto sortedRuns = [&](int32_t orders) { // lineitem: 1..7 rows per order, in key order
       for (int32_t o = 0; o < orders; ++o)
-         for (int r = 0, n = 1 + int(rng() % 7); r < n; ++r) w.probeKeys.push_back(o);
+         for (int r = 0, n = 1 + int(rng() % 7); r < n; ++r) w.probeKeys.push_back(okey(o));
    };
    auto randomProbe = [&](int32_t domain, size_t n) {
       w.probeKeys.resize(n);
       for (auto& k : w.probeKeys) k = int32_t(rng() % domain);
    };
    const int32_t orders = int32_t(1500000 * scale);
-   if (shape == "q3") pick(orders, 0.10), sortedRuns(orders);
-   else if (shape == "q5") pick(orders, 0.15), sortedRuns(orders);
-   else if (shape == "fk_all") pick(orders, 1.0), sortedRuns(orders);
+   if (shape == "q3") pickOrders(orders, 0.10), sortedRuns(orders);
+   else if (shape == "q5") pickOrders(orders, 0.15), sortedRuns(orders);
+   else if (shape == "fk_all") pickOrders(orders, 1.0), sortedRuns(orders);
    else if (shape == "q18") { // build: the ~57 orders past the sum(l_quantity) filter
-      for (int i = 0; i < 57; ++i) w.buildKeys.push_back(int32_t(rng() % orders));
+      for (int i = 0; i < 57; ++i) w.buildKeys.push_back(okey(int32_t(rng() % orders)));
       std::sort(w.buildKeys.begin(), w.buildKeys.end());
       w.buildKeys.erase(std::unique(w.buildKeys.begin(), w.buildKeys.end()), w.buildKeys.end());
       sortedRuns(orders);
    } else if (shape == "q9j5") { // build: lineitem rows (5.4%) keyed by l_orderkey (duplicates); probe: orders
       for (int32_t o = 0; o < orders; ++o)
          for (int r = 0, n = 1 + int(rng() % 7); r < n; ++r)
-            if (std::uniform_real_distribution<double>(0, 1)(rng) < 0.054) w.buildKeys.push_back(o);
+            if (std::uniform_real_distribution<double>(0, 1)(rng) < 0.054) w.buildKeys.push_back(okey(o));
       std::shuffle(w.buildKeys.begin(), w.buildKeys.end(), rng);
-      for (int32_t o = 0; o < orders; ++o) w.probeKeys.push_back(o);
+      for (int32_t o = 0; o < orders; ++o) w.probeKeys.push_back(okey(o));
    }
    else if (shape == "q9") pick(int32_t(800000 * scale), 0.054), randomProbe(int32_t(800000 * scale), size_t(6000000 * scale));
    else if (shape == "dim") pick(int32_t(10000 * std::max(scale, 0.01)), 1.0), randomProbe(int32_t(10000 * std::max(scale, 0.01)), size_t(6000000 * scale));
