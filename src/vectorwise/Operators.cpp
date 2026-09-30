@@ -192,6 +192,68 @@ inline void joinPrefetchStep(runtime::Hashmap& ht,
 #define VW_JOIN_PF_STEP(ht, hashes, i, n) ((void)0)
 #endif
 
+// VW_JOIN_TWOPHASE: the first pass of joinAllParallel / joinSelParallel in
+// three loops over the probe vector (group prefetching), so the directory
+// and entry misses of the whole vector overlap instead of one per probe:
+//   A  prefetch every probe's directory slot
+//   B  read the slots (now cached), tag-filter, prefetch the first entries;
+//      candidates go to the followup buffers
+//   C  compare hashes, emit matches, queue chain successors; compacts the
+//      followup buffers in place (write index <= read index)
+// Directories below VW_JOIN_TWOPHASE_MIN_SLOTS slots stay cache-resident, and
+// there the extra loops only cost (TPC-H Q18's 57-order build: 0.9x in
+// run_joinbench on every machine), so those joins keep the one-loop path.
+#ifdef VW_JOIN_TWOPHASE
+#ifndef VW_JOIN_TWOPHASE_MIN_SLOTS
+#define VW_JOIN_TWOPHASE_MIN_SLOTS 4096
+#endif
+namespace {
+constexpr size_t kTwoPhaseMinSlots = VW_JOIN_TWOPHASE_MIN_SLOTS;
+
+inline bool useTwoPhase(const runtime::Hashmap& ht) {
+   return ht.mask + 1 >= kTwoPhaseMinSlots;
+}
+
+/// Matches of probes 0..n-1 into buildMatches / probeMatches (probe id(i)),
+/// chain successors into followupIds / followupEntries from index 0; returns
+/// the match count, sets followupWrite to the successor count
+template <typename Id>
+inline size_t joinTwoPhase(runtime::Hashmap& ht,
+                           const runtime::Hashmap::hash_t* hashes, size_t n,
+                           runtime::Hashmap::EntryHeader** buildMatches,
+                           pos_t* probeMatches, pos_t* followupIds,
+                           runtime::Hashmap::EntryHeader** followupEntries,
+                           pos_t& followupWrite, Id id) {
+   for (size_t i = 0; i < n; ++i) ht.prefetch_slot(hashes[i]);
+   size_t candidates = 0;
+   for (size_t i = 0; i < n; ++i) {
+      auto entry = ht.find_chain_tagged(hashes[i]);
+      if (entry != ht.end()) {
+         __builtin_prefetch(entry, 0, 3);
+         followupEntries[candidates] = entry;
+         followupIds[candidates++] = i;
+      }
+   }
+   size_t found = 0;
+   pos_t write = 0;
+   for (size_t j = 0; j < candidates; ++j) {
+      auto entry = followupEntries[j];
+      const pos_t i = followupIds[j];
+      if (entry->hash == hashes[i]) {
+         buildMatches[found] = entry;
+         probeMatches[found++] = id(i);
+      }
+      if (entry->next != ht.end()) {
+         followupIds[write] = i;
+         followupEntries[write++] = entry->next;
+      }
+   }
+   followupWrite = write;
+   return found;
+}
+} // namespace
+#endif
+
 pos_t Hashjoin::joinAllParallel() {
    size_t found = 0;
    auto followup = contCon.followup;
@@ -199,6 +261,14 @@ pos_t Hashjoin::joinAllParallel() {
 
    if (followup == followupWrite) {
       VW_JOIN_PF_WARMUP(shared.ht, probeHashes, cont.numProbes);
+#ifdef VW_JOIN_TWOPHASE
+      if (useTwoPhase(shared.ht))
+         found = joinTwoPhase(shared.ht, probeHashes, cont.numProbes,
+                              buildMatches, probeMatches, followupIds,
+                              followupEntries, followupWrite,
+                              [](pos_t i) { return i; });
+      else
+#endif
       for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
          VW_JOIN_PF_STEP(shared.ht, probeHashes, i, end);
          auto hash = probeHashes[i];
@@ -498,6 +568,14 @@ pos_t Hashjoin::joinSelParallel() {
 
    if (followup == followupWrite) {
       VW_JOIN_PF_WARMUP(shared.ht, probeHashes, cont.numProbes);
+#ifdef VW_JOIN_TWOPHASE
+      if (useTwoPhase(shared.ht))
+         found = joinTwoPhase(shared.ht, probeHashes, cont.numProbes,
+                              buildMatches, probeMatches, followupIds,
+                              followupEntries, followupWrite,
+                              [sel = probeSel](pos_t i) { return sel[i]; });
+      else
+#endif
       for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
          VW_JOIN_PF_STEP(shared.ht, probeHashes, i, end);
          auto hash = probeHashes[i];

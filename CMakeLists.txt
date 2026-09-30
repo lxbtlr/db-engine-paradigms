@@ -270,6 +270,39 @@ if(VW_JOIN_PREFETCH)
   message(STATUS "Building with VW_JOIN_PREFETCH (distance ${VW_JOIN_PREFETCH_DIST})")
 endif(VW_JOIN_PREFETCH)
 
+# VW_JOIN_TWOPHASE: group prefetching in the hash join probe (first pass of
+# joinAllParallel / joinSelParallel in three loops, see Operators.cpp);
+# joins whose directory has fewer than VW_JOIN_TWOPHASE_MIN_SLOTS slots keep
+# the one-loop path. run_joinbench variant J2.
+OPTION(VW_JOIN_TWOPHASE "Two-phase (group prefetch) hash join probe" OFF)
+set(VW_JOIN_TWOPHASE_MIN_SLOTS 4096 CACHE STRING
+    "VW_JOIN_TWOPHASE: smallest directory (slots) that uses the two-phase probe")
+if(VW_JOIN_TWOPHASE)
+  if(VW_JOIN_PREFETCH)
+    message(FATAL_ERROR "VW_JOIN_TWOPHASE and VW_JOIN_PREFETCH both prefetch the same probe loop; enable one")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_TWOPHASE=1 -DVW_JOIN_TWOPHASE_MIN_SLOTS=${VW_JOIN_TWOPHASE_MIN_SLOTS})
+  message(STATUS "Building with VW_JOIN_TWOPHASE (min slots ${VW_JOIN_TWOPHASE_MIN_SLOTS})")
+endif()
+
+# VW_JOIN_SIMD: the existing AVX-512 hash join probes (joinAllSIMD /
+# joinSelSIMD) by default instead of joinAllParallel / joinSelParallel; the
+# SIMDjoin environment variable still overrides. Needs AVX-512F in the
+# target flags (else scalar with a warning) and 32-bit pos_t. Wins on
+# Sapphire Rapids, loses on GDS-mitigated gathers (Cascade Lake), see
+# run_joinbench variant J4.
+OPTION(VW_JOIN_SIMD "AVX-512 hash join probes by default" OFF)
+if(VW_JOIN_SIMD)
+  if(VW_POS_16)
+    message(FATAL_ERROR "VW_JOIN_SIMD needs 32-bit pos_t (VW_POS_16 is ON)")
+  endif()
+  if(VW_JOIN_TWOPHASE)
+    message(FATAL_ERROR "VW_JOIN_SIMD and VW_JOIN_TWOPHASE replace the same probe loop; enable one")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_SIMD=1)
+  message(STATUS "Building with VW_JOIN_SIMD")
+endif()
+
 # Hash join entry layout (QueryBuilder::HashJoinBuilder). All OFF / 8 keeps
 # the existing layout: header, then fields packed in add* call order, stride
 # rounded up to 8.

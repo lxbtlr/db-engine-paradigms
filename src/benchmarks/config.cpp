@@ -94,6 +94,9 @@ vectorwise::primitives::F4 ExperimentConfig::selsel_less_equal_int64_t_col_int64
   return BF(vectorwise::primitives::selsel_less_equal_int64_t_col_int64_t_val);
 }
 
+#if defined(VW_JOIN_SIMD) && !defined(__AVX512F__)
+#pragma message("VW_JOIN_SIMD: no AVX-512F in the target flags, joins stay scalar")
+#endif
 ExperimentConfig::joinFun ExperimentConfig::joinAll() {
 #if defined(__AVX512F__) && !defined(VW_POS_16)
   if (useSimdJoin) return &vectorwise::Hashjoin::joinAllSIMD;
