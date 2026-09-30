@@ -14,6 +14,16 @@
 # huge2mb (HUGE_2MB_MALLOC_HUGE). SEL (default: 256-bit SIMD selection) is
 # the same in every config.
 #
+# Hash configs: the hash function on top of one base config (HASH_BASE):
+#   hash_murmur          default MurMurHash
+#   hash_simd            VW_SIMD_HASH (AVX-512 MurMurHash; x86 AVX-512F/DQ)
+#   hash_crc32           VW_USE_CRC32
+#   hash_crc32_fast      VW_USE_CRC32 + VW_CRC32_FAST
+#   hash_crc32_vpclmul   VW_USE_CRC32 + VW_CRC32_FAST + VW_CRC32_VPCLMUL
+#                        (needs VPCLMULQDQ: Ice Lake+, Sapphire Rapids, Zen 4)
+# Configs whose ISA this CPU lacks are skipped (their builds would fall back
+# and duplicate another config).
+#
 # For every compiler x config it builds run_tpch + test_all into
 # build_flags/<host>/<compiler>_<config>, runs the TPC-H correctness tests, then
 # times run_tpch -e v on QUERIES at 1 thread pinned to one CPU, ROUNDS rounds
@@ -24,10 +34,14 @@
 #   effects.csv  per flag: add_speedup = default/add_<flag>, drop_speedup =
 #                drop_<flag>/tuned (both > 1 means the flag helps that query)
 #   best.csv     fastest config per compiler x query
+#   hash.csv     hash configs: median ms and speedup vs hash_murmur
 #
 # Environment (all optional):
 #   COMPILERS  "gcc clang"
-#   CONFIGS    all 12 (see config_flags)
+#   CONFIGS    all 12 flag configs + the 5 hash configs (see config_flags);
+#              e.g. CONFIGS="$(echo hash_{murmur,simd,crc32,crc32_fast,crc32_vpclmul})"
+#   HASH_BASE  default   flag config the hash configs build on (e.g. tuned,
+#                        drop_group_aggr); its crc32 setting is overridden
 #   SEL        by CPU: AVX-512VL "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg",
 #              AVX-512F only "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg",
 #              otherwise (Zen 3, ARM, ...) "-DVW_SIMD_SEL=OFF"
@@ -54,9 +68,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # over NFS, and must never write the same build tree
 BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 COMPILERS=${COMPILERS:-"gcc clang"}
-ALL_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
+FLAG_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
-CONFIGS=${CONFIGS:-$ALL_CONFIGS}
+HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
+CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS"}
+HASH_BASE=${HASH_BASE:-default}
 # SIMD selection only where the CPU has the kernels' ISA, so a config never
 # claims SIMD selection while silently running the scalar fallback
 if [ -z "${SEL:-}" ]; then
@@ -128,11 +144,20 @@ summarize() {
   { echo "compiler,query,best_config,median_ms,vs_default,vs_tuned"
     awk -F, '{ k = $1 "," $2; if (!(k in b) || $4 < b[k]) { b[k] = $4; c[k] = $3; d[k] = $6; t[k] = $7 } }
       END { for (k in b) printf "%s,%s,%.2f,%s,%s\n", k, c[k], b[k], d[k], t[k] }' "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/best.csv"
+
+  # hash.csv: hash configs, speedup vs hash_murmur (the default hash)
+  { echo "compiler,query,hash_config,median_ms,speedup_vs_murmur"
+    awk -F, '$3 ~ /^hash_/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
+      END { n = split("hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul", hc, " ")
+            for (k in cq) { b = m[k ",hash_murmur"]
+              for (i = 1; i <= n; i++) if ((k "," hc[i]) in m)
+                printf "%s,%s,%.2f,%s\n", k, hc[i], m[k "," hc[i]], b ? sprintf("%.3f", b / m[k "," hc[i]]) : "" } }' \
+      "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/hash.csv"
   rm -f "$OUT/matrix.body"
 }
 # SUMMARIZE_ONLY=<results dir>: recompute the summaries from its timing.csv
 if [ -n "${SUMMARIZE_ONLY:-}" ]; then OUT=$SUMMARIZE_ONLY; summarize
-  column -t -s, "$OUT/effects.csv"; column -t -s, "$OUT/best.csv"; exit 0; fi
+  column -t -s, "$OUT/effects.csv"; column -t -s, "$OUT/best.csv"; column -t -s, "$OUT/hash.csv"; exit 0; fi
 
 OUT="$ROOT/results/flag_ablation_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
@@ -148,6 +173,7 @@ flags() {
   echo "-DVW_GROUP_AGGR=$1 -DVW_GROUP_AGGR_SEL=$2 -DVW_POS_16=$3 -DVW_USE_CRC32=$4 -DHUGE_2MB_MALLOC_HUGE=$5" \
        "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg -DVW_SIMD_SEL_UNROLL=1" \
        "-DVW_SIMD_SEL_GATHER=scalar -DVW_SIMD_SEL_CHAR=OFF -DVW_SIMD_HASH=OFF -DVW_JOIN_PREFETCH=OFF" \
+       "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF" \
        "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
 config_flags() {
@@ -165,6 +191,12 @@ config_flags() {
     drop_pos16)          flags ON   ON       OFF   ON    ON  ;;
     drop_crc32)          flags ON   ON       ON    OFF   ON  ;;
     drop_huge2mb)        flags ON   ON       ON    ON    OFF ;;
+    # hash configs: HASH_BASE, then the hash options (last -D wins)
+    hash_murmur)         echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=OFF -DVW_SIMD_HASH=OFF" ;;
+    hash_simd)           echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=OFF -DVW_SIMD_HASH=ON" ;;
+    hash_crc32)          echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON" ;;
+    hash_crc32_fast)     echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
+    hash_crc32_vpclmul)  echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON -DVW_CRC32_VPCLMUL=ON" ;;
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
@@ -172,6 +204,21 @@ bdir() { echo "$ROOT/build_flags/$BENCH_HOST/$1_$2"; }
 # reject unknown config names before building (exit inside $(config_flags)
 # only leaves the subshell)
 for cfg in $CONFIGS; do (config_flags "$cfg") > /dev/null || { rm -rf "$OUT"; exit 2; }; done
+case " $FLAG_CONFIGS " in *" $HASH_BASE "*) ;; *)
+  echo "HASH_BASE=$HASH_BASE is not a flag config ($(echo $FLAG_CONFIGS))" >&2; rm -rf "$OUT"; exit 2 ;; esac
+# drop hash configs this CPU cannot run (their build would fall back to
+# scalar and duplicate another config)
+cpu_has() { grep -q -w "$1" /proc/cpuinfo; }
+kept=""
+for cfg in $CONFIGS; do
+  case "$cfg" in
+    hash_simd) cpu_has avx512f && cpu_has avx512dq || { log "skipping hash_simd: no AVX-512F/DQ on this CPU"; continue; } ;;
+    hash_crc32_vpclmul) cpu_has vpclmulqdq && cpu_has avx512vl && cpu_has avx512bw && cpu_has avx512dq ||
+                        { log "skipping hash_crc32_vpclmul: no VPCLMULQDQ + AVX-512 on this CPU"; continue; } ;;
+  esac
+  kept="$kept $cfg"
+done
+CONFIGS=$kept
 
 {
   echo "host: $(hostname)"
@@ -249,6 +296,10 @@ log "per-flag effect (>1 = flag helps; add = vs default, drop = vs tuned):"
 column -t -s, "$OUT/effects.csv" | tee -a "$OUT/driver.log"
 log "best config per query:"
 column -t -s, "$OUT/best.csv" | tee -a "$OUT/driver.log"
+if [ "$(wc -l < "$OUT/hash.csv")" -gt 1 ]; then
+  log "hash configs (base: $HASH_BASE), speedup vs the default MurMurHash:"
+  column -t -s, "$OUT/hash.csv" | tee -a "$OUT/driver.log"
+fi
 log "results: $OUT"
 if [ "$FAILS" -gt 0 ]; then log "$FAILS FAILURE(S)"; exit 1; fi
 log "ALL CHECKS PASSED"
