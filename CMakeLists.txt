@@ -712,6 +712,13 @@ target_include_directories(run_aggrbench PUBLIC
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
 
+# run_crcbench: CRC-32C lowerings (x86 only: SSE4.2/PCLMUL/AVX-512 intrinsics)
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  add_executable(run_crcbench
+    src/benchmarks/primitives/crcbench.cpp
+    )
+endif()
+
 # run_compressbench: memory side effects of masked / compress stores with mask 0
 add_executable(run_compressbench
   src/benchmarks/primitives/compressbench.cpp
