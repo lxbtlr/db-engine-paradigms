@@ -704,6 +704,26 @@ target_include_directories(run_hashbench PUBLIC
     PRIVATE src)
 target_link_libraries(run_hashbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
 
+add_executable(run_aggrbench
+  src/benchmarks/primitives/aggrbench.cpp
+  )
+target_include_directories(run_aggrbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+
+# run_crcbench: CRC-32C lowerings (x86 only: SSE4.2/PCLMUL/AVX-512 intrinsics)
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  add_executable(run_crcbench
+    src/benchmarks/primitives/crcbench.cpp
+    )
+endif()
+
+# run_compressbench: memory side effects of masked / compress stores with mask 0
+add_executable(run_compressbench
+  src/benchmarks/primitives/compressbench.cpp
+  )
+
 # Enable tests
 enable_testing()
 set(CTEST_OUTPUT_ON_FAILURE "1")
@@ -716,6 +736,7 @@ add_executable(test_all
   src/test/vectorwise/primitives.cpp
   src/test/vectorwise/simd_selection.cpp
   src/test/vectorwise/simd_hash.cpp
+  src/test/vectorwise/simd_aggr.cpp
   src/test/vectorwise/Operators.cpp
   src/test/common/Hashmap.cpp
   src/test/common/Database.cpp
