@@ -28,6 +28,15 @@
 #   join_twophase        VW_JOIN_TWOPHASE (group prefetch, run_joinbench J2)
 #   join_simd            VW_JOIN_SIMD (AVX-512 probes, run_joinbench J4;
 #                        x86 AVX-512F)
+#
+# Group-by configs (VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
+#   grp_base             today's HashGroup
+#   grp_batch            VW_GROUP_BATCH_CREATE
+#   grp_global           VW_GROUP_GLOBAL_DIRECT
+#   grp_lastmatch        VW_GROUP_LAST_MATCH + VW_FUSE_HASH
+#   grp_q18              batch + global + lastmatch (+ fuse hash)
+#                        + VW_GROUP_NO_CONCAT + VW_SPILL_WORD_COPY
+#   grp_all              grp_q18 + VW_AGGR_FUSED
 # Configs whose ISA this CPU lacks are skipped (their builds would fall back
 # and duplicate another config).
 #
@@ -43,6 +52,7 @@
 #   best.csv     fastest config per compiler x query
 #   hash.csv     hash configs: median ms and speedup vs hash_murmur
 #   join.csv     join configs: median ms and speedup vs join_base
+#   group.csv    group-by configs: median ms and speedup vs grp_base
 #
 # Environment (all optional):
 #   COMPILERS  "gcc clang"
@@ -80,7 +90,8 @@ FLAG_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
 JOIN_CONFIGS="join_base join_twophase join_simd"
-CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS"}
+GROUP_CONFIGS="grp_base grp_batch grp_global grp_lastmatch grp_q18 grp_all"
+CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 HASH_BASE=${HASH_BASE:-default}
 # SIMD selection only where the CPU has the kernels' ISA, so a config never
 # claims SIMD selection while silently running the scalar fallback
@@ -171,12 +182,21 @@ summarize() {
               for (i = 1; i <= n; i++) if ((k "," jc[i]) in m)
                 printf "%s,%s,%.2f,%s\n", k, jc[i], m[k "," jc[i]], b ? sprintf("%.3f", b / m[k "," jc[i]]) : "" } }' \
       "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/join.csv"
+
+  # group.csv: group-by configs, speedup vs grp_base (today's HashGroup)
+  { echo "compiler,query,group_config,median_ms,speedup_vs_base"
+    awk -F, '$3 ~ /^grp_/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
+      END { n = split("grp_base grp_batch grp_global grp_lastmatch grp_q18 grp_all", gc, " ")
+            for (k in cq) { b = m[k ",grp_base"]
+              for (i = 1; i <= n; i++) if ((k "," gc[i]) in m)
+                printf "%s,%s,%.2f,%s\n", k, gc[i], m[k "," gc[i]], b ? sprintf("%.3f", b / m[k "," gc[i]]) : "" } }' \
+      "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/group.csv"
   rm -f "$OUT/matrix.body"
 }
 # SUMMARIZE_ONLY=<results dir>: recompute the summaries from its timing.csv
 if [ -n "${SUMMARIZE_ONLY:-}" ]; then OUT=$SUMMARIZE_ONLY; summarize
   column -t -s, "$OUT/effects.csv"; column -t -s, "$OUT/best.csv"; column -t -s, "$OUT/hash.csv"
-  column -t -s, "$OUT/join.csv"; exit 0; fi
+  column -t -s, "$OUT/join.csv"; column -t -s, "$OUT/group.csv"; exit 0; fi
 
 OUT="$ROOT/results/flag_ablation_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
@@ -193,6 +213,8 @@ flags() {
        "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg -DVW_SIMD_SEL_UNROLL=1" \
        "-DVW_SIMD_SEL_GATHER=scalar -DVW_SIMD_SEL_CHAR=OFF -DVW_SIMD_HASH=OFF -DVW_JOIN_PREFETCH=OFF" \
        "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF -DVW_JOIN_TWOPHASE=OFF -DVW_JOIN_SIMD=OFF" \
+       "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_GROUP_LAST_MATCH=OFF -DVW_FUSE_HASH=OFF" \
+       "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF" \
        "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
 config_flags() {
@@ -220,6 +242,14 @@ config_flags() {
     join_base)           echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     join_twophase)       echo "$(config_flags join_base) -DVW_JOIN_TWOPHASE=ON" ;;
     join_simd)           echo "$(config_flags join_base) -DVW_JOIN_SIMD=ON" ;;
+    # group-by configs: HASH_BASE + CRC32 + FAST, then the HashGroup options
+    grp_base)            echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
+    grp_batch)           echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON" ;;
+    grp_global)          echo "$(config_flags grp_base) -DVW_GROUP_GLOBAL_DIRECT=ON" ;;
+    grp_lastmatch)       echo "$(config_flags grp_base) -DVW_GROUP_LAST_MATCH=ON -DVW_FUSE_HASH=ON" ;;
+    grp_q18)             echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON -DVW_GROUP_GLOBAL_DIRECT=ON" \
+                              "-DVW_GROUP_LAST_MATCH=ON -DVW_FUSE_HASH=ON -DVW_GROUP_NO_CONCAT=ON -DVW_SPILL_WORD_COPY=ON" ;;
+    grp_all)             echo "$(config_flags grp_q18) -DVW_AGGR_FUSED=ON" ;;
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
@@ -323,6 +353,10 @@ column -t -s, "$OUT/best.csv" | tee -a "$OUT/driver.log"
 if [ "$(wc -l < "$OUT/hash.csv")" -gt 1 ]; then
   log "hash configs (base: $HASH_BASE), speedup vs the default MurMurHash:"
   column -t -s, "$OUT/hash.csv" | tee -a "$OUT/driver.log"
+fi
+if [ "$(wc -l < "$OUT/group.csv")" -gt 1 ]; then
+  log "group-by configs (base: $HASH_BASE + CRC32 + FAST), speedup vs grp_base:"
+  column -t -s, "$OUT/group.csv" | tee -a "$OUT/driver.log"
 fi
 if [ "$(wc -l < "$OUT/join.csv")" -gt 1 ]; then
   log "join configs (base: $HASH_BASE + CRC32 + FAST), speedup vs join_base:"
