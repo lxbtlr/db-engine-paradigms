@@ -364,6 +364,30 @@ if(VW_JOIN_SIMD)
   message(STATUS "Building with VW_JOIN_SIMD")
 endif()
 
+# VW_NEW_JOIN: the join / join_sel refresh of andrew_pseudocode.md
+# (Hashjoin::joinAllNew / joinSelNew): 8 probes at a time gather the chain
+# head, split into real (head hash matches) and maybe (slot occupied, no
+# match) lists, then follow the chains of the concatenated list. AVX-512
+# when compiled for it (64-bit hashes, 32-bit pos_t), else an 8-lane scalar
+# block; a scalar loop for the last < 8 probes.
+OPTION(VW_NEW_JOIN "Real/maybe-list hash join probe (andrew_pseudocode.md)" OFF)
+#   VW_NEW_JOIN_FULL  what `full` means: tag (default; the directory
+#                     pointer's tag bit for the hash is set) or occupied
+#                     (the slot has a chain head)
+set(VW_NEW_JOIN_FULL "tag" CACHE STRING "VW_NEW_JOIN: full = tag | occupied")
+if(VW_NEW_JOIN)
+  if(VW_NEW_JOIN_FULL STREQUAL "tag")
+    ADD_DEFINITIONS(-DVW_NEW_JOIN_FULL_TAG=1)
+  elseif(NOT VW_NEW_JOIN_FULL STREQUAL "occupied")
+    message(FATAL_ERROR "VW_NEW_JOIN_FULL must be tag or occupied (got '${VW_NEW_JOIN_FULL}')")
+  endif()
+  if(VW_JOIN_SIMD OR VW_JOIN_TWOPHASE)
+    message(FATAL_ERROR "VW_NEW_JOIN replaces the join probe; disable VW_JOIN_SIMD and VW_JOIN_TWOPHASE")
+  endif()
+  ADD_DEFINITIONS(-DVW_NEW_JOIN=1)
+  message(STATUS "Building with VW_NEW_JOIN (full = ${VW_NEW_JOIN_FULL})")
+endif()
+
 # Hash join entry layout (QueryBuilder::HashJoinBuilder). All OFF / 8 keeps
 # the existing layout: header, then fields packed in add* call order, stride
 # rounded up to 8.

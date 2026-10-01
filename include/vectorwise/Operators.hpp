@@ -267,6 +267,22 @@ class Hashjoin : public BinaryOperator {
 #ifndef VW_POS_16
    pos_t joinSelSIMD();
 #endif
+#ifdef VW_NEW_JOIN
+   /// VW_NEW_JOIN (andrew_pseudocode.md): 8 probes at a time, gather the
+   /// head entry, split into real / maybe lists, then follow chains
+   pos_t joinAllNew();
+   pos_t joinSelNew();
+
+ private:
+   template <bool Sel> pos_t joinNew();
+   template <bool Sel> size_t joinNewFirstPass(pos_t& followupWrite);
+   /// the maybe list (probe index, chain successor), appended to the real
+   /// list's successors in the followup buffers
+   std::vector<pos_t> newMaybeIds;
+   std::vector<runtime::Hashmap::EntryHeader*> newMaybeEntries;
+
+ public:
+#endif
 
    virtual size_t next() override;
    ~Hashjoin();

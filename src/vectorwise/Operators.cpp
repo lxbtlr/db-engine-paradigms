@@ -827,6 +827,237 @@ pos_t Hashjoin::joinSelSIMD() {
 }
 #endif // !VW_POS_16
 
+#ifdef VW_NEW_JOIN
+// VW_NEW_JOIN: the join / join_sel refresh from andrew_pseudocode.md.
+//
+// NOTE: by default (VW_NEW_JOIN_FULL=tag) a probe is `full` only when the
+// directory pointer's tag bit for its hash is set (Hashmap::tag: bit 48 + top
+// 4 hash bits), not merely when its slot is occupied. Probes whose tag bit is
+// clear cannot be in the chain and are dropped without touching an entry.
+// VW_NEW_JOIN_FULL=occupied restores the slot-occupied check.
+//
+// Pass 1 (load keys, crc32 into h[]) is the probe hash expression the plan
+// already evaluates into probeHashes before the join function runs (the
+// CRC32 hash primitive; hash_sel for join_sel, which gathers key + sel[i]).
+// Pass 2, 8 probes at a time:
+//   slot  = h & mask                      (hash % bins)
+//   head  = gather(directory[slot])       (chain head, tag bits stripped)
+//   full  = tag bit of h set in the directory pointer (VW_NEW_JOIN_FULL_TAG,
+//           the default: the probe may be in the chain), or
+//           head != null (VW_NEW_JOIN_FULL=occupied: slot occupied)
+//   match = full && gather(head->hash) == h
+//   real  = compress(i, match)            -> head is a candidate match
+//   maybe = compress(i, full && !match)   -> head is not, the chain may be
+// The pseudocode's real = match AND !full can never hold under either
+// meaning of full (a head can only match where full holds); real = match is
+// the satisfiable reading. Probes without full drop out. With the tag
+// reading most non-matching probes (90-99% in TPC-H Q3/Q9) drop out at the
+// directory, without touching an entry; with occupied they gather a random
+// head entry (Q3 3.8x, Q9 2.7x slower than joinAllParallel on Zen 4).
+// Then the maybe list is appended to the real list (each probe's chain
+// successor) and the concatenated list is walked through the existing
+// followup loop, following hash chains as necessary. Reals that are false
+// (equal hash, different key) are removed by keyEquality after the join,
+// as for the other join variants.
+// AVX-512 (compile time, 64-bit hashes, 32-bit pos_t) does the 8 lanes with
+// gathers, compares and compress stores; otherwise an 8-lane scalar block
+// with the same steps; fewer than 8 probes left go through a plain scalar
+// loop.
+namespace {
+/// full for one probe: directory pointer dv, probe hash h
+inline bool newJoinFull(uint64_t dv, runtime::Hashmap::hash_t h) {
+#ifdef VW_NEW_JOIN_FULL_TAG
+   // Hashmap::tag: bit (pointer bits - 16) + top 4 hash bits
+   const uint64_t tag = uint64_t(1)
+                        << ((h >> (sizeof(h) * 8 - 4)) + (sizeof(dv) * 8 - 16));
+   return (dv & tag) != 0;
+#else
+   return (dv << 16) != 0; // pointer bits (tag bits stripped) non-null
+#endif
+}
+} // namespace
+
+template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
+   using EH = runtime::Hashmap::EntryHeader;
+   auto& ht = shared.ht;
+   const auto* dir = reinterpret_cast<const uint64_t*>(ht.entries);
+   const uint64_t mask = ht.mask;
+   const uint64_t maskPtr = ht.maskPointer;
+   const size_t n = cont.numProbes;
+   if (newMaybeIds.size() < n) {
+      newMaybeIds.resize(n);
+      newMaybeEntries.resize(n);
+   }
+   pos_t* maybeIds = newMaybeIds.data();
+   EH** maybeEntries = newMaybeEntries.data();
+   size_t found = 0, realFollow = 0, maybes = 0;
+   size_t i = 0;
+
+#if defined(__AVX512F__) && !(defined(HASH_SIZE) && HASH_SIZE == 32) &&       \
+    !defined(VW_POS_16)
+   const __m512i vMask = _mm512_set1_epi64((long long)mask);
+   const __m512i vMaskPtr = _mm512_set1_epi64((long long)maskPtr);
+   const __m512i zero = _mm512_setzero_si512();
+   const __m512i hashOff =
+       _mm512_set1_epi64((long long)offsetof(EH, hash));
+   static_assert(offsetof(EH, next) == 0, "next expected first in the entry");
+   const __m512i lane = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 7, 6, 5, 4,
+                                         3, 2, 1, 0);
+#ifdef VW_NEW_JOIN_FULL_TAG
+   // Hashmap::tag: bit 48 + (top 4 hash bits) of the directory pointer
+   const __m512i tagBase = _mm512_set1_epi64(48);
+   const __m512i one = _mm512_set1_epi64(1);
+#endif
+   for (; i + 8 <= n; i += 8) {
+      const __m512i h = _mm512_loadu_si512(probeHashes + i);
+      const __m512i slot = _mm512_and_si512(h, vMask);
+      const __m512i dv = _mm512_i64gather_epi64(slot, (const long long*)dir, 8);
+      const __m512i head = _mm512_and_si512(dv, vMaskPtr);
+#ifdef VW_NEW_JOIN_FULL_TAG
+      const __m512i tag = _mm512_sllv_epi64(
+          one, _mm512_add_epi64(_mm512_srli_epi64(h, 60), tagBase));
+      const __mmask8 full = _mm512_test_epi64_mask(dv, tag);
+#else
+      const __mmask8 full = _mm512_cmpneq_epi64_mask(head, zero);
+#endif
+      const __m512i headHash = _mm512_mask_i64gather_epi64(
+          zero, full, _mm512_add_epi64(head, hashOff), nullptr, 1);
+      const __mmask8 match = _mm512_mask_cmpeq_epi64_mask(full, headHash, h);
+      const __mmask8 real = match;
+      const __mmask8 maybe = full & (__mmask8)~match;
+      const __m512i next =
+          _mm512_mask_i64gather_epi64(zero, full, head, nullptr, 1);
+      const __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(full, next, zero);
+      // probe index i + lane (followups), probe id (output)
+      const __m512i idx = _mm512_add_epi32(_mm512_set1_epi32((int)i), lane);
+      const __m512i out =
+          Sel ? _mm512_castsi256_si512(
+                    _mm256_loadu_si256((const __m256i*)(probeSel + i)))
+              : idx;
+      // real list: the matched heads
+      _mm512_mask_compressstoreu_epi64(buildMatches + found, real, head);
+      _mm512_mask_compressstoreu_epi32(probeMatches + found, (__mmask16)real,
+                                       out);
+      found += __builtin_popcount(real);
+      // successors of the real list, then of the maybe list (appended below)
+      const __mmask8 rf = real & hasNext, mf = maybe & hasNext;
+      _mm512_mask_compressstoreu_epi64(followupEntries + realFollow, rf, next);
+      _mm512_mask_compressstoreu_epi32(followupIds + realFollow, (__mmask16)rf,
+                                       idx);
+      realFollow += __builtin_popcount(rf);
+      _mm512_mask_compressstoreu_epi64(maybeEntries + maybes, mf, next);
+      _mm512_mask_compressstoreu_epi32(maybeIds + maybes, (__mmask16)mf, idx);
+      maybes += __builtin_popcount(mf);
+   }
+#else
+   for (; i + 8 <= n; i += 8) {
+      EH* head[8];
+      EH* next[8];
+      bool full[8], match[8];
+      for (size_t l = 0; l < 8; ++l) {
+         const auto h = probeHashes[i + l];
+         const uint64_t dv = dir[h & mask];
+         head[l] = reinterpret_cast<EH*>(dv & maskPtr);
+         full[l] = newJoinFull(dv, h);
+         match[l] = full[l] && head[l]->hash == h;
+         next[l] = full[l] ? head[l]->next : nullptr;
+      }
+      for (size_t l = 0; l < 8; ++l) // real list
+         if (match[l]) {
+            buildMatches[found] = head[l];
+            probeMatches[found++] = Sel ? probeSel[i + l] : pos_t(i + l);
+         }
+      for (size_t l = 0; l < 8; ++l) {
+         if (!next[l]) continue;
+         if (match[l]) {
+            followupIds[realFollow] = pos_t(i + l);
+            followupEntries[realFollow++] = next[l];
+         } else { // full && !match: maybe list
+            maybeIds[maybes] = pos_t(i + l);
+            maybeEntries[maybes++] = next[l];
+         }
+      }
+   }
+#endif
+   // fewer than 8 probes left
+   for (; i < n; ++i) {
+      const auto h = probeHashes[i];
+      const uint64_t dv = dir[h & mask];
+      auto head = reinterpret_cast<EH*>(dv & maskPtr);
+      if (!newJoinFull(dv, h)) continue;
+      const bool match = head->hash == h;
+      if (match) {
+         buildMatches[found] = head;
+         probeMatches[found++] = Sel ? probeSel[i] : pos_t(i);
+      }
+      if (head->next) {
+         if (match) {
+            followupIds[realFollow] = pos_t(i);
+            followupEntries[realFollow++] = head->next;
+         } else {
+            maybeIds[maybes] = pos_t(i);
+            maybeEntries[maybes++] = head->next;
+         }
+      }
+   }
+   // append the maybe list to the real list
+   std::memcpy(followupIds + realFollow, maybeIds, maybes * sizeof(pos_t));
+   std::memcpy(followupEntries + realFollow, maybeEntries,
+               maybes * sizeof(EH*));
+   followupWrite = pos_t(realFollow + maybes);
+   return found;
+}
+
+template <bool Sel> pos_t Hashjoin::joinNew() {
+   size_t found = 0;
+   auto followup = contCon.followup;
+   auto followupWrite = contCon.followupWrite;
+
+   if (followup == followupWrite) found = joinNewFirstPass<Sel>(followupWrite);
+
+   followupWrite %= followupBufferSize;
+
+   // the concatenated real + maybe list: follow the hash chains (as
+   // joinAllParallel / joinSelParallel, including the continuation when the
+   // output buffers fill)
+   while (followup != followupWrite) {
+      auto remainingSpace = batchSize - found;
+      auto nrFollowups = followup <= followupWrite
+                             ? followupWrite - followup
+                             : followupBufferSize - (followup - followupWrite);
+      auto fittingElements = std::min((size_t)nrFollowups, remainingSpace);
+      for (size_t j = 0; j < fittingElements; ++j) {
+         size_t i = followupIds[followup];
+         auto entry = followupEntries[followup];
+         followup = (followup + 1) % followupBufferSize;
+         auto hash = probeHashes[i];
+         if (entry->hash == hash) {
+            buildMatches[found] = entry;
+            probeMatches[found++] = Sel ? probeSel[i] : pos_t(i);
+         }
+         if (entry->next != shared.ht.end()) {
+            followupIds[followupWrite] = i;
+            followupEntries[followupWrite] = entry->next;
+            followupWrite = (followupWrite + 1) % followupBufferSize;
+         }
+      }
+      if (fittingElements < nrFollowups) {
+         // continuation
+         contCon.followupWrite = followupWrite;
+         contCon.followup = followup;
+         return found;
+      }
+   }
+   cont.nextProbe = cont.numProbes;
+   contCon.followup = 0;
+   contCon.followupWrite = 0;
+   return found;
+}
+
+pos_t Hashjoin::joinAllNew() { return joinNew<false>(); }
+pos_t Hashjoin::joinSelNew() { return joinNew<true>(); }
+#endif // VW_NEW_JOIN
+
 template <typename T, typename HT>
 void INTERPRET_SEPARATE insertAllEntries(T& allocations, HT& ht,
                                          size_t ht_entry_size) {
