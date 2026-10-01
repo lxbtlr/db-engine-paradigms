@@ -28,6 +28,10 @@
 #   join_twophase        VW_JOIN_TWOPHASE (group prefetch, run_joinbench J2)
 #   join_simd            VW_JOIN_SIMD (AVX-512 probes, run_joinbench J4;
 #                        x86 AVX-512F)
+#   nj_tag               VW_NEW_JOIN, full = tag hit (andrew_pseudocode.md)
+#   nj_occ               VW_NEW_JOIN, full = slot occupied
+#   join_bloom           VW_JOIN_BLOOM (VW-owned Bloom filter before the probe)
+#   nj_bloom             VW_NEW_JOIN + VW_JOIN_BLOOM
 #
 # Group-by configs (VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
 #   grp_base             today's HashGroup
@@ -89,7 +93,7 @@ COMPILERS=${COMPILERS:-"gcc clang"}
 FLAG_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
-JOIN_CONFIGS="join_base join_twophase join_simd"
+JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom"
 GROUP_CONFIGS="grp_base grp_batch grp_global grp_lastmatch grp_q18 grp_all"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 HASH_BASE=${HASH_BASE:-default}
@@ -177,7 +181,7 @@ summarize() {
   # join.csv: join configs, speedup vs join_base (today's probe, same hash)
   { echo "compiler,query,join_config,median_ms,speedup_vs_base"
     awk -F, '$3 ~ /^join_/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-      END { n = split("join_base join_twophase join_simd", jc, " ")
+      END { n = split("join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom", jc, " ")
             for (k in cq) { b = m[k ",join_base"]
               for (i = 1; i <= n; i++) if ((k "," jc[i]) in m)
                 printf "%s,%s,%.2f,%s\n", k, jc[i], m[k "," jc[i]], b ? sprintf("%.3f", b / m[k "," jc[i]]) : "" } }' \
@@ -213,6 +217,7 @@ flags() {
        "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg -DVW_SIMD_SEL_UNROLL=1" \
        "-DVW_SIMD_SEL_GATHER=scalar -DVW_SIMD_SEL_CHAR=OFF -DVW_SIMD_HASH=OFF -DVW_JOIN_PREFETCH=OFF" \
        "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF -DVW_JOIN_TWOPHASE=OFF -DVW_JOIN_SIMD=OFF" \
+       "-DVW_NEW_JOIN=OFF -DVW_NEW_JOIN_FULL=tag -DVW_JOIN_BLOOM=OFF -DVW_SIMD_HASH_GATHER=insert" \
        "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_GROUP_LAST_MATCH=OFF -DVW_FUSE_HASH=OFF" \
        "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF" \
        "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
@@ -242,6 +247,10 @@ config_flags() {
     join_base)           echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     join_twophase)       echo "$(config_flags join_base) -DVW_JOIN_TWOPHASE=ON" ;;
     join_simd)           echo "$(config_flags join_base) -DVW_JOIN_SIMD=ON" ;;
+    nj_tag)              echo "$(config_flags join_base) -DVW_NEW_JOIN=ON -DVW_NEW_JOIN_FULL=tag" ;;
+    nj_occ)              echo "$(config_flags join_base) -DVW_NEW_JOIN=ON -DVW_NEW_JOIN_FULL=occupied" ;;
+    join_bloom)          echo "$(config_flags join_base) -DVW_JOIN_BLOOM=ON" ;;
+    nj_bloom)            echo "$(config_flags join_base) -DVW_NEW_JOIN=ON -DVW_JOIN_BLOOM=ON" ;;
     # group-by configs: HASH_BASE + CRC32 + FAST, then the HashGroup options
     grp_base)            echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     grp_batch)           echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON" ;;
