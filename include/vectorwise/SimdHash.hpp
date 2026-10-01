@@ -114,6 +114,51 @@ template <typename T> VW_HASH_INLINE __m512i widen_tail(const void* p, size_t r)
 }
 
 /// Gather 8 keys in[sel[j]] with scalar loads and widen them.
+#ifndef VW_SIMD_HASH_GATHER_STACK
+/// The keys are assembled in registers (vmovd/vpinsrd, or vmovq/vpinsrq for
+/// 8-byte keys): the stack-buffer form (VW_SIMD_HASH_GATHER=stack) stores 8
+/// narrow keys and reloads them as one vector, which cannot be forwarded from
+/// the stores and stalls (gcc; clang already emits inserts). run_crcbench
+/// hash_sel, Zen 4, gcc: 1.27 -> 0.30 ns/key for MurmurHash, 1.73 -> 0.64 for
+/// the VPCLMULQDQ CRC; manchego lost Q3 22% / 12% to the stall.
+/// Keys of <= 4 bytes are all signed here (int8/16/32, Date): each is widened
+/// to int32 by the scalar load and the vector sign-extends to 64 bits, as
+/// widen8 does.
+template <typename T> VW_HASH_INLINE int32_t key32(const T* in, pos_t i) {
+   if constexpr (std::is_same<T, types::Date>::value)
+      return in[i].value;
+   else
+      return int32_t(in[i]);
+}
+template <typename T>
+VW_HASH_INLINE __m512i gather8(const T* in, const pos_t* sel) {
+   if constexpr (sizeof(T) == 8) {
+      __m128i a = _mm_cvtsi64_si128((long long)in[sel[0]]);
+      __m128i b = _mm_cvtsi64_si128((long long)in[sel[2]]);
+      __m128i c = _mm_cvtsi64_si128((long long)in[sel[4]]);
+      __m128i d = _mm_cvtsi64_si128((long long)in[sel[6]]);
+      a = _mm_insert_epi64(a, (long long)in[sel[1]], 1);
+      b = _mm_insert_epi64(b, (long long)in[sel[3]], 1);
+      c = _mm_insert_epi64(c, (long long)in[sel[5]], 1);
+      d = _mm_insert_epi64(d, (long long)in[sel[7]], 1);
+      const __m256i lo = _mm256_inserti128_si256(_mm256_castsi128_si256(a), b, 1);
+      const __m256i hi = _mm256_inserti128_si256(_mm256_castsi128_si256(c), d, 1);
+      return _mm512_inserti64x4(_mm512_castsi256_si512(lo), hi, 1);
+   } else {
+      static_assert(sign_extends<T>, "keys of <= 4 bytes are signed");
+      __m128i lo = _mm_cvtsi32_si128(key32(in, sel[0]));
+      __m128i hi = _mm_cvtsi32_si128(key32(in, sel[4]));
+      lo = _mm_insert_epi32(lo, key32(in, sel[1]), 1);
+      hi = _mm_insert_epi32(hi, key32(in, sel[5]), 1);
+      lo = _mm_insert_epi32(lo, key32(in, sel[2]), 2);
+      hi = _mm_insert_epi32(hi, key32(in, sel[6]), 2);
+      lo = _mm_insert_epi32(lo, key32(in, sel[3]), 3);
+      hi = _mm_insert_epi32(hi, key32(in, sel[7]), 3);
+      return _mm512_cvtepi32_epi64(
+          _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1));
+   }
+}
+#else
 template <typename T>
 VW_HASH_INLINE __m512i gather8(const T* in, const pos_t* sel) {
    alignas(64) T tmp[8];
@@ -121,6 +166,7 @@ VW_HASH_INLINE __m512i gather8(const T* in, const pos_t* sel) {
    for (unsigned j = 0; j < 8; ++j) tmp[j] = in[sel[j]];
    return widen8<T>(tmp);
 }
+#endif
 
 template <typename T>
 VW_HASH_INLINE __m512i gather_tail(const T* in, const pos_t* sel, size_t r) {

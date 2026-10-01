@@ -464,6 +464,18 @@ if(VW_SIMD_HASH)
   message(STATUS "Building with VW_SIMD_HASH")
 endif(VW_SIMD_HASH)
 
+# VW_SIMD_HASH_GATHER: how the AVX-512 hash kernels (VW_SIMD_HASH,
+# VW_CRC32_VPCLMUL) collect keys through a selection vector (hash_sel,
+# rehash_sel): insert (default; scalar loads assembled in registers) or stack
+# (the original: 8 narrow stores, one vector reload, which stalls on store
+# forwarding with gcc).
+set(VW_SIMD_HASH_GATHER "insert" CACHE STRING "AVX-512 hash kernels' gather: insert | stack")
+if(VW_SIMD_HASH_GATHER STREQUAL "stack")
+  ADD_DEFINITIONS(-DVW_SIMD_HASH_GATHER_STACK=1)
+elseif(NOT VW_SIMD_HASH_GATHER STREQUAL "insert")
+  message(FATAL_ERROR "VW_SIMD_HASH_GATHER must be insert or stack (got '${VW_SIMD_HASH_GATHER}')")
+endif()
+
 OPTION(VW_SIMD_SEL_CHAR "AVX-512BW Char<N> == constant selection kernel" OFF)
 if(VW_SIMD_SEL_CHAR)
   ADD_DEFINITIONS(-DVW_SIMD_SEL_CHAR=1)
