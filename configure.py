@@ -39,6 +39,7 @@ BOOL_OPTIONS = [
     ("VW_JOIN_TWOPHASE",      "Two-phase (group prefetch) hash join probe",                False),
     ("VW_JOIN_SIMD",          "AVX-512 hash join probes by default",                       False),
     ("VW_NEW_JOIN",           "Real/maybe-list hash join probe (andrew_pseudocode.md)",   False),
+    ("VW_JOIN_BLOOM",         "VectorWise-owned Bloom filter in front of join probes",    False),
     ("VW_GROUP_BATCH_CREATE", "HashGroup: batched group creation in pre-aggregation",      False),
     ("VW_GROUP_GLOBAL_DIRECT","HashGroup: one-pass find-or-create in the global phase",    False),
     ("VW_GROUP_LAST_MATCH",   "HashGroup: adaptive previous-key entry reuse",              False),

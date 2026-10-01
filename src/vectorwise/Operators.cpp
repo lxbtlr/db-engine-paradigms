@@ -269,7 +269,15 @@ pos_t Hashjoin::joinAllParallel() {
                               [](pos_t i) { return i; });
       else
 #endif
+#ifdef VW_JOIN_BLOOM
+      // only the probes that passed the Bloom filter (all, when it is off)
+      const pos_t* cand = bloomSel.data();
+      const bool bf = bloomOn;
+      for (size_t k = 0, end = bf ? bloomCount : cont.numProbes; k < end; ++k) {
+         const size_t i = bf ? cand[k] : k;
+#else
       for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
+#endif
          VW_JOIN_PF_STEP(shared.ht, probeHashes, i, end);
          auto hash = probeHashes[i];
          auto entry = shared.ht.find_chain_tagged(hash);
@@ -576,7 +584,15 @@ pos_t Hashjoin::joinSelParallel() {
                               [sel = probeSel](pos_t i) { return sel[i]; });
       else
 #endif
+#ifdef VW_JOIN_BLOOM
+      // only the probes that passed the Bloom filter (all, when it is off)
+      const pos_t* cand = bloomSel.data();
+      const bool bf = bloomOn;
+      for (size_t k = 0, end = bf ? bloomCount : cont.numProbes; k < end; ++k) {
+         const size_t i = bf ? cand[k] : k;
+#else
       for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
+#endif
          VW_JOIN_PF_STEP(shared.ht, probeHashes, i, end);
          auto hash = probeHashes[i];
          auto entry = shared.ht.find_chain_tagged(hash);
@@ -827,6 +843,113 @@ pos_t Hashjoin::joinSelSIMD() {
 }
 #endif // !VW_POS_16
 
+#if (defined(VW_JOIN_BLOOM) || defined(VW_NEW_JOIN)) && defined(__AVX512F__)
+// Compress-store via a register compress plus a masked store: the memory form
+// (vpcompressd/q to memory) is microcoded and very slow on Zen 4 (the reason
+// VW_SIMD_SEL_COMPRESS=reg exists). Writes exactly popcount(m) elements.
+namespace {
+inline __attribute__((always_inline)) void compressStore32(void* dst, __mmask8 m,
+                                                           __m512i v) {
+   const __m512i c = _mm512_maskz_compress_epi32((__mmask16)m, v);
+   _mm512_mask_storeu_epi32(dst, (__mmask16)((1u << __builtin_popcount(m)) - 1),
+                            c);
+}
+inline __attribute__((always_inline)) void compressStore64(void* dst, __mmask8 m,
+                                                           __m512i v) {
+   const __m512i c = _mm512_maskz_compress_epi64(m, v);
+   _mm512_mask_storeu_epi64(dst, (__mmask8)((1u << __builtin_popcount(m)) - 1),
+                            c);
+}
+} // namespace
+#endif
+
+#ifdef VW_JOIN_BLOOM
+// VW_JOIN_BLOOM: a Bloom filter owned by this VectorWise join, in front of
+// the shared runtime::Hashmap (unchanged, so Hyper is unaffected). Most
+// probes of TPC-H Q3/Q5/Q9-style joins miss (90-99%); the directory tag
+// still costs a random directory load per probe, and a false tag pass an
+// entry load. The filter is ~VW_JOIN_BLOOM_BITS bits per build key (16:
+// 300 KB for Q3's 150k orders, L2-resident) and answers most misses from
+// one word: register-blocked, a key's 4 bits all lie in one 64-bit word.
+//   word = hash bits 40.. & mask        bits = hash bits 0..23, 6 per bit
+// (independent bit groups). Once per probe vector the probe hashes are
+// tested 8 at a time (AVX-512: gather 8 words, 4 variable shifts, compare)
+// and the passing probes are compressed into bloomSel / bloomHashes; the
+// join's first pass then visits only those. A vector where more than half
+// the probes pass (mostly-hitting joins, e.g. Q9's) turns the filter off for
+// the next 31 vectors.
+namespace {
+inline uint64_t bloomBits(runtime::Hashmap::hash_t h) {
+   return (uint64_t(1) << (h & 63)) | (uint64_t(1) << ((h >> 6) & 63)) |
+          (uint64_t(1) << ((h >> 12) & 63)) | (uint64_t(1) << ((h >> 18) & 63));
+}
+} // namespace
+
+void Hashjoin::bloomInsert() {
+   using EH = runtime::Hashmap::EntryHeader;
+   uint64_t* bloom = shared.bloom.get();
+   const uint64_t mask = shared.bloomMask;
+   const bool concurrent = runtime::this_worker->group->size > 1;
+   for (auto& block : allocations) {
+      auto e = reinterpret_cast<EH*>(block.first);
+      for (size_t i = 0; i < block.second; ++i, e = addBytes(e, ht_entry_size)) {
+         const auto h = e->hash;
+         uint64_t* w = &bloom[(h >> 40) & mask];
+         if (concurrent)
+            __atomic_fetch_or(w, bloomBits(h), __ATOMIC_RELAXED);
+         else
+            *w |= bloomBits(h);
+      }
+   }
+}
+
+void Hashjoin::bloomFilter(size_t n) {
+   if (bloomSel.size() < n) {
+      bloomSel.resize(n);
+      bloomHashes.resize(n);
+   }
+   const uint64_t* bloom = shared.bloom.get();
+   const uint64_t mask = shared.bloomMask;
+   pos_t* sel = bloomSel.data();
+   auto* hs = bloomHashes.data();
+   size_t m = 0, i = 0;
+#if defined(__AVX512F__) && !defined(VW_POS_16)
+   const __m512i vMask = _mm512_set1_epi64((long long)mask);
+   const __m512i b6 = _mm512_set1_epi64(63);
+   const __m512i one = _mm512_set1_epi64(1);
+   const __m512i lane = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 7, 6, 5, 4,
+                                         3, 2, 1, 0);
+   for (; i + 8 <= n; i += 8) {
+      const __m512i h = _mm512_loadu_si512(probeHashes + i);
+      const __m512i words = _mm512_i64gather_epi64(
+          _mm512_and_si512(_mm512_srli_epi64(h, 40), vMask),
+          (const long long*)bloom, 8);
+      __m512i bits = _mm512_sllv_epi64(one, _mm512_and_si512(h, b6));
+      bits = _mm512_or_si512(
+          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 6), b6)));
+      bits = _mm512_or_si512(
+          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 12), b6)));
+      bits = _mm512_or_si512(
+          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 18), b6)));
+      const __mmask8 pass =
+          _mm512_cmpeq_epi64_mask(_mm512_and_si512(words, bits), bits);
+      const __m512i idx = _mm512_add_epi32(_mm512_set1_epi32((int)i), lane);
+      compressStore32(sel + m, pass, idx);
+      compressStore64(hs + m, pass, h);
+      m += __builtin_popcount(pass);
+   }
+#endif
+   for (; i < n; ++i) {
+      const auto h = probeHashes[i];
+      const uint64_t b = bloomBits(h);
+      if ((bloom[(h >> 40) & mask] & b) == b) sel[m] = pos_t(i), hs[m++] = h;
+   }
+   bloomCount = m;
+   bloomOn = true;
+   if (m * 2 > n) bloomSkip = 31; // mostly hits: filter costs more than it saves
+}
+#endif // VW_JOIN_BLOOM
+
 #ifdef VW_NEW_JOIN
 // VW_NEW_JOIN: the join / join_sel refresh from andrew_pseudocode.md.
 //
@@ -883,7 +1006,18 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
    const auto* dir = reinterpret_cast<const uint64_t*>(ht.entries);
    const uint64_t mask = ht.mask;
    const uint64_t maskPtr = ht.maskPointer;
+#ifdef VW_JOIN_BLOOM
+   // the probe list: Bloom survivors (index + hash), or all probes
+   const bool bf = bloomOn;
+   const size_t n = bf ? bloomCount : cont.numProbes;
+   const auto* H = bf ? bloomHashes.data() : probeHashes;
+   const pos_t* I = bf ? bloomSel.data() : nullptr;
+#define VW_NJ_ID(k) (I ? I[k] : pos_t(k))
+#else
    const size_t n = cont.numProbes;
+   const auto* H = probeHashes;
+#define VW_NJ_ID(k) pos_t(k)
+#endif
    if (newMaybeIds.size() < n) {
       newMaybeIds.resize(n);
       newMaybeEntries.resize(n);
@@ -909,7 +1043,7 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
    const __m512i one = _mm512_set1_epi64(1);
 #endif
    for (; i + 8 <= n; i += 8) {
-      const __m512i h = _mm512_loadu_si512(probeHashes + i);
+      const __m512i h = _mm512_loadu_si512(H + i);
       const __m512i slot = _mm512_and_si512(h, vMask);
       const __m512i dv = _mm512_i64gather_epi64(slot, (const long long*)dir, 8);
       const __m512i head = _mm512_and_si512(dv, vMaskPtr);
@@ -920,6 +1054,11 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
 #else
       const __mmask8 full = _mm512_cmpneq_epi64_mask(head, zero);
 #endif
+      // No lane can be in its chain (most blocks of a mostly-missing probe
+      // stream without VW_JOIN_BLOOM): skip the two dependent gathers (head
+      // hash, next) and the compress stores. A masked gather with an empty
+      // mask still issues.
+      if (!full) continue;
       const __m512i headHash = _mm512_mask_i64gather_epi64(
           zero, full, _mm512_add_epi64(head, hashOff), nullptr, 1);
       const __mmask8 match = _mm512_mask_cmpeq_epi64_mask(full, headHash, h);
@@ -928,25 +1067,35 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
       const __m512i next =
           _mm512_mask_i64gather_epi64(zero, full, head, nullptr, 1);
       const __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(full, next, zero);
-      // probe index i + lane (followups), probe id (output)
+      // probe index (followups), probe id (output)
+#ifdef VW_JOIN_BLOOM
+      const __m512i idx =
+          I ? _mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)(I + i)))
+            : _mm512_add_epi32(_mm512_set1_epi32((int)i), lane);
+      const __m512i out =
+          !Sel ? idx
+          : I  ? _mm512_castsi256_si512(_mm256_i32gather_epi32(
+                    (const int*)probeSel, _mm512_castsi512_si256(idx), 4))
+               : _mm512_castsi256_si512(
+                    _mm256_loadu_si256((const __m256i*)(probeSel + i)));
+#else
       const __m512i idx = _mm512_add_epi32(_mm512_set1_epi32((int)i), lane);
       const __m512i out =
           Sel ? _mm512_castsi256_si512(
                     _mm256_loadu_si256((const __m256i*)(probeSel + i)))
               : idx;
+#endif
       // real list: the matched heads
-      _mm512_mask_compressstoreu_epi64(buildMatches + found, real, head);
-      _mm512_mask_compressstoreu_epi32(probeMatches + found, (__mmask16)real,
-                                       out);
+      compressStore64(buildMatches + found, real, head);
+      compressStore32(probeMatches + found, real, out);
       found += __builtin_popcount(real);
       // successors of the real list, then of the maybe list (appended below)
       const __mmask8 rf = real & hasNext, mf = maybe & hasNext;
-      _mm512_mask_compressstoreu_epi64(followupEntries + realFollow, rf, next);
-      _mm512_mask_compressstoreu_epi32(followupIds + realFollow, (__mmask16)rf,
-                                       idx);
+      compressStore64(followupEntries + realFollow, rf, next);
+      compressStore32(followupIds + realFollow, rf, idx);
       realFollow += __builtin_popcount(rf);
-      _mm512_mask_compressstoreu_epi64(maybeEntries + maybes, mf, next);
-      _mm512_mask_compressstoreu_epi32(maybeIds + maybes, (__mmask16)mf, idx);
+      compressStore64(maybeEntries + maybes, mf, next);
+      compressStore32(maybeIds + maybes, mf, idx);
       maybes += __builtin_popcount(mf);
    }
 #else
@@ -955,7 +1104,7 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
       EH* next[8];
       bool full[8], match[8];
       for (size_t l = 0; l < 8; ++l) {
-         const auto h = probeHashes[i + l];
+         const auto h = H[i + l];
          const uint64_t dv = dir[h & mask];
          head[l] = reinterpret_cast<EH*>(dv & maskPtr);
          full[l] = newJoinFull(dv, h);
@@ -964,16 +1113,17 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
       }
       for (size_t l = 0; l < 8; ++l) // real list
          if (match[l]) {
+            const pos_t id = VW_NJ_ID(i + l);
             buildMatches[found] = head[l];
-            probeMatches[found++] = Sel ? probeSel[i + l] : pos_t(i + l);
+            probeMatches[found++] = Sel ? probeSel[id] : id;
          }
       for (size_t l = 0; l < 8; ++l) {
          if (!next[l]) continue;
          if (match[l]) {
-            followupIds[realFollow] = pos_t(i + l);
+            followupIds[realFollow] = VW_NJ_ID(i + l);
             followupEntries[realFollow++] = next[l];
          } else { // full && !match: maybe list
-            maybeIds[maybes] = pos_t(i + l);
+            maybeIds[maybes] = VW_NJ_ID(i + l);
             maybeEntries[maybes++] = next[l];
          }
       }
@@ -981,25 +1131,27 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
 #endif
    // fewer than 8 probes left
    for (; i < n; ++i) {
-      const auto h = probeHashes[i];
+      const auto h = H[i];
+      const pos_t id = VW_NJ_ID(i);
       const uint64_t dv = dir[h & mask];
       auto head = reinterpret_cast<EH*>(dv & maskPtr);
       if (!newJoinFull(dv, h)) continue;
       const bool match = head->hash == h;
       if (match) {
          buildMatches[found] = head;
-         probeMatches[found++] = Sel ? probeSel[i] : pos_t(i);
+         probeMatches[found++] = Sel ? probeSel[id] : id;
       }
       if (head->next) {
          if (match) {
-            followupIds[realFollow] = pos_t(i);
+            followupIds[realFollow] = id;
             followupEntries[realFollow++] = head->next;
          } else {
-            maybeIds[maybes] = pos_t(i);
+            maybeIds[maybes] = id;
             maybeEntries[maybes++] = head->next;
          }
       }
    }
+#undef VW_NJ_ID
    // append the maybe list to the real list
    std::memcpy(followupIds + realFollow, maybeIds, maybes * sizeof(pos_t));
    std::memcpy(followupEntries + realFollow, maybeEntries,
@@ -1137,6 +1289,15 @@ size_t Hashjoin::next() {
       barrier([&]() {
          auto globalFound = shared.found.load();
          if (globalFound) shared.ht.setSize(globalFound);
+#ifdef VW_JOIN_BLOOM
+         shared.bloom.reset();
+         if (globalFound >= VW_JOIN_BLOOM_MIN_KEYS) {
+            size_t words = 1;
+            while (words * 64 < globalFound * VW_JOIN_BLOOM_BITS) words <<= 1;
+            shared.bloom.reset(new uint64_t[words]());
+            shared.bloomMask = words - 1;
+         }
+#endif
       });
       auto globalFound = shared.found.load();
       if (globalFound == 0) {
@@ -1144,6 +1305,9 @@ size_t Hashjoin::next() {
          return EndOfStream;
       }
       insertAllEntries(allocations, shared.ht, ht_entry_size);
+#ifdef VW_JOIN_BLOOM
+      if (shared.bloom) bloomInsert();
+#endif
       consumed = true;
       barrier(); // wait for all threads to finish build phase
    }
@@ -1154,6 +1318,15 @@ size_t Hashjoin::next() {
          cont.nextProbe = 0;
          if (cont.numProbes == EndOfStream) return EndOfStream;
          probeHash.evaluate(cont.numProbes);
+#ifdef VW_JOIN_BLOOM
+         bloomOn = false;
+         if (shared.bloom) {
+            if (bloomSkip)
+               --bloomSkip;
+            else
+               bloomFilter(cont.numProbes);
+         }
+#endif
       }
       // create join pair vectors with matching hashes (Entry*, pos), where
       // Entry* is for the build side, pos a selection index to the right side

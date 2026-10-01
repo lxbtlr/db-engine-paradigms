@@ -388,6 +388,28 @@ if(VW_NEW_JOIN)
   message(STATUS "Building with VW_NEW_JOIN (full = ${VW_NEW_JOIN_FULL})")
 endif()
 
+# VW_JOIN_BLOOM: each VectorWise Hashjoin builds a register-blocked Bloom
+# filter (VW_JOIN_BLOOM_BITS bits per build key, 4 bits per key in one 64-bit
+# word) next to the shared hash table, and filters every probe vector with it
+# (AVX-512, 8 hashes at a time) before the directory is touched; the join's
+# first pass visits only the survivors. Builds under VW_JOIN_BLOOM_MIN_KEYS
+# keys get no filter; mostly-hitting probe streams switch it off adaptively.
+# Works with the default join and VW_NEW_JOIN; 64-bit hashes only.
+OPTION(VW_JOIN_BLOOM "VectorWise-owned Bloom filter in front of hash join probes" OFF)
+set(VW_JOIN_BLOOM_BITS 16 CACHE STRING "VW_JOIN_BLOOM: filter bits per build key")
+set(VW_JOIN_BLOOM_MIN_KEYS 4096 CACHE STRING "VW_JOIN_BLOOM: smallest build that gets a filter")
+if(VW_JOIN_BLOOM)
+  if(HASH_SIZE_32)
+    message(FATAL_ERROR "VW_JOIN_BLOOM needs 64-bit hashes (HASH_SIZE_32 is ON)")
+  endif()
+  if(VW_JOIN_TWOPHASE OR VW_JOIN_SIMD OR VW_JOIN_PREFETCH)
+    message(FATAL_ERROR "VW_JOIN_BLOOM supports the default join and VW_NEW_JOIN; disable VW_JOIN_TWOPHASE, VW_JOIN_SIMD and VW_JOIN_PREFETCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_BLOOM=1 -DVW_JOIN_BLOOM_BITS=${VW_JOIN_BLOOM_BITS}
+                  -DVW_JOIN_BLOOM_MIN_KEYS=${VW_JOIN_BLOOM_MIN_KEYS})
+  message(STATUS "Building with VW_JOIN_BLOOM (${VW_JOIN_BLOOM_BITS} bits/key, min ${VW_JOIN_BLOOM_MIN_KEYS} keys)")
+endif()
+
 # Hash join entry layout (QueryBuilder::HashJoinBuilder). All OFF / 8 keeps
 # the existing layout: header, then fields packed in add* call order, stride
 # rounded up to 8.

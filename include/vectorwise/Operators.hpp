@@ -195,6 +195,13 @@ class Hashjoin : public BinaryOperator {
       std::atomic<size_t> found;
       std::atomic<bool> sizeIsSet;
       runtime::Hashmap ht;
+#ifdef VW_JOIN_BLOOM
+      /// VW_JOIN_BLOOM: register-blocked Bloom filter over the build side
+      /// (one 64-bit word per key's block, 4 bits per key), owned by this
+      /// join; nullptr for builds under VW_JOIN_BLOOM_MIN_KEYS
+      std::unique_ptr<uint64_t[]> bloom;
+      uint64_t bloomMask = 0; // words - 1
+#endif
       Shared() : found(0), sizeIsSet(false){};
    };
 
@@ -266,6 +273,18 @@ class Hashjoin : public BinaryOperator {
    /// Implementation: For SkylakeX using AVX512
 #ifndef VW_POS_16
    pos_t joinSelSIMD();
+#endif
+#ifdef VW_JOIN_BLOOM
+   /// probes that passed the Bloom filter for the current probe vector:
+   /// index into probeHashes and hash, in probe order (bloomOn only)
+   std::vector<pos_t> bloomSel;
+   std::vector<runtime::Hashmap::hash_t> bloomHashes;
+   size_t bloomCount = 0;
+   bool bloomOn = false;
+   /// vectors to skip the filter for after one where most probes passed
+   uint32_t bloomSkip = 0;
+   void bloomInsert();
+   void bloomFilter(size_t n);
 #endif
 #ifdef VW_NEW_JOIN
    /// VW_NEW_JOIN (andrew_pseudocode.md): 8 probes at a time, gather the
