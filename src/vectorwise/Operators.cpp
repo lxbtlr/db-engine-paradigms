@@ -977,6 +977,9 @@ size_t HashGroup::next() {
          }
          preAggregation.allocations.clear();
          preAggregation.clearHashtable(ht);
+#ifdef VW_GROUP_BATCH_CREATE
+         newBlock = nullptr, newUsed = newCap = 0;
+#endif
       };
 
       if (packedKeys.size() < vecSize * totalKeySize) {
@@ -995,12 +998,31 @@ size_t HashGroup::next() {
          }
 #endif
 
+#ifdef VW_GROUP_NO_CONCAT
+         // One dense key of 1/2/4/8 bytes (TPC-H Q18: l_orderkey) already is
+         // its packed form; Concat would only copy it.
+         if (keyColumns.size() == 1 && !keyColumns.front().sel &&
+             (totalKeySize == 1 || totalKeySize == 2 || totalKeySize == 4 ||
+              totalKeySize == 8)) {
+            keyData = static_cast<char*>(keyColumns.front().data);
+         } else
+         {
+            Concat(n);
+            keyData = packedKeys.data();
+         }
+#else
          Concat(n);
+#endif
 #ifndef VW_FUSE_HASH
          Hash(n);
 #endif
          Lookup(n);
 
+#ifdef VW_AGGR_FUSED
+         if (fusable && fusedAggrs.size() > 1)
+            updateGroupsFused(n);
+         else
+#endif
          updateGroups.evaluate(n);
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
@@ -1025,6 +1047,13 @@ size_t HashGroup::next() {
                     nPart -= n, pos += n, n = std::min(nPart, vecSize)) {
                   auto data = addBytes(chunk->data<void>(), pos * elementSize);
                   globalAggregation.rowData = data;
+#ifdef VW_GROUP_GLOBAL_DIRECT
+                  if (globalDirectOk) {
+                     globalFindOrCreate(data, n);
+                     updateGroupsFromPartition.evaluate(n);
+                     continue;
+                  }
+#endif
                   findGroupsFromPartition(data, n);
                   auto cGroups = [&]() INTERPRET_SEPARATE {
                      globalAggregation.createMissingGroups(ht, true);
@@ -1056,6 +1085,169 @@ size_t HashGroup::next() {
    }
    return EndOfStream;
 }
+
+#ifdef VW_AGGR_FUSED
+// Today every aggregate is its own pass over the vector, a read-modify-write
+// through entries[i] per row. With few groups (TPC-H Q1: 4) consecutive rows
+// hit the same entry, so each pass is one serial chain of store-to-load
+// forwards (about 4 cycles per row on Zen 4, 90% of aggr_col's samples on
+// the RMW). Updating all K aggregates of the row's entry in one pass gives K
+// independent chains per row (bench_aggr: 3.97 -> 1.65 ns/row for Q1's 5).
+// Dense columns read through an identity selection and COUNT(*) sums a
+// column of ones, so every aggregate is col[sel[i]].
+namespace {
+template <size_t K>
+void aggrFusedBlock(pos_t n, runtime::Hashmap::EntryHeader** RES entries,
+                    const int64_t* const* cols, const pos_t* const* sels,
+                    const size_t* offsets) {
+   const int64_t* c[K];
+   const pos_t* s[K];
+   size_t o[K];
+   for (size_t d = 0; d < K; ++d) c[d] = cols[d], s[d] = sels[d], o[d] = offsets[d];
+   for (pos_t i = 0; i < n; i++) {
+      char* e = reinterpret_cast<char*>(entries[i]);
+      for (size_t d = 0; d < K; ++d)
+         *reinterpret_cast<int64_t*>(e + o[d]) += c[d][s[d][i]];
+   }
+}
+} // namespace
+
+void HashGroup::updateGroupsFused(pos_t n) {
+   if (identitySel.size() < n) {
+      identitySel.resize(std::max<size_t>(n, vecSize));
+      for (size_t i = 0; i < identitySel.size(); ++i) identitySel[i] = pos_t(i);
+      ones.assign(identitySel.size(), 1);
+   }
+   constexpr size_t kMax = 8;
+   const int64_t* cols[kMax];
+   const pos_t* sels[kMax];
+   size_t offsets[kMax];
+   auto entries = preAggregation.htMatches;
+   for (size_t first = 0; first < fusedAggrs.size(); first += kMax) {
+      const size_t k = std::min(kMax, fusedAggrs.size() - first);
+      for (size_t d = 0; d < k; ++d) {
+         auto& fa = fusedAggrs[first + d];
+         offsets[d] = fa.offset;
+         switch (fa.kind) {
+         case FusedAggr::Col:
+            cols[d] = static_cast<const int64_t*>(
+                static_cast<FAggrOp*>(fa.op)->get<1>());
+            sels[d] = identitySel.data();
+            break;
+         case FusedAggr::SelCol:
+            sels[d] = static_cast<FAggrSelOp*>(fa.op)->get<1>();
+            cols[d] = static_cast<const int64_t*>(
+                static_cast<FAggrSelOp*>(fa.op)->get<2>());
+            break;
+         case FusedAggr::Count:
+            cols[d] = ones.data();
+            sels[d] = identitySel.data();
+            break;
+         }
+      }
+      switch (k) {
+      case 1: aggrFusedBlock<1>(n, entries, cols, sels, offsets); break;
+      case 2: aggrFusedBlock<2>(n, entries, cols, sels, offsets); break;
+      case 3: aggrFusedBlock<3>(n, entries, cols, sels, offsets); break;
+      case 4: aggrFusedBlock<4>(n, entries, cols, sels, offsets); break;
+      case 5: aggrFusedBlock<5>(n, entries, cols, sels, offsets); break;
+      case 6: aggrFusedBlock<6>(n, entries, cols, sels, offsets); break;
+      case 7: aggrFusedBlock<7>(n, entries, cols, sels, offsets); break;
+      default: aggrFusedBlock<8>(n, entries, cols, sels, offsets); break;
+      }
+   }
+}
+#endif
+
+#ifdef VW_GROUP_GLOBAL_DIRECT
+// Global phase today: findGroups (directory walk, then keyEquality with one
+// keys_not_equal_row pass per key, htFollow for chains), then
+// createMissingGroups, which dedups the vector's misses with a second hash
+// table (partition_by_key_row per key: two chained lookups per row) before
+// scattering and inserting them. After a complete pre-aggregation (TPC-H Q18:
+// lineitem sorted by l_orderkey) almost every spilled row is a new, distinct
+// group, so the dedup table does all that work for nothing.
+// Here, as in the pre-aggregation lookup: walk the chain comparing the
+// spilled row's packed keys with memcmp (row = entry without `next`), create
+// a miss at once so later rows of the vector find it, and initialize all new
+// entries with one buildScatter call. updateGroupsFromPartition then adds
+// every row, as before. The directory is tagged (as the join's): a new group,
+// the common case, is rejected from the directory slot without walking its
+// chain through entries spread over the table (TPC-H Q18: ~190k groups per
+// partition, 4 MB directory + 6 MB entries), and the vector's slots are
+// prefetched first. Hashmap takes the tag from the hash's top 4 bits, which
+// the spill partitioning (hash >> shift) makes (nearly) constant inside a
+// partition, so the table gets the hash rotated right by 16: tag from bits
+// 12..15, slot from bits 16.., both clear of the partition bits. Entries keep
+// the original hash.
+namespace {
+inline HashGroup::hash_t globalKey(HashGroup::hash_t h) {
+   return (h >> 16) | (h << (sizeof(h) * 8 - 16));
+}
+} // namespace
+void HashGroup::globalFindOrCreate(void* data, size_t n) {
+   auto& g = globalAggregation;
+   const size_t rowSize = g.rowSize;
+   const size_t entrySize = g.ht_entry_size;
+   const uint32_t keySize = totalKeySize;
+   constexpr size_t rowKeyOffset =
+       sizeof(EntryHeader) - sizeof(EntryHeader::next);
+   EntryHeader* block = nullptr;
+   pos_t created = 0;
+   for (size_t i = 0; i < n; ++i) {
+      hash_t hash;
+      std::memcpy(&hash, static_cast<const char*>(data) + i * rowSize,
+                  sizeof(hash));
+      ht.prefetch_slot(globalKey(hash));
+   }
+   for (size_t i = 0; i < n; ++i) {
+      const char* row = static_cast<const char*>(data) + i * rowSize;
+      hash_t hash;
+      std::memcpy(&hash, row, sizeof(hash));
+      EntryHeader* entry = ht.find_chain_tagged(globalKey(hash));
+      for (; entry != nullptr; entry = entry->next)
+         if (entry->hash == hash &&
+             std::memcmp(reinterpret_cast<char*>(entry + 1), row + rowKeyOffset,
+                         keySize) == 0)
+            break;
+      if (!entry) {
+         if (!block) {
+            auto alloc = groupStore.allocate(n * entrySize);
+            if (!alloc) throw std::runtime_error("malloc failed");
+            block = reinterpret_cast<EntryHeader*>(alloc);
+         }
+         entry = addBytes(block, created * entrySize);
+         entry->hash = hash;
+         std::memcpy(reinterpret_cast<char*>(entry + 1), row + rowKeyOffset,
+                     keySize);
+         ht.insert_tagged<false>(entry, globalKey(hash));
+         g.groupRepresentatives[created++] = i;
+      }
+      g.htMatches[i] = entry;
+   }
+   if (!created) return;
+   g.allocations.push_back(std::make_pair(block, size_t(created)));
+   g.entries_in_ht += created;
+   g.scatterStart = block;
+   g.buildScatter.evaluate(created);
+   if (g.entries_in_ht > maxFill) {
+      // as createMissingGroups(allowResize): grow and reinsert all entries
+      maxFill = ht.setSize(g.entries_in_ht * 2);
+      for (auto& b : g.allocations)
+         for (size_t k = 0; k < b.second; ++k) {
+            auto e = addBytes(reinterpret_cast<EntryHeader*>(b.first),
+                              k * entrySize);
+            ht.insert_tagged<false>(e, globalKey(e->hash));
+         }
+   }
+}
+#endif
+
+#ifdef VW_GROUP_NO_CONCAT
+#define VW_GROUP_KEY_DATA keyData
+#else
+#define VW_GROUP_KEY_DATA packedKeys.data()
+#endif
 
 // CONCAT
 void HashGroup::Concat(pos_t n) {
@@ -1106,13 +1298,13 @@ template <typename T> void HashGroup::Hash_T(pos_t n) {
    // packed 1/2/4/8-byte keys: AVX-512 MurmurHash64A, bit-identical to
    // hashFn.hashKey(key) below
    if constexpr (!std::is_same_v<T, char*>) {
-      primitives::simd_hash::hash_keys<T>(n, packedKeys.data(),
+      primitives::simd_hash::hash_keys<T>(n, VW_GROUP_KEY_DATA,
                                           preAggregation.groupHashes);
       return;
    }
 #endif
    uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
-   char* __restrict__ keys = packedKeys.data();
+   char* __restrict__ keys = VW_GROUP_KEY_DATA;
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
 
 #if defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32) && defined(VW_HAVE_SIMD_CRC)
@@ -1144,17 +1336,27 @@ template <typename T> void HashGroup::Hash_T(pos_t n) {
 // LOOKUP
 void HashGroup::Lookup(pos_t n) {
    switch (totalKeySize) {
-      case 1: Lookup_T<uint8_t>(n); break;
-      case 2: Lookup_T<uint16_t>(n); break;
-      case 4: Lookup_T<uint32_t>(n); break;
-      case 8: Lookup_T<uint64_t>(n); break;
-      default: Lookup_T<char*>(n); break;
+#ifdef VW_GROUP_LAST_MATCH
+#define VW_LOOKUP(T) lastMatchOn ? Lookup_T<T, true>(n) : Lookup_T<T, false>(n)
+#else
+#define VW_LOOKUP(T) Lookup_T<T>(n)
+#endif
+      case 1: VW_LOOKUP(uint8_t); break;
+      case 2: VW_LOOKUP(uint16_t); break;
+      case 4: VW_LOOKUP(uint32_t); break;
+      case 8: VW_LOOKUP(uint64_t); break;
+      default: VW_LOOKUP(char*); break;
+#undef VW_LOOKUP
    }
 }
 
+#ifdef VW_GROUP_LAST_MATCH
+template <typename T, bool LastMatch> void HashGroup::Lookup_T(pos_t n) {
+#else
 template <typename T> void HashGroup::Lookup_T(pos_t n) {
+#endif
    uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
-   char* __restrict__ keys = packedKeys.data();
+   char* __restrict__ keys = VW_GROUP_KEY_DATA;
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
 #ifdef VW_GROUP_AGGR_SEL
    pos_t* __restrict__ sel = selVec;
@@ -1163,7 +1365,43 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
    EntryHeader** __restrict__ matches = preAggregation.htMatches;
 #endif
 
+#ifdef VW_GROUP_BATCH_CREATE
+   // new groups of this vector: rows in groupRepresentatives, entries
+   // consecutive from firstNew
+   pos_t created = 0;
+   EntryHeader* firstNew = nullptr;
+   const size_t entrySize = preAggregation.ht_entry_size;
+#endif
+#ifdef VW_GROUP_LAST_MATCH
+   // Sorted or clustered group keys (TPC-H Q18: lineitem by l_orderkey, ~75%
+   // of rows repeat the previous key) find the previous row's entry again.
+   // Compare with the previous packed key first and reuse its entry: no
+   // directory load, chain walk or key compare (and with VW_FUSE_HASH no
+   // hash) for those rows. The extra branch mispredicts on short runs (Q1:
+   // 64% repeats, +12-20% time), so each vector counts its repeats and the
+   // next one uses the check only at >= 70%.
+   EntryHeader* last = nullptr;
+   pos_t repeats = 0;
+#endif
    for (pos_t i = 0; i < n; i++) {
+#ifdef VW_GROUP_LAST_MATCH
+      EntryHeader* entry;
+      {
+         const bool repeat =
+             i > 0 && std::memcmp(keys + i * keySize, keys + (i - 1) * keySize,
+                                  keySize) == 0;
+         if constexpr (LastMatch) {
+            if (repeat) {
+               ++repeats;
+               entry = last;
+               goto found;
+            }
+         } else {
+            repeats += repeat;
+         }
+      }
+      {
+#endif
 #ifdef VW_FUSE_HASH
       hash_t hash;
       if constexpr (std::is_same_v<T, char*>) {
@@ -1176,7 +1414,11 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
 #else
       hash_t hash = hashes[i];
 #endif
+#ifdef VW_GROUP_LAST_MATCH
+      entry = ht.find_chain(hash);
+#else
       EntryHeader* entry = ht.find_chain(hash);
+#endif
       for (; entry != nullptr; entry = entry->next) {
          if (entry->hash == hash) {
             char* entry_key = reinterpret_cast<char*>(entry + 1);
@@ -1186,6 +1428,38 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
          }
       }
 
+#ifdef VW_GROUP_BATCH_CREATE
+      {
+         // Today each new group is its own allocation (padded to 64 B by
+         // ResetableAllocator), its own allocations record and its own
+         // buildScatter.evaluate(1): 4+ interpreted ops for one row (TPC-H
+         // Q18: 1.5M groups). Here the entry only gets what later rows of
+         // this vector need to find it (hash, packed key); the scatter
+         // (hash, keys, aggregate init) runs once for all new groups after
+         // the loop.
+         if (newUsed == newCap) {
+            newCap = maxFill + vecSize;
+            newUsed = 0;
+            auto alloc = groupStore.allocate(newCap * entrySize);
+            if (!alloc) throw std::runtime_error("malloc failed");
+            newBlock = reinterpret_cast<EntryHeader*>(alloc);
+            preAggregation.allocations.emplace_back(alloc, 0);
+         }
+         entry = addBytes(newBlock, newUsed * entrySize);
+         ++newUsed;
+         ++preAggregation.allocations.back().second;
+         if (!created) firstNew = entry;
+         entry->hash = hash;
+         std::memcpy(reinterpret_cast<char*>(entry + 1), keys + i * keySize,
+                     keySize);
+#ifdef VW_FUSE_HASH
+         hashes[i] = hash;
+#endif
+         preAggregation.groupRepresentatives[created++] = i;
+         ht.insert<false>(entry, hash);
+         ++preAggregation.entries_in_ht;
+      }
+#else
       {
          auto alloc = groupStore.allocate(preAggregation.ht_entry_size);
          if (!alloc) {
@@ -1218,8 +1492,15 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
          entry->group->size = 0;
 #endif
       }
+#endif // VW_GROUP_BATCH_CREATE
+#ifdef VW_GROUP_LAST_MATCH
+      }
+#endif
 
       found:;
+#ifdef VW_GROUP_LAST_MATCH
+      last = entry;
+#endif
 #ifdef VW_GROUP_AGGR
       pos_t next = entry->group->size;
       entry->group->pos[next] = i;
@@ -1234,5 +1515,14 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
       matches[i] = entry;
 #endif
    }
+#ifdef VW_GROUP_BATCH_CREATE
+   if (created) {
+      preAggregation.scatterStart = firstNew;
+      preAggregation.buildScatter.evaluate(created);
+   }
+#endif
+#ifdef VW_GROUP_LAST_MATCH
+   if (n > 1) lastMatchOn = size_t(repeats) * 10 >= size_t(n - 1) * 7;
+#endif
 }
 } // namespace vectorwise

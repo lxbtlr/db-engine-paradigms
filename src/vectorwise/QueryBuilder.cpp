@@ -582,6 +582,20 @@ QueryBuilder::HashGroupBuilder::~HashGroupBuilder() {
    global.rowSize = rowSize;
 }
 
+#ifdef VW_GROUP_GLOBAL_DIRECT
+/// keys whose bytes are fully defined, so packed keys compare with memcmp
+/// (Char<N> for N > 1 leaves the bytes after len undefined)
+static bool memcmpSafeKey(primitives::NEQCheckRow eqG) {
+   return eqG == primitives::keys_not_equal_row_int32_t_col ||
+          eqG == primitives::keys_not_equal_row_int64_t_col ||
+          eqG == primitives::keys_not_equal_row_int8_t_col ||
+          eqG == primitives::keys_not_equal_row_int16_t_col ||
+          eqG == primitives::keys_not_equal_row_Date_col ||
+          eqG == primitives::keys_not_equal_row_hash_t_col ||
+          eqG == primitives::keys_not_equal_row_Char_1_col;
+}
+#endif
+
 QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
     DS col, primitives::F2 hash,
     /**** global aggr *****/
@@ -607,6 +621,9 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
 
    auto partitionOffset =
        entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
+#ifdef VW_GROUP_GLOBAL_DIRECT
+   if (!memcmpSafeKey(eqG)) op.globalDirectOk = false;
+#endif
 
    auto neqCheckGlobal = make_unique<NEQCheckRowOp>(
        eqG, global.groupsFound, reinterpret_cast<void**>(global.htMatches),
@@ -678,6 +695,9 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
 
    auto partitionOffset =
        entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
+#ifdef VW_GROUP_GLOBAL_DIRECT
+   if (!memcmpSafeKey(eqG)) op.globalDirectOk = false;
+#endif
 
    auto neqCheckGlobal = make_unique<NEQCheckRowOp>(
        eqG, global.groupsFound, reinterpret_cast<void**>(global.htMatches),
@@ -742,6 +762,16 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    auto aggr_op = make_unique<FAggrOp>(
        aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset);
    col.registerDS(&aggr_op->get<1>());
+#ifdef VW_AGGR_FUSED
+   if (aggr == primitives::aggr_plus_int64_t_col)
+      op.fusedAggrs.push_back(
+          {HashGroup::FusedAggr::Col, aggr_op.get(), entryOffset});
+   else if (aggr == primitives::aggr_count_star)
+      op.fusedAggrs.push_back(
+          {HashGroup::FusedAggr::Count, aggr_op.get(), entryOffset});
+   else
+      op.fusable = false;
+#endif
    op.updateGroups += move(aggr_op);
 
    auto aggrGlobal_op = make_unique<FAggrRowOp>(
@@ -784,6 +814,13 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
        aggr, reinterpret_cast<void**>(local.htMatches), sel, col, entryOffset);
    sel.registerDS(&aggr_op->get<1>());
    col.registerDS(&aggr_op->get<2>());
+#ifdef VW_AGGR_FUSED
+   if (aggr == primitives::aggr_sel_plus_int64_t_col)
+      op.fusedAggrs.push_back(
+          {HashGroup::FusedAggr::SelCol, aggr_op.get(), entryOffset});
+   else
+      op.fusable = false;
+#endif
    op.updateGroups += move(aggr_op);
 
    auto aggrGlobal_op = make_unique<FAggrRowOp>(

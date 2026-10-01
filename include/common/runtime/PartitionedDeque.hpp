@@ -139,7 +139,21 @@ void PartitionedDeque<chunkSize>::Partition::push_back(void* element,
       current = created->template data<void>();
       end = addBytes(current, entrySize * chunkSize);
    }
-   std::memcpy(current, element, entrySize);
+#ifdef VW_SPILL_WORD_COPY
+   // spilled HashGroup rows are small multiples of 8 bytes (entry size is
+   // 8-aligned, minus the next pointer); copy them inline in words instead
+   // of a memcpy call with a run-time size per row (TPC-H Q18: 1.5M rows)
+   if (entrySize % 8 == 0 && entrySize <= 64) {
+      auto* d = static_cast<char*>(current);
+      auto* s = static_cast<const char*>(element);
+      for (size_t k = 0; k < entrySize; k += 8) {
+         uint64_t w;
+         std::memcpy(&w, s + k, 8);
+         std::memcpy(d + k, &w, 8);
+      }
+   } else
+#endif
+      std::memcpy(current, element, entrySize);
    current = addBytes(current, entrySize);
 }
 

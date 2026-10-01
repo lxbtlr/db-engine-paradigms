@@ -178,6 +178,67 @@ if(VW_GROUP_AGGR)
   message(STATUS "Building with VW_GROUP_AGGR")
 endif(VW_GROUP_AGGR)
 
+# VW_AGGR_FUSED: HashGroup updates all int64 SUM / COUNT(*) aggregates of a
+# row's pre-aggregation entry in one pass instead of one pass per aggregate
+# (breaks the per-aggregate store-forwarding chains; TPC-H Q1). Group-bys
+# with any other aggregate, or a single one, keep updateGroups.
+# VW_GROUP_BATCH_CREATE: HashGroup pre-aggregation creates a vector's new
+# groups in one consecutive block and initializes them (buildScatter) once
+# per vector instead of once per group (TPC-H Q18: 1.5M groups).
+OPTION(VW_GROUP_BATCH_CREATE "Batched group creation in VectorWise HashGroup pre-aggregation" OFF)
+if(VW_GROUP_BATCH_CREATE)
+  if(VW_GROUP_AGGR)
+    message(FATAL_ERROR "VW_GROUP_BATCH_CREATE does not support VW_GROUP_AGGR's per-group Group records")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_BATCH_CREATE=1)
+  message(STATUS "Building with VW_GROUP_BATCH_CREATE")
+endif()
+
+# VW_GROUP_GLOBAL_DIRECT: HashGroup's global phase finds or creates each
+# spilled row's group in one pass (memcmp on packed keys, batched init)
+# instead of findGroups + createMissingGroups with partition_by_key_row
+# dedup. Only for group-bys whose keys are all fixed-width scalars; others
+# keep the existing path.
+OPTION(VW_GROUP_GLOBAL_DIRECT "One-pass find-or-create in VectorWise HashGroup global phase" OFF)
+if(VW_GROUP_GLOBAL_DIRECT)
+  ADD_DEFINITIONS(-DVW_GROUP_GLOBAL_DIRECT=1)
+  message(STATUS "Building with VW_GROUP_GLOBAL_DIRECT")
+endif()
+
+# VW_GROUP_LAST_MATCH: HashGroup pre-aggregation reuses the previous row's
+# entry when its packed key repeats (sorted or clustered keys, TPC-H Q18),
+# skipping the lookup; with VW_FUSE_HASH also the hash.
+OPTION(VW_GROUP_LAST_MATCH "Previous-key entry reuse in VectorWise HashGroup lookup" OFF)
+if(VW_GROUP_LAST_MATCH)
+  ADD_DEFINITIONS(-DVW_GROUP_LAST_MATCH=1)
+  message(STATUS "Building with VW_GROUP_LAST_MATCH")
+endif()
+
+# VW_GROUP_NO_CONCAT: a group-by on one dense 1/2/4/8-byte key hashes and
+# compares the key column in place instead of copying it into packed keys.
+OPTION(VW_GROUP_NO_CONCAT "Skip key packing for single dense keys in VectorWise HashGroup" OFF)
+if(VW_GROUP_NO_CONCAT)
+  ADD_DEFINITIONS(-DVW_GROUP_NO_CONCAT=1)
+  message(STATUS "Building with VW_GROUP_NO_CONCAT")
+endif()
+
+# VW_SPILL_WORD_COPY: PartitionedDeque::push_back copies rows of <= 64
+# bytes inline as 8-byte words instead of calling memcpy per row.
+OPTION(VW_SPILL_WORD_COPY "Inline word copy for spilled rows in PartitionedDeque" OFF)
+if(VW_SPILL_WORD_COPY)
+  ADD_DEFINITIONS(-DVW_SPILL_WORD_COPY=1)
+  message(STATUS "Building with VW_SPILL_WORD_COPY")
+endif()
+
+OPTION(VW_AGGR_FUSED "Fused multi-aggregate update in VectorWise HashGroup" OFF)
+if(VW_AGGR_FUSED)
+  if(VW_GROUP_AGGR)
+    message(FATAL_ERROR "VW_AGGR_FUSED and VW_GROUP_AGGR both replace the aggregate update; enable one")
+  endif()
+  ADD_DEFINITIONS(-DVW_AGGR_FUSED=1)
+  message(STATUS "Building with VW_AGGR_FUSED")
+endif()
+
 OPTION(VW_GROUP_AGGR_SEL "Perform selection vector batching for VectorWise" OFF)
 if(VW_GROUP_AGGR_SEL)
   ADD_DEFINITIONS(-DVW_GROUP_AGGR_SEL=1)

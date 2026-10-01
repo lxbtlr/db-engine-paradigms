@@ -385,10 +385,33 @@ class HashGroup : public UnaryOperator {
    ColumnGroupLookup preAggregation;
    /// update aggregates
    Aggregates updateGroups;
+#ifdef VW_AGGR_FUSED
+   /// VW_AGGR_FUSED: updateGroups' ops when all are int64 SUM / COUNT(*)
+   /// (recorded by QueryBuilder::HashGroupBuilder::addValue). Their current
+   /// arguments are read at run time; updateGroupsFused then updates every
+   /// aggregate of a row's entry in one pass instead of one pass each.
+   struct FusedAggr {
+      enum Kind : uint8_t { Col, SelCol, Count } kind;
+      Op* op;
+      size_t offset;
+   };
+   std::vector<FusedAggr> fusedAggrs;
+   bool fusable = true;
+   std::vector<pos_t> identitySel;
+   std::vector<int64_t> ones;
+   void updateGroupsFused(pos_t n);
+#endif
 
    /// ------ phase 2: global aggregation
    RowGroupLookup globalAggregation;
    pos_t findGroupsFromPartition(void* data, size_t n);
+#ifdef VW_GROUP_GLOBAL_DIRECT
+   /// VW_GROUP_GLOBAL_DIRECT: set by QueryBuilder when every key compares
+   /// correctly with memcmp (fixed-width scalar types; Char<N> padding bytes
+   /// are undefined); then the global phase uses globalFindOrCreate
+   bool globalDirectOk = true;
+   void globalFindOrCreate(void* data, size_t n);
+#endif
    Aggregates updateGroupsFromPartition;
 
    /// ------ produce result
@@ -424,6 +447,11 @@ class HashGroup : public UnaryOperator {
    uint32_t totalKeySize = 0;
    std::deque<KeyColumn> keyColumns;
    std::vector<char> packedKeys;
+#ifdef VW_GROUP_NO_CONCAT
+   /// packed keys of the current vector: packedKeys, or the key column
+   /// itself for a single dense key
+   char* keyData = nullptr;
+#endif
    pos_t* selVec = nullptr;
 
 #ifdef VW_USE_CRC32
@@ -439,7 +467,23 @@ class HashGroup : public UnaryOperator {
    template <typename T> void Hash_T(pos_t n);
 
    void Lookup(pos_t n);
+#ifdef VW_GROUP_LAST_MATCH
+   template <typename T, bool LastMatch> void Lookup_T(pos_t n);
+   /// use the previous-key check for the next vector (>= 70% of this
+   /// vector's rows repeated their predecessor's key)
+   bool lastMatchOn = true;
+#else
    template <typename T> void Lookup_T(pos_t n);
+#endif
+#ifdef VW_GROUP_BATCH_CREATE
+   /// VW_GROUP_BATCH_CREATE: pre-aggregation entries are carved from one
+   /// block per flush period (maxFill + vecSize entries, so a vector never
+   /// runs out), consecutively, so one vector's new groups can be
+   /// initialized by a single buildScatter call
+   EntryHeader* newBlock = nullptr;
+   size_t newUsed = 0;
+   size_t newCap = 0;
+#endif
 
  private:
    void clearHashtable();
