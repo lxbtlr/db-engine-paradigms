@@ -71,3 +71,7 @@ results/
 # ad-hoc analysis scripts
 rselbench.sh
 run_vw_prof.sh
+
+# bridge: laptop state and local config
+.bridge/
+bridge/laptop/bridge.conf
