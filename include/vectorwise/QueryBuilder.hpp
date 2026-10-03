@@ -81,6 +81,19 @@ class QueryBuilder {
       setProbeSelVector(DS vec,
                         pos_t (Hashjoin::*join)() = &Hashjoin::joinSelParallel);
       B& pushProbeSelVector(DS sel, DS target);
+      /// Mark this join a semi join: the plan only asks whether each probe
+      /// key exists on the build side. Requires no build values. Valid for
+      ///  - a semi join in the SQL (Q18: o_orderkey IN (subquery)), or
+      ///  - an inner join whose build side contributes no columns and whose
+      ///    build key is unique (Q3, Q5, Q9: primary keys). Hyper's plans make
+      ///    the same rewrite (Hashset + contains()).
+      /// ASSUMPTION: the build keys are unique; nothing checks it. The joins
+      /// run two ways and both depend on it: the bitmap path (VW_JOIN_SEMI)
+      /// emits each probe row at most once, so on a rewritten inner join it
+      /// would drop the rows duplicate build keys repeat; the hash path (keys
+      /// not one int32 per side, key range over 2^27, or VW_JOIN_SEMI off)
+      /// runs as an inner join, so on a SQL semi join it would repeat them.
+      B& semi();
    };
 
    struct HashGroupBuilder {

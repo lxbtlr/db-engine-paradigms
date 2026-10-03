@@ -280,13 +280,15 @@ class Hashjoin : public BinaryOperator {
 #ifndef VW_POS_16
    pos_t joinSelSIMD();
 #endif
+   /// the plan marked this join a semi join (HashJoinBuilder::semi()): only
+   /// existence of the probe key matters. Assumes unique build keys (see
+   /// semi()); without VW_JOIN_SEMI it runs as an inner join, equal then.
+   bool semiJoin = false;
 #ifdef VW_JOIN_SEMI
-   /// WARNING: UNFINISHED / KNOWN BUGGY, not always correct yet (see
-   /// Operators.cpp).
-   /// VW_JOIN_SEMI: a join without build values only needs existence of the
-   /// probe key. QueryBuilder records whether the keys qualify (one int32 key
-   /// per side); after the build, a bitmap over the build keys' range
-   /// replaces hash, probe, key equality and gather for this join.
+   /// VW_JOIN_SEMI: a join the plan marked semi (semiJoin) only needs
+   /// existence of the probe key. QueryBuilder records whether the keys
+   /// qualify (one int32 key per side); after the build, a bitmap over the
+   /// build keys' range replaces hash, probe, key equality and gather.
    bool semiOk = true;
    size_t semiBuildKeys = 0;
    size_t semiKeyOffset = 0;
@@ -294,7 +296,8 @@ class Hashjoin : public BinaryOperator {
    struct F3_Op* semiProbeSel = nullptr;
    bool semiActive = false;
    bool semiCandidate() const {
-      return semiOk && semiBuildKeys == 1 && buildGather.ops.empty() &&
+      return semiJoin && semiOk && semiBuildKeys == 1 &&
+             buildGather.ops.empty() &&
              (semiProbeDense || semiProbeSel) && probeHash.ops.size() == 1;
    }
    pos_t semiProbe(size_t n);

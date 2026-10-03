@@ -190,6 +190,7 @@ std::unique_ptr<Q3Builder::Q3> Q3Builder::getQuery() {
                              Column(order, "o_orderdate"),               //
                              Value(&r->c2)));
    HashJoin(Buffer(cust_ord, sizeof(pos_t)), conf.joinAll())
+       .semi() // inner join on c_custkey (PK), no customer columns used
        .setProbeSelVector(Buffer(sel_order), conf.joinSel())
        .addBuildKey(Column(customer, "c_custkey"),       //
                     Buffer(sel_cust),                    //

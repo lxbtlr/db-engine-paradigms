@@ -237,9 +237,8 @@ std::unique_ptr<Q18Builder::Q18> Q18Builder::getQuery() {
                           Buffer(sel_orderkey, sizeof(pos_t)),
                           Buffer(l_quantity), Value(&r->qty_bound)));
    auto orders = Scan("orders");
-   // FIXME: This should be a right semi join (, but for now, hashjoin may be
-   // good enough)
    HashJoin(Buffer(orders_matches, sizeof(pos_t)))
+       .semi() // SQL: o_orderkey in (group-by subquery)
        .addBuildKey(Buffer(l_orderkey), //
                     Buffer(sel_orderkey), primitives::hash_sel_int32_t_col,
                     primitives::scatter_sel_int32_t_col)

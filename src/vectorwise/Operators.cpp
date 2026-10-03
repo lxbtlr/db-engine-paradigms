@@ -864,15 +864,15 @@ inline __attribute__((always_inline)) void compressStore64(void* dst, __mmask8 m
 #endif
 
 #ifdef VW_JOIN_SEMI
-// WARNING: UNFINISHED / KNOWN BUGGY. VW_JOIN_SEMI is still being worked on
-// and is not always correct yet; do not use it for reported results.
-//
-// VW_JOIN_SEMI: a Hashjoin without build values only asks whether a probe
-// key exists in the build side (TPC-H Q18's orders join is marked "should be
-// a right semi join"; Q3, Q5 and Q9 have such joins too). Their build keys
-// are unique (primary keys or a group-by's output), so the inner join and
-// the semi join give the same rows; with duplicate build keys an inner join
-// would repeat probe rows and this would not. For one int32 key per side,
+// VW_JOIN_SEMI: a Hashjoin the plan marks semi (HashJoinBuilder::semi())
+// only asks whether a probe key exists in the build side. Q18's orders join
+// is a semi join in the SQL (IN subquery); Q3 customer, Q5 region and Q9 part
+// are inner joins on a primary key whose build side contributes no columns,
+// rewritten to semi joins as Hyper's plans do (Hashset::contains). Unmarked
+// joins always stay inner joins. Inner and semi join agree only because the
+// marked joins' build keys are unique, the assumption semi() documents: this
+// bitmap emits a probe row at most once, the hash path once per match.
+// For one int32 key per side,
 // the build keys' range [min, max] gets an exact bitmap (built after the
 // hash table, at most 2^27 keys = 16 MB; Q3's customer keys ~19 KB, Q18's 57
 // orders over ~6M order keys ~750 KB); a probe vector is then filtered with

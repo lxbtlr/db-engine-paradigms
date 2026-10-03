@@ -256,6 +256,7 @@ std::unique_ptr<Q9Builder::Q9> Q9Builder::getQuery(){
                              Value(&r->contains)));
    auto partsupp = Scan("partsupp");
    HashJoin(Buffer(part_partsupp, sizeof(pos_t)), conf.joinAll())
+       .semi() // inner join on p_partkey (PK), no part columns used
        .addBuildKey(Column(part, "p_partkey"), //
                     Buffer(sel_part),          //
                     conf.hash_sel_int32_t_col(),

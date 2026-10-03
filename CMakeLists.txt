@@ -448,17 +448,16 @@ if(VW_JOIN_FUSED_PROBE)
   message(STATUS "Building with VW_JOIN_FUSED_PROBE")
 endif()
 
-# VW_JOIN_SEMI -- EXPERIMENTAL, UNFINISHED: not always correct yet (work in
-# progress); do not use for reported results.
-# VW_JOIN_SEMI: a VectorWise Hashjoin without build values is treated as a
-# semi join (existence of the probe key; exact for the unique build keys of
-# such joins in TPC-H). With one int32 key per side it builds an exact bitmap
-# over the build keys' range and filters probe vectors with it (AVX-512),
-# skipping probe hashing, the hash table probe, key equality and gather.
-OPTION(VW_JOIN_SEMI "EXPERIMENTAL/UNFINISHED (not always correct): bitmap semi join for VectorWise hash joins without build values" OFF)
+# VW_JOIN_SEMI: VectorWise Hashjoins the plan marks semi
+# (HashJoinBuilder::semi(): Q18's IN subquery, and the primary-key inner
+# joins Q3 customer, Q5 region, Q9 part, rewritten to semi joins as Hyper's
+# plans do) with one int32 key per side build an exact bitmap over the build
+# keys' range and filter probe vectors with it (AVX-512), skipping probe
+# hashing, the hash table probe, key equality and gather. Unmarked joins are
+# unchanged. Marked joins assume unique build keys (see semi()).
+OPTION(VW_JOIN_SEMI "Bitmap semi join for VectorWise hash joins the plan marks semi" OFF)
 if(VW_JOIN_SEMI)
   ADD_DEFINITIONS(-DVW_JOIN_SEMI=1)
-  message(WARNING "VW_JOIN_SEMI is unfinished and not always correct yet; results may be wrong")
 endif()
 
 # Hash join entry layout (QueryBuilder::HashJoinBuilder). All OFF / 8 keeps

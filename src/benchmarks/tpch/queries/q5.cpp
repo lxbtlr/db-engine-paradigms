@@ -218,6 +218,7 @@ unique_ptr<Q5Builder::Q5> Q5Builder::getQuery() {
                           Value(&r->c3)));
    auto nation = Scan("nation");
    HashJoin(Buffer(join_reg_nat, sizeof(pos_t)), conf.joinAll())
+       .semi() // inner join on r_regionkey (PK), no region columns used
        .addBuildKey(Column(region, "r_regionkey"), Buffer(sel_region),
                     conf.hash_sel_int32_t_col(),
                     primitives::scatter_sel_int32_t_col)

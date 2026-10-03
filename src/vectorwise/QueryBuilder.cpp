@@ -519,6 +519,11 @@ QueryBuilder::HashJoinBuilder::pushProbeSelVector(DS sel, DS target) {
    return *this;
 }
 
+QueryBuilder::HashJoinBuilder& QueryBuilder::HashJoinBuilder::semi() {
+   join->semiJoin = true;
+   return *this;
+}
+
 QueryBuilder::HashGroupBuilder::HashGroupBuilder(QueryBuilder& b) : base(b) {}
 
 QueryBuilder::HashGroupBuilder QueryBuilder::HashGroup() {
