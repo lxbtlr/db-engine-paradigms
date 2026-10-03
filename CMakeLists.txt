@@ -259,10 +259,22 @@ endif()
 # instead of gathering through the selection; results are position-indexed
 # and the group-by reads them through the selection. Only total operations
 # (plus, minus, multiplies), so computing unselected rows cannot trap.
+# VW_PROJ_DENSE_WIDTH 512|256: widest vector the dense kernels use. 512 uses
+# zmm where AVX-512 exists; 256 stays in ymm (avoids the AVX-512 frequency
+# drop on Cascade Lake). Without AVX-512 both use the AVX2 ymm kernels
+# (64-bit multiply emulated from vpmuludq without AVX-512DQ/VL); without
+# AVX2, scalar.
 OPTION(VW_PROJ_DENSE "Dense projections over the selected span (TPC-H Q1 prototype)" OFF)
+set(VW_PROJ_DENSE_WIDTH "512" CACHE STRING "VW_PROJ_DENSE widest vector: 512, 256")
+set_property(CACHE VW_PROJ_DENSE_WIDTH PROPERTY STRINGS 512 256)
 if(VW_PROJ_DENSE)
   ADD_DEFINITIONS(-DVW_PROJ_DENSE=1)
-  message(STATUS "Building with VW_PROJ_DENSE")
+  if(VW_PROJ_DENSE_WIDTH STREQUAL "256")
+    ADD_DEFINITIONS(-DVW_PROJ_DENSE_WIDTH_256=1)
+  elseif(NOT VW_PROJ_DENSE_WIDTH STREQUAL "512")
+    message(FATAL_ERROR "VW_PROJ_DENSE_WIDTH must be 512 or 256 (got '${VW_PROJ_DENSE_WIDTH}')")
+  endif()
+  message(STATUS "Building with VW_PROJ_DENSE (width ${VW_PROJ_DENSE_WIDTH})")
 endif()
 
 OPTION(VW_AGGR_FUSED "Fused multi-aggregate update in VectorWise HashGroup" OFF)
