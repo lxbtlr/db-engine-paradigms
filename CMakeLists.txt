@@ -230,6 +230,25 @@ if(VW_SPILL_WORD_COPY)
   message(STATUS "Building with VW_SPILL_WORD_COPY")
 endif()
 
+# VW_GROUP_DISPATCH: HashGroup resolves its code path once per operator from
+# plan-fixed facts (key columns, key width, selection, aggregates) and runs
+# specialized per-vector loops: no Concat for single keys, hash fused into
+# the lookup, batched group creation, adaptive previous-key reuse, fused
+# SUM/COUNT update, one-pass global find-or-create, inline spill copy. One
+# switch for what VW_GROUP_BATCH_CREATE, VW_FUSE_HASH, VW_GROUP_LAST_MATCH,
+# VW_GROUP_NO_CONCAT, VW_GROUP_GLOBAL_DIRECT, VW_SPILL_WORD_COPY and
+# VW_AGGR_FUSED do separately (it compiles in their supporting code).
+OPTION(VW_GROUP_DISPATCH "Plan-resolved specialized code paths in VectorWise HashGroup" OFF)
+if(VW_GROUP_DISPATCH)
+  if(VW_GROUP_AGGR)
+    message(FATAL_ERROR "VW_GROUP_DISPATCH does not support VW_GROUP_AGGR")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_DISPATCH=1 -DVW_GROUP_BATCH_CREATE=1
+                  -DVW_GROUP_GLOBAL_DIRECT=1 -DVW_GROUP_LAST_MATCH=1
+                  -DVW_SPILL_WORD_COPY=1 -DVW_AGGR_FUSED=1)
+  message(STATUS "Building with VW_GROUP_DISPATCH")
+endif()
+
 OPTION(VW_AGGR_FUSED "Fused multi-aggregate update in VectorWise HashGroup" OFF)
 if(VW_AGGR_FUSED)
   if(VW_GROUP_AGGR)

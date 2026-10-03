@@ -46,6 +46,7 @@ BOOL_OPTIONS = [
     ("VW_GROUP_NO_CONCAT",    "HashGroup: single dense key used in place, no packing",     False),
     ("VW_SPILL_WORD_COPY",    "HashGroup: inline word copy of spilled rows",               False),
     ("VW_AGGR_FUSED",         "HashGroup: all int64 SUM/COUNT aggregates in one pass",     False),
+    ("VW_GROUP_DISPATCH",     "HashGroup: plan-resolved specialized code paths",           False),
     ("VW_JOIN_ALIGN_FIELDS",  "Align hash join entry fields to their natural alignment",  False),
     ("VW_JOIN_SLIM_HEADER",   "Hash join entries skip EntryHeader::group (VW_GROUP_AGGR)", False),
     ("VW_Q9_FIELD_ORDER",     "TPC-H Q9: ps_supplycost before n_name in partsupp join",    False),

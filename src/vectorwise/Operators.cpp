@@ -1395,6 +1395,15 @@ size_t HashGroup::next() {
       }
 #endif
 
+#ifdef VW_GROUP_DISPATCH
+      if (!pathsResolved) resolvePaths();
+      for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
+         (this->*keyStep)(n);
+         (this->*aggStep)(n);
+         if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
+      }
+      if (false)
+#endif
       for (pos_t n = child->next(); n != EndOfStream; n = child->next()) {
 #ifdef VW_GROUP_AGGR
          for (auto entry : groups) {
@@ -1652,6 +1661,161 @@ void HashGroup::globalFindOrCreate(void* data, size_t n) {
 #else
 #define VW_GROUP_KEY_DATA packedKeys.data()
 #endif
+
+#ifdef VW_GROUP_DISPATCH
+// VW_GROUP_DISPATCH: HashGroup's per-vector pre-aggregation used to switch on
+// totalKeySize three times per vector (Concat, Hash, Lookup) and to pack
+// keys even when there is one key column. What it switches on is fixed by
+// the plan for the operator's lifetime, so resolvePaths() picks, once:
+//   key step: one specialized loop per (key width, key mode, last-match)
+//     kSingle    one key column, no selection: the column is the packed key
+//     kSingleSel one key column read through its selection vector
+//     kPacked    compound keys, packed by per-column copy steps resolved once
+//   the loop hashes each key itself, walks the chain, and creates missing
+//   groups in one consecutive block with one buildScatter per vector
+//   (batched creation); runs of a repeated key reuse the previous entry when
+//   >= 70% of the last vector's rows repeated (last-match);
+//   aggregate step: all int64 SUM/COUNT in one pass (fused) when possible,
+//     else the aggregate expression list;
+//   global phase: one-pass find-or-create for memcmp-comparable keys;
+//   spill: inline word copy of rows.
+void HashGroup::resolvePaths() {
+   pathsResolved = true;
+   const bool single = keyColumns.size() == 1;
+   const KeyMode mode = !single ? kPacked
+                        : keyColumns.front().sel ? kSingleSel
+                                                 : kSingle;
+   // compound keys: each column's copy into packedKeys, resolved once
+   concatSteps.clear();
+   if (mode == kPacked)
+      for (auto& col : keyColumns)
+         concatSteps.push_back(col.size == 1   ? &HashGroup::Concat_T<uint8_t>
+                               : col.size == 2 ? &HashGroup::Concat_T<uint16_t>
+                               : col.size == 4 ? &HashGroup::Concat_T<uint32_t>
+                               : col.size == 8 ? &HashGroup::Concat_T<uint64_t>
+                                               : &HashGroup::Concat_T<char*>);
+#define VW_KEY_STEP(T)                                                         \
+   (mode == kSingle      ? &HashGroup::keyStepAdaptive<T, kSingle>             \
+    : mode == kSingleSel ? &HashGroup::keyStepAdaptive<T, kSingleSel>          \
+                         : &HashGroup::keyStepAdaptive<T, kPacked>)
+   switch (totalKeySize) {
+   case 1: keyStep = VW_KEY_STEP(uint8_t); break;
+   case 2: keyStep = VW_KEY_STEP(uint16_t); break;
+   case 4: keyStep = VW_KEY_STEP(uint32_t); break;
+   case 8: keyStep = VW_KEY_STEP(uint64_t); break;
+   default: keyStep = VW_KEY_STEP(char*); break;
+   }
+#undef VW_KEY_STEP
+   aggStep = (fusable && fusedAggrs.size() > 1) ? &HashGroup::updateGroupsFused
+                                                : &HashGroup::aggEvaluate;
+}
+
+void HashGroup::concatResolved(pos_t n) {
+   for (size_t c = 0; c < keyColumns.size(); ++c)
+      (this->*concatSteps[c])(n, keyColumns[c]);
+}
+
+template <typename T, int Mode> void HashGroup::keyStepAdaptive(pos_t n) {
+   if (lastMatchOn)
+      keyStepT<T, Mode, true>(n);
+   else
+      keyStepT<T, Mode, false>(n);
+}
+
+template <typename T, int Mode, bool LastMatch>
+void HashGroup::keyStepT(pos_t n) {
+   constexpr bool wide = std::is_same_v<T, char*>;
+   const uint32_t keySize = wide ? totalKeySize : sizeof(T);
+   const char* __restrict__ base;
+   const pos_t* __restrict__ ksel = nullptr;
+   if constexpr (Mode == kPacked) {
+      concatResolved(n);
+      base = packedKeys.data();
+   } else {
+      base = static_cast<const char*>(keyColumns.front().data);
+      if constexpr (Mode == kSingleSel) ksel = keyColumns.front().sel;
+   }
+   auto keyAt = [&](pos_t i) -> const char* {
+      if constexpr (Mode == kSingleSel)
+         return base + size_t(ksel[i]) * keySize;
+      else
+         return base + size_t(i) * keySize;
+   };
+   auto hashOf = [&](const char* kp) -> hash_t {
+      if constexpr (wide) {
+         return hashFn.hashKey(kp, keySize, 0);
+      } else {
+         T key;
+         std::memcpy(&key, kp, sizeof(T));
+         return hashFn.hashKey(key);
+      }
+   };
+   auto sameKey = [&](const char* a, const char* b) {
+      if constexpr (wide) {
+         return std::memcmp(a, b, keySize) == 0;
+      } else {
+         T x, y;
+         std::memcpy(&x, a, sizeof(T));
+         std::memcpy(&y, b, sizeof(T));
+         return x == y;
+      }
+   };
+   hash_t* __restrict__ hashes = preAggregation.groupHashes;
+   EntryHeader** __restrict__ matches = preAggregation.htMatches;
+   const size_t entrySize = preAggregation.ht_entry_size;
+   pos_t created = 0, repeats = 0;
+   EntryHeader* firstNew = nullptr;
+   EntryHeader* last = nullptr;
+   const char* prev = nullptr;
+   for (pos_t i = 0; i < n; ++i) {
+      const char* kp = keyAt(i);
+      EntryHeader* entry;
+      const bool repeat = prev && sameKey(kp, prev);
+      prev = kp;
+      if constexpr (LastMatch) {
+         if (repeat) {
+            ++repeats;
+            matches[i] = last;
+            continue;
+         }
+      } else {
+         repeats += repeat;
+      }
+      const hash_t hash = hashOf(kp);
+      for (entry = ht.find_chain(hash); entry; entry = entry->next)
+         if (entry->hash == hash &&
+             sameKey(reinterpret_cast<const char*>(entry + 1), kp))
+            break;
+      if (!entry) {
+         if (newUsed == newCap) {
+            newCap = maxFill + vecSize;
+            newUsed = 0;
+            auto alloc = groupStore.allocate(newCap * entrySize);
+            if (!alloc) throw std::runtime_error("malloc failed");
+            newBlock = reinterpret_cast<EntryHeader*>(alloc);
+            preAggregation.allocations.emplace_back(alloc, 0);
+         }
+         entry = addBytes(newBlock, newUsed * entrySize);
+         ++newUsed;
+         ++preAggregation.allocations.back().second;
+         if (!created) firstNew = entry;
+         entry->hash = hash;
+         std::memcpy(reinterpret_cast<char*>(entry + 1), kp, keySize);
+         hashes[i] = hash;
+         preAggregation.groupRepresentatives[created++] = i;
+         ht.insert<false>(entry, hash);
+         ++preAggregation.entries_in_ht;
+      }
+      matches[i] = entry;
+      last = entry;
+   }
+   if (created) {
+      preAggregation.scatterStart = firstNew;
+      preAggregation.buildScatter.evaluate(created);
+   }
+   if (n > 1) lastMatchOn = size_t(repeats) * 10 >= size_t(n - 1) * 7;
+}
+#endif // VW_GROUP_DISPATCH
 
 // CONCAT
 void HashGroup::Concat(pos_t n) {

@@ -510,6 +510,23 @@ class HashGroup : public UnaryOperator {
 #else
    template <typename T> void Lookup_T(pos_t n);
 #endif
+#ifdef VW_GROUP_DISPATCH
+   /// VW_GROUP_DISPATCH: the pre-aggregation path is chosen once per operator
+   /// from what the plan fixes for its lifetime (number of key columns, key
+   /// width, whether the key comes through a selection vector, the
+   /// aggregates), instead of per-vector switches on totalKeySize
+   enum KeyMode { kSingle, kSingleSel, kPacked };
+   using VecStep = void (HashGroup::*)(pos_t n);
+   VecStep keyStep = nullptr;  ///< keys -> preAggregation.htMatches
+   VecStep aggStep = nullptr;  ///< aggregate update
+   std::vector<void (HashGroup::*)(pos_t, const KeyColumn&)> concatSteps;
+   bool pathsResolved = false;
+   void resolvePaths();
+   template <typename T, int Mode, bool LastMatch> void keyStepT(pos_t n);
+   template <typename T, int Mode> void keyStepAdaptive(pos_t n);
+   void concatResolved(pos_t n);
+   void aggEvaluate(pos_t n) { updateGroups.evaluate(n); }
+#endif
 #ifdef VW_GROUP_BATCH_CREATE
    /// VW_GROUP_BATCH_CREATE: pre-aggregation entries are carved from one
    /// block per flush period (maxFill + vecSize entries, so a vector never
