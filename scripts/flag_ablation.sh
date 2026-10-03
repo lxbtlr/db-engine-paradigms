@@ -49,6 +49,8 @@
 #                        fused aggregates, spill copy, hash in the lookup)
 #   grp_runheads         grp_dispatch + VW_GROUP_RUN_HEADS (branch-free run-head
 #                        lookup; AVX-512BW/VL run pass, scalar elsewhere)
+#   grp_dense            grp_runheads + VW_PROJ_DENSE (TPC-H Q1: projections over
+#                        the selected span with contiguous loads, no gather)
 # Configs whose ISA this CPU lacks are skipped (their builds would fall back
 # and duplicate another config).
 #
@@ -102,7 +104,7 @@ FLAG_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
 JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all"
-GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads"
+GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_dense"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 HASH_BASE=${HASH_BASE:-default}
 # SIMD selection only where the CPU has the kernels' ISA, so a config never
@@ -198,7 +200,7 @@ summarize() {
   # group.csv: group-by configs, speedup vs grp_base (today's HashGroup)
   { echo "compiler,query,group_config,median_ms,speedup_vs_base"
     awk -F, '$3 ~ /^grp_/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-      END { n = split("grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads", gc, " ")
+      END { n = split("grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_dense", gc, " ")
             for (k in cq) { b = m[k ",grp_base"]
               for (i = 1; i <= n; i++) if ((k "," gc[i]) in m)
                 printf "%s,%s,%.2f,%s\n", k, gc[i], m[k "," gc[i]], b ? sprintf("%.3f", b / m[k "," gc[i]]) : "" } }' \
@@ -228,7 +230,7 @@ flags() {
        "-DVW_NEW_JOIN=OFF -DVW_NEW_JOIN_FULL=tag -DVW_JOIN_BLOOM=OFF -DVW_SIMD_HASH_GATHER=insert" \
        "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_FUSE_HASH=OFF" \
        "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF" \
-       "-DVW_GROUP_DISPATCH=OFF -DVW_GROUP_RUN_HEADS=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
+       "-DVW_GROUP_DISPATCH=OFF -DVW_GROUP_RUN_HEADS=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF -DVW_PROJ_DENSE=OFF" \
        "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
 config_flags() {
@@ -272,6 +274,7 @@ config_flags() {
     grp_all)             echo "$(config_flags grp_q18) -DVW_AGGR_FUSED=ON" ;;
     grp_dispatch)        echo "$(config_flags grp_base) -DVW_GROUP_DISPATCH=ON" ;;
     grp_runheads)        echo "$(config_flags grp_dispatch) -DVW_GROUP_RUN_HEADS=ON" ;;
+    grp_dense)           echo "$(config_flags grp_runheads) -DVW_PROJ_DENSE=ON" ;;
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
