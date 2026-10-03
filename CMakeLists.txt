@@ -429,6 +429,25 @@ if(VW_JOIN_BLOOM)
   message(STATUS "Building with VW_JOIN_BLOOM (${VW_JOIN_BLOOM_BITS} bits/key, min ${VW_JOIN_BLOOM_MIN_KEYS} keys)")
 endif()
 
+# VW_JOIN_FUSED_PROBE: a join with one int32 probe key hashes the keys
+# itself instead of evaluating its probe hash expression: with VW_JOIN_BLOOM
+# active, hashing and the filter test are one pass and only survivors are
+# written; otherwise VW_NEW_JOIN's first pass hashes 8 keys in registers.
+# Bit-identical hashes; other probe sides keep the separate hash pass.
+# Needs VW_JOIN_BLOOM (hash + filter, any join) or VW_NEW_JOIN (hash +
+# first pass), and 64-bit hashes.
+OPTION(VW_JOIN_FUSED_PROBE "Fuse probe hashing into the VectorWise join (needs VW_JOIN_BLOOM or VW_NEW_JOIN)" OFF)
+if(VW_JOIN_FUSED_PROBE)
+  if(NOT VW_NEW_JOIN AND NOT VW_JOIN_BLOOM)
+    message(FATAL_ERROR "VW_JOIN_FUSED_PROBE fuses into VW_JOIN_BLOOM's filter pass or VW_NEW_JOIN's first pass; enable one")
+  endif()
+  if(HASH_SIZE_32)
+    message(FATAL_ERROR "VW_JOIN_FUSED_PROBE needs 64-bit hashes (HASH_SIZE_32 is ON)")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_FUSED_PROBE=1)
+  message(STATUS "Building with VW_JOIN_FUSED_PROBE")
+endif()
+
 # Hash join entry layout (QueryBuilder::HashJoinBuilder). All OFF / 8 keeps
 # the existing layout: header, then fields packed in add* call order, stride
 # rounded up to 8.

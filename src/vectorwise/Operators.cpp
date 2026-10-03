@@ -863,6 +863,7 @@ inline __attribute__((always_inline)) void compressStore64(void* dst, __mmask8 m
 } // namespace
 #endif
 
+
 #ifdef VW_JOIN_BLOOM
 // VW_JOIN_BLOOM: a Bloom filter owned by this VectorWise join, in front of
 // the shared runtime::Hashmap (unchanged, so Hyper is unaffected). Most
@@ -950,6 +951,122 @@ void Hashjoin::bloomFilter(size_t n) {
 }
 #endif // VW_JOIN_BLOOM
 
+#ifdef VW_JOIN_FUSED_PROBE
+// VW_JOIN_FUSED_PROBE: the join hashes its probe keys itself. Today the
+// probeHash expression writes all n hashes (8 B each), then the Bloom pass
+// reads them all back and copies the survivors, and the join reads those
+// again; with 90-99% of probes rejected (TPC-H Q3/Q5/Q9) most of that traffic
+// is for hashes nobody uses. Here, for a single int32 probe key:
+//   mode A (VW_JOIN_BLOOM filter active): hash 8 keys in registers, test the
+//     filter, compress only the survivors (index + hash); a survivor's hash
+//     is also written to its probeHashes slot for the chain-following loop;
+//   mode B (no filter): VW_NEW_JOIN's first pass hashes 8 keys in registers
+//     and runs the directory step on them, storing them for the followups.
+// The hashes are bit-identical to the plan's hash primitive (DEFAULT_HASH
+// with primitives::seed, through the same SIMD kernel when VW_CRC32_VPCLMUL /
+// VW_SIMD_HASH apply); join_sel's keys are gathered through the selection.
+namespace {
+#ifdef VW_USE_CRC32
+using FusedHash = runtime::CRC32Hash;
+#else
+using FusedHash = runtime::MurMurHash;
+#endif
+inline runtime::Hashmap::hash_t fusedHash1(int32_t k) {
+   return FusedHash()(k, primitives::seed);
+}
+#if defined(__AVX512F__) && !defined(VW_POS_16)
+/// hashes of keys[i..i+7] (Sel: keys[sel[i..i+7]])
+template <bool Sel>
+inline __attribute__((always_inline)) __m512i
+fusedHash8(const int32_t* keys, const pos_t* sel, size_t i) {
+#if defined(VW_USE_CRC32) && defined(VW_CRC32_VPCLMUL) && defined(VW_HAVE_SIMD_CRC)
+   static const primitives::simd_crc::Seed s(primitives::seed);
+   const __m512i k = Sel ? primitives::simd_hash::gather8<int32_t>(keys, sel + i)
+                         : primitives::simd_hash::widen8<int32_t>(keys + i);
+   return primitives::simd_crc::crc_hash8(k, s);
+#elif !defined(VW_USE_CRC32) && defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH)
+   const __m512i k = Sel ? primitives::simd_hash::gather8<int32_t>(keys, sel + i)
+                         : primitives::simd_hash::widen8<int32_t>(keys + i);
+   return primitives::simd_hash::murmur(
+       k, _mm512_set1_epi64((long long)primitives::seed));
+#else
+   // scalar hashes assembled in registers (no store + vector reload)
+   auto h = [&](size_t l) {
+      return (long long)fusedHash1(Sel ? keys[sel[i + l]] : keys[i + l]);
+   };
+   __m128i a = _mm_cvtsi64_si128(h(0)), b = _mm_cvtsi64_si128(h(2));
+   __m128i c = _mm_cvtsi64_si128(h(4)), d = _mm_cvtsi64_si128(h(6));
+   a = _mm_insert_epi64(a, h(1), 1);
+   b = _mm_insert_epi64(b, h(3), 1);
+   c = _mm_insert_epi64(c, h(5), 1);
+   d = _mm_insert_epi64(d, h(7), 1);
+   return _mm512_inserti64x4(
+       _mm512_castsi256_si512(
+           _mm256_inserti128_si256(_mm256_castsi128_si256(a), b, 1)),
+       _mm256_inserti128_si256(_mm256_castsi128_si256(c), d, 1), 1);
+#endif
+}
+#endif
+} // namespace
+
+#ifdef VW_JOIN_BLOOM
+void Hashjoin::fusedHashFilter(size_t n) {
+   if (bloomSel.size() < n) {
+      bloomSel.resize(n);
+      bloomHashes.resize(n);
+   }
+   const bool sel = fusedSel != nullptr;
+   const int32_t* keys = static_cast<const int32_t*>(
+       sel ? fusedSel->param2 : fusedDense->param1);
+   const pos_t* ksel =
+       sel ? static_cast<const pos_t*>(fusedSel->outputSelectionV) : nullptr;
+   const uint64_t* bloom = shared.bloom.get();
+   const uint64_t mask = shared.bloomMask;
+   pos_t* out = bloomSel.data();
+   auto* hs = bloomHashes.data();
+   size_t m = 0, i = 0;
+#if defined(__AVX512F__) && !defined(VW_POS_16)
+   const __m512i vMask = _mm512_set1_epi64((long long)mask);
+   const __m512i b6 = _mm512_set1_epi64(63);
+   const __m512i one = _mm512_set1_epi64(1);
+   const __m512i lane = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 7, 6, 5, 4,
+                                         3, 2, 1, 0);
+   for (; i + 8 <= n; i += 8) {
+      const __m512i h = sel ? fusedHash8<true>(keys, ksel, i)
+                            : fusedHash8<false>(keys, ksel, i);
+      const __m512i words = _mm512_i64gather_epi64(
+          _mm512_and_si512(_mm512_srli_epi64(h, 40), vMask),
+          (const long long*)bloom, 8);
+      __m512i bits = _mm512_sllv_epi64(one, _mm512_and_si512(h, b6));
+      bits = _mm512_or_si512(
+          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 6), b6)));
+      bits = _mm512_or_si512(
+          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 12), b6)));
+      bits = _mm512_or_si512(
+          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 18), b6)));
+      const __mmask8 pass =
+          _mm512_cmpeq_epi64_mask(_mm512_and_si512(words, bits), bits);
+      if (!pass) continue;
+      compressStore32(out + m, pass,
+                      _mm512_add_epi32(_mm512_set1_epi32((int)i), lane));
+      compressStore64(hs + m, pass, h);
+      m += __builtin_popcount(pass);
+   }
+#endif
+   for (; i < n; ++i) {
+      const auto h = fusedHash1(sel ? keys[ksel[i]] : keys[i]);
+      const uint64_t b = bloomBits(h);
+      if ((bloom[(h >> 40) & mask] & b) == b) out[m] = pos_t(i), hs[m++] = h;
+   }
+   // survivors' hashes where the chain-following loop reads them
+   for (size_t k = 0; k < m; ++k) probeHashes[out[k]] = hs[k];
+   bloomCount = m;
+   bloomOn = true;
+   if (m * 2 > n) bloomSkip = 31;
+}
+#endif // VW_JOIN_BLOOM
+#endif // VW_JOIN_FUSED_PROBE
+
 #ifdef VW_NEW_JOIN
 // VW_NEW_JOIN: the join / join_sel refresh from andrew_pseudocode.md.
 //
@@ -1006,6 +1123,17 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
    const auto* dir = reinterpret_cast<const uint64_t*>(ht.entries);
    const uint64_t mask = ht.mask;
    const uint64_t maskPtr = ht.maskPointer;
+#ifdef VW_JOIN_FUSED_PROBE
+   // mode B: this pass hashes the probe keys (and stores the hashes for the
+   // followup loop) instead of reading probeHashes
+   const bool fc = fusedCompute;
+   const bool fsel = fusedSel != nullptr;
+   const int32_t* fkeys =
+       fc ? static_cast<const int32_t*>(fsel ? fusedSel->param2 : fusedDense->param1)
+          : nullptr;
+   const pos_t* fks =
+       fc && fsel ? static_cast<const pos_t*>(fusedSel->outputSelectionV) : nullptr;
+#endif
 #ifdef VW_JOIN_BLOOM
    // the probe list: Bloom survivors (index + hash), or all probes
    const bool bf = bloomOn;
@@ -1043,7 +1171,16 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
    const __m512i one = _mm512_set1_epi64(1);
 #endif
    for (; i + 8 <= n; i += 8) {
+#ifdef VW_JOIN_FUSED_PROBE
+      __m512i h;
+      if (fc) {
+         h = fsel ? fusedHash8<true>(fkeys, fks, i) : fusedHash8<false>(fkeys, fks, i);
+         _mm512_storeu_si512(probeHashes + i, h);
+      } else
+         h = _mm512_loadu_si512(H + i);
+#else
       const __m512i h = _mm512_loadu_si512(H + i);
+#endif
       const __m512i slot = _mm512_and_si512(h, vMask);
       const __m512i dv = _mm512_i64gather_epi64(slot, (const long long*)dir, 8);
       const __m512i head = _mm512_and_si512(dv, vMaskPtr);
@@ -1104,7 +1241,13 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
       EH* next[8];
       bool full[8], match[8];
       for (size_t l = 0; l < 8; ++l) {
+#ifdef VW_JOIN_FUSED_PROBE
+         const auto h = fc ? (probeHashes[i + l] = fusedHash1(
+                                  fsel ? fkeys[fks[i + l]] : fkeys[i + l]))
+                           : H[i + l];
+#else
          const auto h = H[i + l];
+#endif
          const uint64_t dv = dir[h & mask];
          head[l] = reinterpret_cast<EH*>(dv & maskPtr);
          full[l] = newJoinFull(dv, h);
@@ -1131,7 +1274,12 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
 #endif
    // fewer than 8 probes left
    for (; i < n; ++i) {
+#ifdef VW_JOIN_FUSED_PROBE
+      const auto h = fc ? (probeHashes[i] = fusedHash1(fsel ? fkeys[fks[i]] : fkeys[i]))
+                        : H[i];
+#else
       const auto h = H[i];
+#endif
       const pos_t id = VW_NJ_ID(i);
       const uint64_t dv = dir[h & mask];
       auto head = reinterpret_cast<EH*>(dv & maskPtr);
@@ -1317,6 +1465,25 @@ size_t Hashjoin::next() {
          cont.numProbes = right->next();
          cont.nextProbe = 0;
          if (cont.numProbes == EndOfStream) return EndOfStream;
+#ifdef VW_JOIN_FUSED_PROBE
+         fusedCompute = false;
+         if (fusedReady()) {
+#ifdef VW_JOIN_BLOOM
+            bloomOn = false;
+            if (shared.bloom && !bloomSkip) {
+               fusedHashFilter(cont.numProbes); // mode A
+               goto probe;
+            }
+            if (shared.bloom) --bloomSkip;
+#endif
+#ifdef VW_NEW_JOIN
+            if (join == &Hashjoin::joinAllNew || join == &Hashjoin::joinSelNew) {
+               fusedCompute = true; // mode B: joinNewFirstPass hashes
+               goto probe;
+            }
+#endif
+         }
+#endif
          probeHash.evaluate(cont.numProbes);
 #ifdef VW_JOIN_BLOOM
          bloomOn = false;
@@ -1326,6 +1493,9 @@ size_t Hashjoin::next() {
             else
                bloomFilter(cont.numProbes);
          }
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
+      probe:;
 #endif
       }
       // create join pair vectors with matching hashes (Entry*, pos), where

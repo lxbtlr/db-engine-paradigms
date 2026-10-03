@@ -286,6 +286,21 @@ class Hashjoin : public BinaryOperator {
    void bloomInsert();
    void bloomFilter(size_t n);
 #endif
+#ifdef VW_JOIN_FUSED_PROBE
+   /// VW_JOIN_FUSED_PROBE: the probe side's single int32 hash op (set by
+   /// QueryBuilder::addProbeKey when it is primitives::hash_int32_t_col or
+   /// hash_sel_int32_t_col; any second probe key clears fusedOk). The join
+   /// then hashes the keys itself instead of evaluating probeHash.
+   struct F2_Op* fusedDense = nullptr;
+   struct F3_Op* fusedSel = nullptr;
+   bool fusedOk = true;
+   /// this vector's hashes are computed by joinNewFirstPass (mode B)
+   bool fusedCompute = false;
+   bool fusedReady() const {
+      return fusedOk && (fusedDense || fusedSel) && probeHash.ops.size() == 1;
+   }
+   void fusedHashFilter(size_t n);
+#endif
 #ifdef VW_NEW_JOIN
    /// VW_NEW_JOIN (andrew_pseudocode.md): 8 probes at a time, gather the
    /// head entry, split into real / maybe lists, then follow chains

@@ -340,6 +340,12 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, primitives::F2 hash,
    // create hash primitive for probe side
    auto hash_probe = make_unique<F2_Op>(probeHashBuffer, col, hash);
    col.registerDS(&hash_probe->param1);
+#ifdef VW_JOIN_FUSED_PROBE
+   if (join->probeHash.ops.empty() && hash == primitives::hash_int32_t_col)
+      join->fusedDense = hash_probe.get();
+   else
+      join->fusedOk = false;
+#endif
    join->probeHash.ops.push_back(move(hash_probe));
    join->probeHashes =
        reinterpret_cast<runtime::Hashmap::hash_t*>(probeHashBuffer);
@@ -366,6 +372,12 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, DS sel, primitives::F3 hash,
    auto hash_probe = make_unique<F3_Op>(sel, probeHashBuffer, col, hash);
    sel.registerDS(&hash_probe->outputSelectionV);
    col.registerDS(&hash_probe->param2);
+#ifdef VW_JOIN_FUSED_PROBE
+   if (join->probeHash.ops.empty() && hash == primitives::hash_sel_int32_t_col)
+      join->fusedSel = hash_probe.get();
+   else
+      join->fusedOk = false;
+#endif
    join->probeHash.ops.push_back(move(hash_probe));
    join->probeHashes =
        reinterpret_cast<runtime::Hashmap::hash_t*>(probeHashBuffer);
@@ -389,6 +401,12 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, DS sel, primitives::F3 hash,
    auto hash_probe = make_unique<F3_Op>(sel, probeHashBuffer, col, hash);
    sel.registerDS(&hash_probe->outputSelectionV);
    col.registerDS(&hash_probe->param2);
+#ifdef VW_JOIN_FUSED_PROBE
+   if (join->probeHash.ops.empty() && hash == primitives::hash_sel_int32_t_col)
+      join->fusedSel = hash_probe.get();
+   else
+      join->fusedOk = false;
+#endif
    join->probeHash.ops.push_back(move(hash_probe));
    join->probeHashes =
        reinterpret_cast<runtime::Hashmap::hash_t*>(probeHashBuffer);
