@@ -202,6 +202,12 @@ class Hashjoin : public BinaryOperator {
       std::unique_ptr<uint64_t[]> bloom;
       uint64_t bloomMask = 0; // words - 1
 #endif
+#ifdef VW_JOIN_SEMI
+      /// VW_JOIN_SEMI: build key range and the exact key bitmap over it
+      std::atomic<int64_t> semiMin{INT64_MAX}, semiMax{INT64_MIN};
+      std::unique_ptr<uint32_t[]> semiBits;
+      bool semiOn = false;
+#endif
       Shared() : found(0), sizeIsSet(false){};
    };
 
@@ -273,6 +279,27 @@ class Hashjoin : public BinaryOperator {
    /// Implementation: For SkylakeX using AVX512
 #ifndef VW_POS_16
    pos_t joinSelSIMD();
+#endif
+#ifdef VW_JOIN_SEMI
+   /// WARNING: UNFINISHED / KNOWN BUGGY, not always correct yet (see
+   /// Operators.cpp).
+   /// VW_JOIN_SEMI: a join without build values only needs existence of the
+   /// probe key. QueryBuilder records whether the keys qualify (one int32 key
+   /// per side); after the build, a bitmap over the build keys' range
+   /// replaces hash, probe, key equality and gather for this join.
+   bool semiOk = true;
+   size_t semiBuildKeys = 0;
+   size_t semiKeyOffset = 0;
+   struct F2_Op* semiProbeDense = nullptr;
+   struct F3_Op* semiProbeSel = nullptr;
+   bool semiActive = false;
+   bool semiCandidate() const {
+      return semiOk && semiBuildKeys == 1 && buildGather.ops.empty() &&
+             (semiProbeDense || semiProbeSel) && probeHash.ops.size() == 1;
+   }
+   pos_t semiProbe(size_t n);
+   void semiRange();
+   void semiSetBits();
 #endif
 #ifdef VW_JOIN_BLOOM
    /// probes that passed the Bloom filter for the current probe vector:

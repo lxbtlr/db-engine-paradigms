@@ -287,6 +287,12 @@ QueryBuilder::HashJoinBuilder::addBuildKey(DS col, primitives::F2 hash,
    auto entryOffset = join->ht_entry_size;
    keyOffsets.push_back(entryOffset);
    join->ht_entry_size += col.dataSize;
+#ifdef VW_JOIN_SEMI
+   ++join->semiBuildKeys;
+   join->semiKeyOffset = entryOffset;
+   if (!(col.dataSize == 4 && scatter == primitives::scatter_int32_t_col))
+      join->semiOk = false;
+#endif
 
    // create hash primitive for build side
    auto hash_build = make_unique<F2_Op>(buildHashBuffer, col, hash);
@@ -312,6 +318,12 @@ QueryBuilder::HashJoinBuilder::addBuildKey(DS col, DS sel, primitives::F3 hash,
    auto entryOffset = join->ht_entry_size;
    keyOffsets.push_back(entryOffset);
    join->ht_entry_size += col.dataSize;
+#ifdef VW_JOIN_SEMI
+   ++join->semiBuildKeys;
+   join->semiKeyOffset = entryOffset;
+   if (!(col.dataSize == 4 && scatter == primitives::scatter_sel_int32_t_col))
+      join->semiOk = false;
+#endif
 
    // create hash primitive for build side
    auto hash_build = make_unique<F3_Op>(sel, buildHashBuffer, col, hash);
@@ -340,6 +352,13 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, primitives::F2 hash,
    // create hash primitive for probe side
    auto hash_probe = make_unique<F2_Op>(probeHashBuffer, col, hash);
    col.registerDS(&hash_probe->param1);
+#ifdef VW_JOIN_SEMI
+   if (join->probeHash.ops.empty() && hash == primitives::hash_int32_t_col &&
+       eq == primitives::keys_equal_int32_t_col)
+      join->semiProbeDense = hash_probe.get();
+   else
+      join->semiOk = false;
+#endif
 #ifdef VW_JOIN_FUSED_PROBE
    if (join->probeHash.ops.empty() && hash == primitives::hash_int32_t_col)
       join->fusedDense = hash_probe.get();
@@ -372,6 +391,13 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, DS sel, primitives::F3 hash,
    auto hash_probe = make_unique<F3_Op>(sel, probeHashBuffer, col, hash);
    sel.registerDS(&hash_probe->outputSelectionV);
    col.registerDS(&hash_probe->param2);
+#ifdef VW_JOIN_SEMI
+   if (join->probeHash.ops.empty() && hash == primitives::hash_sel_int32_t_col &&
+       eq == primitives::keys_equal_int32_t_col)
+      join->semiProbeSel = hash_probe.get();
+   else
+      join->semiOk = false;
+#endif
 #ifdef VW_JOIN_FUSED_PROBE
    if (join->probeHash.ops.empty() && hash == primitives::hash_sel_int32_t_col)
       join->fusedSel = hash_probe.get();
@@ -401,6 +427,9 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, DS sel, primitives::F3 hash,
    auto hash_probe = make_unique<F3_Op>(sel, probeHashBuffer, col, hash);
    sel.registerDS(&hash_probe->outputSelectionV);
    col.registerDS(&hash_probe->param2);
+#ifdef VW_JOIN_SEMI
+   join->semiOk = false; // key equality through a separate selection
+#endif
 #ifdef VW_JOIN_FUSED_PROBE
    if (join->probeHash.ops.empty() && hash == primitives::hash_sel_int32_t_col)
       join->fusedSel = hash_probe.get();

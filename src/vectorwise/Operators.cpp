@@ -863,6 +863,107 @@ inline __attribute__((always_inline)) void compressStore64(void* dst, __mmask8 m
 } // namespace
 #endif
 
+#ifdef VW_JOIN_SEMI
+// WARNING: UNFINISHED / KNOWN BUGGY. VW_JOIN_SEMI is still being worked on
+// and is not always correct yet; do not use it for reported results.
+//
+// VW_JOIN_SEMI: a Hashjoin without build values only asks whether a probe
+// key exists in the build side (TPC-H Q18's orders join is marked "should be
+// a right semi join"; Q3, Q5 and Q9 have such joins too). Their build keys
+// are unique (primary keys or a group-by's output), so the inner join and
+// the semi join give the same rows; with duplicate build keys an inner join
+// would repeat probe rows and this would not. For one int32 key per side,
+// the build keys' range [min, max] gets an exact bitmap (built after the
+// hash table, at most 2^27 keys = 16 MB; Q3's customer keys ~19 KB, Q18's 57
+// orders over ~6M order keys ~750 KB); a probe vector is then filtered with
+// a range check and one bit test per key (AVX-512: 16 keys per step) into
+// probeMatches. The probe hash pass, directory, chains, key equality and
+// gather are all skipped. Other joins keep the hash path.
+void Hashjoin::semiRange() {
+   int64_t lo = INT64_MAX, hi = INT64_MIN;
+   for (auto& block : allocations) {
+      auto e = static_cast<char*>(block.first);
+      for (size_t i = 0; i < block.second; ++i, e += ht_entry_size) {
+         int32_t k;
+         std::memcpy(&k, e + semiKeyOffset, sizeof(k));
+         lo = std::min<int64_t>(lo, k);
+         hi = std::max<int64_t>(hi, k);
+      }
+   }
+   for (int64_t cur = shared.semiMin.load();
+        lo < cur && !shared.semiMin.compare_exchange_weak(cur, lo);) {}
+   for (int64_t cur = shared.semiMax.load();
+        hi > cur && !shared.semiMax.compare_exchange_weak(cur, hi);) {}
+}
+
+void Hashjoin::semiSetBits() {
+   uint32_t* bits = shared.semiBits.get();
+   const int64_t lo = shared.semiMin.load();
+   const bool concurrent = runtime::this_worker->group->size > 1;
+   for (auto& block : allocations) {
+      auto e = static_cast<char*>(block.first);
+      for (size_t i = 0; i < block.second; ++i, e += ht_entry_size) {
+         int32_t k;
+         std::memcpy(&k, e + semiKeyOffset, sizeof(k));
+         const uint64_t d = uint64_t(int64_t(k) - lo);
+         const uint32_t bit = uint32_t(1) << (d & 31);
+         if (concurrent)
+            __atomic_fetch_or(&bits[d >> 5], bit, __ATOMIC_RELAXED);
+         else
+            bits[d >> 5] |= bit;
+      }
+   }
+}
+
+pos_t Hashjoin::semiProbe(size_t n) {
+   const bool sel = semiProbeSel != nullptr;
+   const int32_t* keys = static_cast<const int32_t*>(
+       sel ? semiProbeSel->param2 : semiProbeDense->param1);
+   const pos_t* ksel =
+       sel ? static_cast<const pos_t*>(semiProbeSel->outputSelectionV) : nullptr;
+   const uint32_t* bits = shared.semiBits.get();
+   const int64_t lo = shared.semiMin.load();
+   const uint64_t span = uint64_t(shared.semiMax.load() - lo); // last offset
+   pos_t found = 0;
+   size_t i = 0;
+#if defined(__AVX512F__) && !defined(VW_POS_16)
+   if (lo >= INT32_MIN && lo <= INT32_MAX) {
+      const __m512i vlo = _mm512_set1_epi32(int32_t(lo));
+      const __m512i vspan = _mm512_set1_epi32(int32_t(span));
+      const __m512i b31 = _mm512_set1_epi32(31);
+      const __m512i one = _mm512_set1_epi32(1);
+      const __m512i lane =
+          _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+      for (; i + 16 <= n; i += 16) {
+         const __m512i pos =
+             sel ? _mm512_loadu_si512(ksel + i)
+                 : _mm512_add_epi32(_mm512_set1_epi32(int32_t(i)), lane);
+         const __m512i k = sel ? _mm512_i32gather_epi32(pos, keys, 4)
+                               : _mm512_loadu_si512(keys + i);
+         // key - min, as unsigned: out-of-range keys wrap above span
+         const __m512i d = _mm512_sub_epi32(k, vlo);
+         const __mmask16 in = _mm512_cmple_epu32_mask(d, vspan);
+         const __m512i w = _mm512_mask_i32gather_epi32(
+             _mm512_setzero_si512(), in, _mm512_srli_epi32(d, 5), bits, 4);
+         const __mmask16 hit = _mm512_mask_test_epi32_mask(
+             in, w, _mm512_sllv_epi32(one, _mm512_and_si512(d, b31)));
+         // output: probe position (join_sel: the selected position)
+         const __m512i c = _mm512_maskz_compress_epi32(hit, pos);
+         _mm512_mask_storeu_epi32(probeMatches + found,
+                                  (__mmask16)((1u << __builtin_popcount(hit)) - 1),
+                                  c);
+         found += __builtin_popcount(hit);
+      }
+   }
+#endif
+   for (; i < n; ++i) {
+      const pos_t p = sel ? ksel[i] : pos_t(i);
+      const uint64_t d = uint64_t(int64_t(keys[p]) - lo);
+      if (d <= span && (bits[d >> 5] >> (d & 31) & 1)) probeMatches[found++] = p;
+   }
+   return found;
+}
+#endif // VW_JOIN_SEMI
 
 #ifdef VW_JOIN_BLOOM
 // VW_JOIN_BLOOM: a Bloom filter owned by this VectorWise join, in front of
@@ -1456,10 +1557,40 @@ size_t Hashjoin::next() {
 #ifdef VW_JOIN_BLOOM
       if (shared.bloom) bloomInsert();
 #endif
+#ifdef VW_JOIN_SEMI
+      const bool semiCand = semiCandidate();
+      if (semiCand) semiRange();
+#endif
       consumed = true;
       barrier(); // wait for all threads to finish build phase
+#ifdef VW_JOIN_SEMI
+      if (semiCand) {
+         barrier([&]() {
+            shared.semiOn = false;
+            const int64_t lo = shared.semiMin.load(), hi = shared.semiMax.load();
+            if (hi >= lo && hi - lo < (int64_t(1) << 27)) {
+               shared.semiBits.reset(new uint32_t[((hi - lo) >> 5) + 1]());
+               shared.semiOn = true;
+            }
+         });
+         if (shared.semiOn) semiSetBits();
+         barrier();
+         semiActive = shared.semiOn;
+      }
+#endif
    }
    // --- lookup
+#ifdef VW_JOIN_SEMI
+   if (semiActive) {
+      // existence only: probe positions whose key is in the build bitmap
+      while (true) {
+         const auto n = right->next();
+         if (n == EndOfStream) return EndOfStream;
+         const pos_t found = semiProbe(n);
+         if (found) return found;
+      }
+   }
+#endif
    while (true) {
       if (cont.nextProbe >= cont.numProbes) {
          cont.numProbes = right->next();
