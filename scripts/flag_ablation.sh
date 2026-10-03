@@ -180,7 +180,7 @@ summarize() {
 
   # join.csv: join configs, speedup vs join_base (today's probe, same hash)
   { echo "compiler,query,join_config,median_ms,speedup_vs_base"
-    awk -F, '$3 ~ /^join_/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
+    awk -F, '$3 ~ /^(join_|nj_)/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
       END { n = split("join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom", jc, " ")
             for (k in cq) { b = m[k ",join_base"]
               for (i = 1; i <= n; i++) if ((k "," jc[i]) in m)
