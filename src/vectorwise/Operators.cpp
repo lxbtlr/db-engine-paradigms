@@ -1968,14 +1968,14 @@ void HashGroup::globalFindOrCreate(void* data, size_t n) {
 // totalKeySize three times per vector (Concat, Hash, Lookup) and to pack
 // keys even when there is one key column. What it switches on is fixed by
 // the plan for the operator's lifetime, so resolvePaths() picks, once:
-//   key step: one specialized loop per (key width, key mode, last-match)
+//   key step: one specialized loop per (key width, key mode)
 //     kSingle    one key column, no selection: the column is the packed key
 //     kSingleSel one key column read through its selection vector
 //     kPacked    compound keys, packed by per-column copy steps resolved once
 //   the loop hashes each key itself, walks the chain, and creates missing
 //   groups in one consecutive block with one buildScatter per vector
-//   (batched creation); runs of a repeated key reuse the previous entry when
-//   >= 70% of the last vector's rows repeated (last-match);
+//   (batched creation); with VW_GROUP_RUN_HEADS only the first row of each
+//   run of equal keys is looked up;
 //   aggregate step: all int64 SUM/COUNT in one pass (fused) when possible,
 //     else the aggregate expression list;
 //   global phase: one-pass find-or-create for memcmp-comparable keys;
@@ -1995,10 +1995,18 @@ void HashGroup::resolvePaths() {
                                : col.size == 4 ? &HashGroup::Concat_T<uint32_t>
                                : col.size == 8 ? &HashGroup::Concat_T<uint64_t>
                                                : &HashGroup::Concat_T<char*>);
+#ifdef VW_GROUP_RUN_HEADS
+   constexpr bool runs = true;
+   runHeads.resize(vecSize);
+   runFlags.resize(vecSize);
+   runEntries.resize(vecSize);
+#else
+   constexpr bool runs = false;
+#endif
 #define VW_KEY_STEP(T)                                                         \
-   (mode == kSingle      ? &HashGroup::keyStepAdaptive<T, kSingle>             \
-    : mode == kSingleSel ? &HashGroup::keyStepAdaptive<T, kSingleSel>          \
-                         : &HashGroup::keyStepAdaptive<T, kPacked>)
+   (mode == kSingle      ? &HashGroup::keyStepT<T, kSingle, runs>              \
+    : mode == kSingleSel ? &HashGroup::keyStepT<T, kSingleSel, runs>           \
+                         : &HashGroup::keyStepT<T, kPacked, runs>)
    switch (totalKeySize) {
    case 1: keyStep = VW_KEY_STEP(uint8_t); break;
    case 2: keyStep = VW_KEY_STEP(uint16_t); break;
@@ -2016,14 +2024,47 @@ void HashGroup::concatResolved(pos_t n) {
       (this->*concatSteps[c])(n, keyColumns[c]);
 }
 
-template <typename T, int Mode> void HashGroup::keyStepAdaptive(pos_t n) {
-   if (lastMatchOn)
-      keyStepT<T, Mode, true>(n);
-   else
-      keyStepT<T, Mode, false>(n);
+#if defined(VW_GROUP_RUN_HEADS) && defined(__AVX512BW__) &&                   \
+    defined(__AVX512VL__) && !defined(VW_POS_16)
+namespace {
+/// lanes of 16 consecutive keys at cur that differ from the 16 at prv
+/// (= cur - one key)
+template <typename T>
+inline __mmask16 runHeadMask16(const char* cur, const char* prv) {
+   if constexpr (sizeof(T) == 1) {
+      return _mm_cmpneq_epi8_mask(
+          _mm_loadu_si128(reinterpret_cast<const __m128i*>(cur)),
+          _mm_loadu_si128(reinterpret_cast<const __m128i*>(prv)));
+   } else if constexpr (sizeof(T) == 2) {
+      return _mm256_cmpneq_epi16_mask(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(cur)),
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(prv)));
+   } else if constexpr (sizeof(T) == 4) {
+      return _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(cur),
+                                      _mm512_loadu_si512(prv));
+   } else {
+      const __mmask8 lo = _mm512_cmpneq_epi64_mask(_mm512_loadu_si512(cur),
+                                                   _mm512_loadu_si512(prv));
+      const __mmask8 hi = _mm512_cmpneq_epi64_mask(
+          _mm512_loadu_si512(cur + 64), _mm512_loadu_si512(prv + 64));
+      return __mmask16(lo | (unsigned(hi) << 8));
+   }
 }
+} // namespace
+#define VW_RUN_HEADS_SIMD 1
+#endif
 
-template <typename T, int Mode, bool LastMatch>
+// VW_GROUP_RUN_HEADS (Runs): rows that repeat the previous row's key reuse
+// its entry, without a data-dependent branch or an adaptive switch (it
+// replaces VW_GROUP_LAST_MATCH, which branched per row and switched itself
+// on at >= 70% repeats per vector, a threshold fitted between TPC-H Q1 and
+// Q18). Sorted or clustered keys (Q18: lineitem by l_orderkey) and Q1's
+// 64% repeats both gain. Pass 1 writes the run heads, the rows whose key differs
+// from the previous row's (AVX-512: 16 keys against the 16 before them, the
+// head positions register-compressed; else a branch-free scalar loop). Pass 2
+// is the lookup / create below, for heads only. Pass 3 gives every row its
+// run's entry, branch-free. The first row of a vector is always a head.
+template <typename T, int Mode, bool Runs>
 void HashGroup::keyStepT(pos_t n) {
    constexpr bool wide = std::is_same_v<T, char*>;
    const uint32_t keySize = wide ? totalKeySize : sizeof(T);
@@ -2064,24 +2105,56 @@ void HashGroup::keyStepT(pos_t n) {
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
    EntryHeader** __restrict__ matches = preAggregation.htMatches;
    const size_t entrySize = preAggregation.ht_entry_size;
-   pos_t created = 0, repeats = 0;
+   pos_t created = 0;
    EntryHeader* firstNew = nullptr;
-   EntryHeader* last = nullptr;
-   const char* prev = nullptr;
-   for (pos_t i = 0; i < n; ++i) {
+   pos_t nLookups = n;
+#ifdef VW_GROUP_RUN_HEADS
+   pos_t* __restrict__ heads = runHeads.data();
+   uint8_t* __restrict__ flags = runFlags.data();
+   if constexpr (Runs) {
+      // pass 1: run heads and head flags; heads[cnt] = i is written for every
+      // row and kept only where the key changed, so the scalar loop has no
+      // branch on data
+      pos_t cnt = 0, i = 0;
+      if (n) {
+         flags[0] = 1;
+         heads[cnt++] = i++;
+      }
+#ifdef VW_RUN_HEADS_SIMD
+      if constexpr (!wide && Mode != kSingleSel) {
+         const __m512i iota = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                                                10, 11, 12, 13, 14, 15);
+         for (; i + 16 <= n; i += 16) {
+            const char* cur = base + size_t(i) * sizeof(T);
+            const __mmask16 m = runHeadMask16<T>(cur, cur - sizeof(T));
+            const __m512i idx =
+                _mm512_add_epi32(_mm512_set1_epi32(int(i)), iota);
+            const unsigned k = __builtin_popcount(m);
+            _mm512_mask_storeu_epi32(heads + cnt, __mmask16((1u << k) - 1),
+                                     _mm512_maskz_compress_epi32(m, idx));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(flags + i),
+                             _mm_maskz_set1_epi8(m, 1));
+            cnt += k;
+         }
+      }
+#endif
+      for (; i < n; ++i) {
+         const bool head = !sameKey(keyAt(i), keyAt(i - 1));
+         flags[i] = head;
+         heads[cnt] = i;
+         cnt += head;
+      }
+      nLookups = cnt;
+   }
+#endif
+   // pass 2 (Runs: heads only)
+   for (pos_t j = 0; j < nLookups; ++j) {
+      pos_t i = j;
+#ifdef VW_GROUP_RUN_HEADS
+      if constexpr (Runs) i = heads[j];
+#endif
       const char* kp = keyAt(i);
       EntryHeader* entry;
-      const bool repeat = prev && sameKey(kp, prev);
-      prev = kp;
-      if constexpr (LastMatch) {
-         if (repeat) {
-            ++repeats;
-            matches[i] = last;
-            continue;
-         }
-      } else {
-         repeats += repeat;
-      }
       const hash_t hash = hashOf(kp);
       for (entry = ht.find_chain(hash); entry; entry = entry->next)
          if (entry->hash == hash &&
@@ -2108,13 +2181,26 @@ void HashGroup::keyStepT(pos_t n) {
          ++preAggregation.entries_in_ht;
       }
       matches[i] = entry;
-      last = entry;
+#ifdef VW_GROUP_RUN_HEADS
+      if constexpr (Runs) runEntries[j] = entry;
+#endif
    }
+#ifdef VW_GROUP_RUN_HEADS
+   if constexpr (Runs) {
+      // pass 3: row i belongs to run k - 1 after adding its head flag; the
+      // loop-carried chain is one add, the loads do not depend on each other
+      EntryHeader* const* __restrict__ runEntry = runEntries.data();
+      pos_t k = 0;
+      for (pos_t i = 0; i < n; ++i) {
+         k += flags[i];
+         matches[i] = runEntry[k - 1];
+      }
+   }
+#endif
    if (created) {
       preAggregation.scatterStart = firstNew;
       preAggregation.buildScatter.evaluate(created);
    }
-   if (n > 1) lastMatchOn = size_t(repeats) * 10 >= size_t(n - 1) * 7;
 }
 #endif // VW_GROUP_DISPATCH
 
@@ -2205,11 +2291,7 @@ template <typename T> void HashGroup::Hash_T(pos_t n) {
 // LOOKUP
 void HashGroup::Lookup(pos_t n) {
    switch (totalKeySize) {
-#ifdef VW_GROUP_LAST_MATCH
-#define VW_LOOKUP(T) lastMatchOn ? Lookup_T<T, true>(n) : Lookup_T<T, false>(n)
-#else
 #define VW_LOOKUP(T) Lookup_T<T>(n)
-#endif
       case 1: VW_LOOKUP(uint8_t); break;
       case 2: VW_LOOKUP(uint16_t); break;
       case 4: VW_LOOKUP(uint32_t); break;
@@ -2219,11 +2301,7 @@ void HashGroup::Lookup(pos_t n) {
    }
 }
 
-#ifdef VW_GROUP_LAST_MATCH
-template <typename T, bool LastMatch> void HashGroup::Lookup_T(pos_t n) {
-#else
 template <typename T> void HashGroup::Lookup_T(pos_t n) {
-#endif
    uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
    char* __restrict__ keys = VW_GROUP_KEY_DATA;
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
@@ -2241,36 +2319,7 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
    EntryHeader* firstNew = nullptr;
    const size_t entrySize = preAggregation.ht_entry_size;
 #endif
-#ifdef VW_GROUP_LAST_MATCH
-   // Sorted or clustered group keys (TPC-H Q18: lineitem by l_orderkey, ~75%
-   // of rows repeat the previous key) find the previous row's entry again.
-   // Compare with the previous packed key first and reuse its entry: no
-   // directory load, chain walk or key compare (and with VW_FUSE_HASH no
-   // hash) for those rows. The extra branch mispredicts on short runs (Q1:
-   // 64% repeats, +12-20% time), so each vector counts its repeats and the
-   // next one uses the check only at >= 70%.
-   EntryHeader* last = nullptr;
-   pos_t repeats = 0;
-#endif
    for (pos_t i = 0; i < n; i++) {
-#ifdef VW_GROUP_LAST_MATCH
-      EntryHeader* entry;
-      {
-         const bool repeat =
-             i > 0 && std::memcmp(keys + i * keySize, keys + (i - 1) * keySize,
-                                  keySize) == 0;
-         if constexpr (LastMatch) {
-            if (repeat) {
-               ++repeats;
-               entry = last;
-               goto found;
-            }
-         } else {
-            repeats += repeat;
-         }
-      }
-      {
-#endif
 #ifdef VW_FUSE_HASH
       hash_t hash;
       if constexpr (std::is_same_v<T, char*>) {
@@ -2283,11 +2332,7 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
 #else
       hash_t hash = hashes[i];
 #endif
-#ifdef VW_GROUP_LAST_MATCH
-      entry = ht.find_chain(hash);
-#else
       EntryHeader* entry = ht.find_chain(hash);
-#endif
       for (; entry != nullptr; entry = entry->next) {
          if (entry->hash == hash) {
             char* entry_key = reinterpret_cast<char*>(entry + 1);
@@ -2362,14 +2407,8 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
 #endif
       }
 #endif // VW_GROUP_BATCH_CREATE
-#ifdef VW_GROUP_LAST_MATCH
-      }
-#endif
 
       found:;
-#ifdef VW_GROUP_LAST_MATCH
-      last = entry;
-#endif
 #ifdef VW_GROUP_AGGR
       pos_t next = entry->group->size;
       entry->group->pos[next] = i;
@@ -2389,9 +2428,6 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
       preAggregation.scatterStart = firstNew;
       preAggregation.buildScatter.evaluate(created);
    }
-#endif
-#ifdef VW_GROUP_LAST_MATCH
-   if (n > 1) lastMatchOn = size_t(repeats) * 10 >= size_t(n - 1) * 7;
 #endif
 }
 } // namespace vectorwise

@@ -547,14 +547,7 @@ class HashGroup : public UnaryOperator {
    template <typename T> void Hash_T(pos_t n);
 
    void Lookup(pos_t n);
-#ifdef VW_GROUP_LAST_MATCH
-   template <typename T, bool LastMatch> void Lookup_T(pos_t n);
-   /// use the previous-key check for the next vector (>= 70% of this
-   /// vector's rows repeated their predecessor's key)
-   bool lastMatchOn = true;
-#else
    template <typename T> void Lookup_T(pos_t n);
-#endif
 #ifdef VW_GROUP_DISPATCH
    /// VW_GROUP_DISPATCH: the pre-aggregation path is chosen once per operator
    /// from what the plan fixes for its lifetime (number of key columns, key
@@ -567,8 +560,15 @@ class HashGroup : public UnaryOperator {
    std::vector<void (HashGroup::*)(pos_t, const KeyColumn&)> concatSteps;
    bool pathsResolved = false;
    void resolvePaths();
-   template <typename T, int Mode, bool LastMatch> void keyStepT(pos_t n);
-   template <typename T, int Mode> void keyStepAdaptive(pos_t n);
+   template <typename T, int Mode, bool Runs> void keyStepT(pos_t n);
+#ifdef VW_GROUP_RUN_HEADS
+   /// VW_GROUP_RUN_HEADS: per vector, the positions where the key differs
+   /// from the previous row's (run heads), a 0/1 head flag per row, and each
+   /// run's entry; the lookup runs only for heads
+   std::vector<pos_t> runHeads;
+   std::vector<uint8_t> runFlags;
+   std::vector<EntryHeader*> runEntries;
+#endif
    void concatResolved(pos_t n);
    void aggEvaluate(pos_t n) { updateGroups.evaluate(n); }
 #endif

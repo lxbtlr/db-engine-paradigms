@@ -205,15 +205,6 @@ if(VW_GROUP_GLOBAL_DIRECT)
   message(STATUS "Building with VW_GROUP_GLOBAL_DIRECT")
 endif()
 
-# VW_GROUP_LAST_MATCH: HashGroup pre-aggregation reuses the previous row's
-# entry when its packed key repeats (sorted or clustered keys, TPC-H Q18),
-# skipping the lookup; with VW_FUSE_HASH also the hash.
-OPTION(VW_GROUP_LAST_MATCH "Previous-key entry reuse in VectorWise HashGroup lookup" OFF)
-if(VW_GROUP_LAST_MATCH)
-  ADD_DEFINITIONS(-DVW_GROUP_LAST_MATCH=1)
-  message(STATUS "Building with VW_GROUP_LAST_MATCH")
-endif()
-
 # VW_GROUP_NO_CONCAT: a group-by on one dense 1/2/4/8-byte key hashes and
 # compares the key column in place instead of copying it into packed keys.
 OPTION(VW_GROUP_NO_CONCAT "Skip key packing for single dense keys in VectorWise HashGroup" OFF)
@@ -233,20 +224,34 @@ endif()
 # VW_GROUP_DISPATCH: HashGroup resolves its code path once per operator from
 # plan-fixed facts (key columns, key width, selection, aggregates) and runs
 # specialized per-vector loops: no Concat for single keys, hash fused into
-# the lookup, batched group creation, adaptive previous-key reuse, fused
-# SUM/COUNT update, one-pass global find-or-create, inline spill copy. One
-# switch for what VW_GROUP_BATCH_CREATE, VW_FUSE_HASH, VW_GROUP_LAST_MATCH,
-# VW_GROUP_NO_CONCAT, VW_GROUP_GLOBAL_DIRECT, VW_SPILL_WORD_COPY and
-# VW_AGGR_FUSED do separately (it compiles in their supporting code).
+# the lookup, batched group creation, fused SUM/COUNT update, one-pass global
+# find-or-create, inline spill copy. One switch for what
+# VW_GROUP_BATCH_CREATE, VW_FUSE_HASH, VW_GROUP_NO_CONCAT,
+# VW_GROUP_GLOBAL_DIRECT, VW_SPILL_WORD_COPY and VW_AGGR_FUSED do separately
+# (it compiles in their supporting code). Run reuse is VW_GROUP_RUN_HEADS.
 OPTION(VW_GROUP_DISPATCH "Plan-resolved specialized code paths in VectorWise HashGroup" OFF)
 if(VW_GROUP_DISPATCH)
   if(VW_GROUP_AGGR)
     message(FATAL_ERROR "VW_GROUP_DISPATCH does not support VW_GROUP_AGGR")
   endif()
   ADD_DEFINITIONS(-DVW_GROUP_DISPATCH=1 -DVW_GROUP_BATCH_CREATE=1
-                  -DVW_GROUP_GLOBAL_DIRECT=1 -DVW_GROUP_LAST_MATCH=1
-                  -DVW_SPILL_WORD_COPY=1 -DVW_AGGR_FUSED=1)
+                  -DVW_GROUP_GLOBAL_DIRECT=1 -DVW_SPILL_WORD_COPY=1
+                  -DVW_AGGR_FUSED=1)
   message(STATUS "Building with VW_GROUP_DISPATCH")
+endif()
+
+# VW_GROUP_RUN_HEADS (needs VW_GROUP_DISPATCH): replaces last-match's
+# adaptive per-row check with a branch-free run pass: find the rows whose key
+# differs from the previous row's (AVX-512BW/VL: 16 keys per compare and
+# register compress; scalar otherwise), look up only those, copy each run's
+# entry to its rows. No adaptive threshold.
+OPTION(VW_GROUP_RUN_HEADS "Branch-free run-head lookup in VectorWise HashGroup (needs VW_GROUP_DISPATCH)" OFF)
+if(VW_GROUP_RUN_HEADS)
+  if(NOT VW_GROUP_DISPATCH)
+    message(FATAL_ERROR "VW_GROUP_RUN_HEADS replaces VW_GROUP_DISPATCH's key loop; enable VW_GROUP_DISPATCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_RUN_HEADS=1)
+  message(STATUS "Building with VW_GROUP_RUN_HEADS")
 endif()
 
 OPTION(VW_AGGR_FUSED "Fused multi-aggregate update in VectorWise HashGroup" OFF)
