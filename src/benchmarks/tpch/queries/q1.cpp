@@ -383,6 +383,32 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
    Select(Expression().addOp(conf.sel_less_equal_int32_t_col_int32_t_val(),
                              Buffer(sel_date, sizeof(pos_t)),
                              Column(lineitem, "l_shipdate"), Value(&r->c1)));
+#ifdef VW_PROJ_DENSE
+   // VW_PROJ_DENSE: every position up to the last selected one, contiguous;
+   // disc_price and charge are indexed by position and read through sel_date
+   // by the group-by below
+   Project()
+       .addExpression(
+           Expression()
+               .addOp(primitives::proj_dense_minus_int64_t_val_int64_t_col,
+                      Buffer(sel_date),
+                      Buffer(result_proj_minus, sizeof(int64_t)),
+                      Value(&r->one), Column(lineitem, "l_discount"))
+               .addOp(primitives::proj_dense_multiplies_int64_t_col_int64_t_col,
+                      Buffer(sel_date), Buffer(disc_price, sizeof(int64_t)),
+                      Column(lineitem, "l_extendedprice"),
+                      Buffer(result_proj_minus, sizeof(int64_t))))
+       .addExpression(
+           Expression()
+               .addOp(primitives::proj_dense_plus_int64_t_col_int64_t_val,
+                      Buffer(sel_date),
+                      Buffer(result_proj_plus, sizeof(int64_t)),
+                      Column(lineitem, "l_tax"), Value(&r->one))
+               .addOp(primitives::proj_dense_multiplies_int64_t_col_int64_t_col,
+                      Buffer(sel_date), Buffer(charge, sizeof(int64_t)),
+                      Buffer(disc_price, sizeof(int64_t)),
+                      Buffer(result_proj_plus, sizeof(int64_t))));
+#else
    Project()
        .addExpression(
            Expression()
@@ -404,6 +430,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                       Buffer(charge, sizeof(int64_t)),
                       Buffer(disc_price, sizeof(int64_t)),
                       Buffer(result_proj_plus, sizeof(int64_t))));
+#endif
    HashGroup()
        .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
        .addKey(Column(lineitem, "l_returnflag"), Buffer(sel_date),
@@ -429,6 +456,20 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                primitives::gather_val_Char_1_col,
                Buffer(linestatus, sizeof(Char_1)))
        .padToAlign(sizeof(types::Numeric<12, 4>))
+#ifdef VW_PROJ_DENSE
+       .addValue(Buffer(disc_price), Buffer(sel_date),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_sel_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_disc_price, sizeof(types::Numeric<12, 4>)))
+       .addValue(Buffer(charge), Buffer(sel_date),
+                 primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_sel_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
+#else
        .addValue(Buffer(disc_price), primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
@@ -439,6 +480,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQuery() {
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
                  Buffer(sum_charge, sizeof(types::Numeric<12, 4>)))
+#endif
        .addValue(Column(lineitem, "l_quantity"), Buffer(sel_date),
                  primitives::aggr_init_plus_int64_t_col,
                  primitives::aggr_sel_plus_int64_t_col,

@@ -254,6 +254,17 @@ if(VW_GROUP_RUN_HEADS)
   message(STATUS "Building with VW_GROUP_RUN_HEADS")
 endif()
 
+# VW_PROJ_DENSE (prototype, TPC-H Q1 plan only): projections compute every
+# position up to the last selected row with contiguous (AVX-512) loads
+# instead of gathering through the selection; results are position-indexed
+# and the group-by reads them through the selection. Only total operations
+# (plus, minus, multiplies), so computing unselected rows cannot trap.
+OPTION(VW_PROJ_DENSE "Dense projections over the selected span (TPC-H Q1 prototype)" OFF)
+if(VW_PROJ_DENSE)
+  ADD_DEFINITIONS(-DVW_PROJ_DENSE=1)
+  message(STATUS "Building with VW_PROJ_DENSE")
+endif()
+
 OPTION(VW_AGGR_FUSED "Fused multi-aggregate update in VectorWise HashGroup" OFF)
 if(VW_AGGR_FUSED)
   if(VW_GROUP_AGGR)

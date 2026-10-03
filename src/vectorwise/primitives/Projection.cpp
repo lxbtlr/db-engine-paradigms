@@ -144,5 +144,74 @@ pos_t proj8_multiplies_sel_int64_t_col_int64_t_col_impl(pos_t n, pos_t* RES inSe
 F3 proj8_multiplies_int64_t_col_int64_t_col = (F3)&proj8_multiplies_int64_t_col_int64_t_col_impl;
 F4 proj8_multiplies_sel_int64_t_col_int64_t_col = (F4)&proj8_multiplies_sel_int64_t_col_int64_t_col_impl;
 #endif
+
+#ifdef VW_PROJ_DENSE
+// VW_PROJ_DENSE: compute every position up to the last selected one with
+// contiguous loads instead of gathering through the selection. Wasted work on
+// unselected rows is bounded by one vector; plus, minus and multiplies cannot
+// trap, so computing them on rows the selection dropped is safe. AVX-512
+// (vpaddq / vpsubq, vpmullq with DQ) when available, else a scalar loop.
+namespace {
+inline pos_t denseSpan(pos_t n, const pos_t* RES inSel) {
+   return n ? inSel[n - 1] + 1 : 0;
+}
+} // namespace
+
+pos_t proj_dense_minus_int64_t_val_int64_t_col_impl(pos_t n, pos_t* RES inSel,
+                                                    int64_t* RES result,
+                                                    int64_t* RES param1,
+                                                    int64_t* RES param2) {
+   const pos_t m = denseSpan(n, inSel);
+   const int64_t c = *param1;
+   pos_t i = 0;
+#ifdef __AVX512F__
+   const __m512i vc = _mm512_set1_epi64(c);
+   for (; i + 8 <= m; i += 8)
+      _mm512_storeu_si512(result + i,
+                          _mm512_sub_epi64(vc, _mm512_loadu_si512(param2 + i)));
+#endif
+   for (; i < m; ++i) result[i] = c - param2[i];
+   return n;
+}
+
+pos_t proj_dense_plus_int64_t_col_int64_t_val_impl(pos_t n, pos_t* RES inSel,
+                                                   int64_t* RES result,
+                                                   int64_t* RES param1,
+                                                   int64_t* RES param2) {
+   const pos_t m = denseSpan(n, inSel);
+   const int64_t c = *param2;
+   pos_t i = 0;
+#ifdef __AVX512F__
+   const __m512i vc = _mm512_set1_epi64(c);
+   for (; i + 8 <= m; i += 8)
+      _mm512_storeu_si512(result + i,
+                          _mm512_add_epi64(_mm512_loadu_si512(param1 + i), vc));
+#endif
+   for (; i < m; ++i) result[i] = param1[i] + c;
+   return n;
+}
+
+pos_t proj_dense_multiplies_int64_t_col_int64_t_col_impl(
+    pos_t n, pos_t* RES inSel, int64_t* RES result, int64_t* RES param1,
+    int64_t* RES param2) {
+   const pos_t m = denseSpan(n, inSel);
+   pos_t i = 0;
+#ifdef __AVX512DQ__
+   for (; i + 8 <= m; i += 8)
+      _mm512_storeu_si512(result + i,
+                          _mm512_mullo_epi64(_mm512_loadu_si512(param1 + i),
+                                             _mm512_loadu_si512(param2 + i)));
+#endif
+   for (; i < m; ++i) result[i] = param1[i] * param2[i];
+   return n;
+}
+
+F4 proj_dense_minus_int64_t_val_int64_t_col =
+    (F4)&proj_dense_minus_int64_t_val_int64_t_col_impl;
+F4 proj_dense_plus_int64_t_col_int64_t_val =
+    (F4)&proj_dense_plus_int64_t_col_int64_t_val_impl;
+F4 proj_dense_multiplies_int64_t_col_int64_t_col =
+    (F4)&proj_dense_multiplies_int64_t_col_int64_t_col_impl;
+#endif
 }
 }
