@@ -1020,6 +1020,36 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|aarch64|arm64|ARM64")
     )
 endif()
 
+# run_neonbench: the engine's AVX-512 kernels against their aarch64 options
+# (scalar engine code, SIMDe translation, NEON, SVE); see NEON_PORT_STUDY.md.
+# run_neonbench_autovec is the same source without -fno-tree-vectorize:
+# SIMDe's generic fallbacks lean on the vectorizer that AUTOVECTORIZE=OFF
+# turns off for the engine.
+add_executable(run_neonbench
+  src/benchmarks/primitives/neonbench.cpp
+  )
+target_include_directories(run_neonbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
+    PRIVATE src)
+target_link_libraries(run_neonbench vectorwise common ${TBB_LIBRARIES})
+add_executable(run_neonbench_autovec
+  src/benchmarks/primitives/neonbench.cpp
+  )
+target_include_directories(run_neonbench_autovec PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
+    PRIVATE src)
+target_compile_definitions(run_neonbench_autovec PRIVATE NEONBENCH_AUTOVEC=1)
+target_compile_options(run_neonbench_autovec PRIVATE -ftree-vectorize -ftree-slp-vectorize)
+target_link_libraries(run_neonbench_autovec vectorwise common ${TBB_LIBRARIES})
+
+# run_widthbench (aarch64): sustained instructions / uops per cycle, to check
+# llvm-mca's dispatch width for the core (src/benchmarks/hardware/widthbench.cpp)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  add_executable(run_widthbench src/benchmarks/hardware/widthbench.cpp)
+endif()
+
 # run_compressbench: memory side effects of masked / compress stores with mask 0
 add_executable(run_compressbench
   src/benchmarks/primitives/compressbench.cpp
