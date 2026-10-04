@@ -156,22 +156,6 @@ if(VW_CRC32_VPCLMUL)
 endif()
 
 
-
-OPTION(HYPER_Q1_DIRECT_AGG "Typer Q1: direct-mapped aggregation bypassing hash table" OFF)
-if(HYPER_Q1_DIRECT_AGG)
-  ADD_DEFINITIONS(-DHYPER_Q1_DIRECT_AGG=1)
-  message(STATUS "Building with HYPER_Q1_DIRECT_AGG")
-endif(HYPER_Q1_DIRECT_AGG)
-
-OPTION(HYPER_Q1_SIMD "Typer Q1: AVX-512 fused scan+aggregate loop (requires HYPER_Q1_DIRECT_AGG)" OFF)
-if(HYPER_Q1_SIMD)
-  if(NOT HYPER_Q1_DIRECT_AGG)
-    message(FATAL_ERROR "HYPER_Q1_SIMD requires HYPER_Q1_DIRECT_AGG")
-  endif()
-  ADD_DEFINITIONS(-DHYPER_Q1_SIMD=1)
-  message(STATUS "Building with HYPER_Q1_SIMD")
-endif(HYPER_Q1_SIMD)
-
 OPTION(VW_GROUP_AGGR "Perform group-wise GROUP BY aggregation for VectorWise" OFF)
 if(VW_GROUP_AGGR)
   ADD_DEFINITIONS(-DVW_GROUP_AGGR=1)

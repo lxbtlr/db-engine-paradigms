@@ -62,7 +62,7 @@ Because of the context above (hand-built plans, fixed parameters), no build of t
 | `VW_Q9_FIELD_ORDER` | names Q9; reorders one join's payload | **over-tuned (query)** | **TPC-invalid as is** (unused in recommended configs) | delete it, or have the builder sort payload fields by alignment (general `VW_JOIN_ALIGN_FIELDS`) |
 | `VW_JOIN_TWOPHASE_MIN_SLOTS` | 4096 slots, justified by Q18's 57-key build | **note** | OK | derive from L1/L2 size |
 | other older VW options | plan facts or hardware choices | none found | OK | none |
-| `HYPER_Q1_DIRECT_AGG` / `_SIMD` (not VW) | hard-coded `l_returnflag ∈ {A,N,R}` | **over-tuned (query + data)** | **TPC-invalid** | out of VW scope; remove or guard with a domain check and fallback |
+| `HYPER_Q1_DIRECT_AGG` / `_SIMD` (not VW) | hard-coded `l_returnflag ∈ {A,N,R}` | **over-tuned (query + data)** | **TPC-invalid** | **removed** (both options and their `q1.cpp` code) |
 
 ---
 

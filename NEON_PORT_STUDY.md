@@ -93,7 +93,6 @@ Each site's guard requires x86 AVX-512, so an aarch64 build compiles the `#else`
 | `Operators.cpp:918` `semiProbe` | same | `VW_JOIN_SEMI` | Q3, Q9, Q18 |
 | `Operators.cpp:1259` `joinNewFirstPass` | `__AVX512F__ && HASH_SIZE 64 && !VW_POS_16` | `VW_NEW_JOIN` | Q3, Q5, Q9 |
 | `Operators.cpp:2027` `runHeadMask16` | `__AVX512BW__ && __AVX512VL__` | `VW_GROUP_RUN_HEADS` | Q1, Q18 |
-| `q1.cpp:14` Typer fused Q1 loop | `__AVX512F__ && DQ && VL` | `HYPER_Q1_SIMD` | Q1 (Hyper) |
 | `SimdAggr.hpp:32` grouped SUM kernels | `__AVX512F__ && VL && BW` | — (only `run_aggrbench`) | — |
 
 Two more facts about the aarch64 build:
@@ -280,7 +279,7 @@ What the table shows:
 2. **Run heads.** `Operators.cpp:2027` gains a `VW_HAVE_NEON` branch that calls `neon::run_heads<T>` for 2- and 4-byte keys in modes `kSingle` / `kPacked`. 8-byte keys and `kSingleSel` keep the scalar loop.
 3. **Dense projections.** In `Projection.cpp:159`, minus and plus get a NEON loop before the scalar tail (as the ymm loop sits after the zmm loop). Multiply gets an SVE loop under `VW_HAVE_SVE` and stays scalar on NEON-only targets.
 4. **Join kernels.** The changes are the scalar reworks from §5. They apply to every ISA, so they are new options or changes to the `#else` paths, measured on burrata first.
-5. **SVE set (V1/V2 only, no machine yet).** Gathered selection, dense multiply, and Typer's `HYPER_Q1_SIMD`, whose cost is 64-bit multiplies.
+5. **SVE set (V1/V2 only, no machine yet).** Gathered selection and dense multiply. (Typer's `HYPER_Q1_SIMD` was removed as TPC-invalid; see `AUDIT_TPC_OPTIONS.md`.)
 6. **Tests.** `src/test/vectorwise/simd_selection.cpp` and `simd_hash.cpp` are differential tests against the scalar templates. They gate on `VW_HAVE_SIMD_SEL`; an aarch64 build needs the same tests gated on `VW_HAVE_NEON`. They run under `qemu-aarch64 build/test_all`.
 
 ## 7. Running it on the target

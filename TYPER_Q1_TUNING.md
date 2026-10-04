@@ -1,5 +1,7 @@
 # Typer (HyPer-style) TPC-H Q1 Tuning
 
+> **Removed (2026-10-04).** `HYPER_Q1_DIRECT_AGG` and `HYPER_Q1_SIMD` no longer exist. They hard-coded the `l_returnflag` domain {A, N, R} (any other value landed in R's slot), which `AUDIT_TPC_OPTIONS.md` found TPC-invalid. This document is kept as the record of the experiment.
+
 ## Change ladder
 
 | Step | CMake option | Typer change | Tectorwise counterpart |

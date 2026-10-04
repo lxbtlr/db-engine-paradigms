@@ -659,7 +659,6 @@ inline pos_t sve_proj_dense_multiplies(pos_t n, pos_t* RES inSel,
 //                                                                 group prefetch
 // Operators.cpp:346,658 joinAllSIMD/SelSIMD  VW_JOIN_SIMD         SCALAR (use joinAllParallel /
 //                                                                 VW_JOIN_TWOPHASE)
-// q1.cpp:14 HYPER_Q1_SIMD (Typer)            HYPER_Q1_SIMD        SVE (64-bit multiplies)
 // SimdAggr.hpp (bench only)                  -                    not wired on x86 either
 //=============================================================================
 #ifdef VW_HAVE_NEON
