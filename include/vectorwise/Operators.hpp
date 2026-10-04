@@ -348,6 +348,25 @@ class Hashjoin : public BinaryOperator {
  public:
 #endif
 
+#ifdef VW_JOIN_DISPATCH
+   /// plan fact recorded by QueryBuilder::addBuildKey: the build keys are
+   /// read through a selection vector, i.e. the build side is a filtered
+   /// subset of its input (the Bloom filter's precondition)
+   bool buildKeysSelected = false;
+
+ private:
+   /// VW_JOIN_DISPATCH: the probe path, resolved once at the end of the
+   /// build from plan facts and the build summary (resolvePaths); next()
+   /// then runs probeStep and join per probe vector without re-deciding
+   void (Hashjoin::*probeStep)(size_t n) = nullptr;
+   void resolvePaths();
+   void stepHash(size_t n);
+   void stepHashBloom(size_t n);
+   void stepFusedBloom(size_t n);
+   void stepFusedNew(size_t n);
+
+ public:
+#endif
    virtual size_t next() override;
    ~Hashjoin();
 };
@@ -498,6 +517,21 @@ class HashGroup : public UnaryOperator {
    /// Gather primitives to produce vectors after
    /// global grouping is done
    Aggregates gatherGroups;
+#ifdef VW_GROUP_HAVING
+   /// VW_GROUP_HAVING (HashGroupBuilder::having): an output block first
+   /// gathers the condition's input column (havingInput), evaluates the
+   /// condition into havingSel, and gathers the other output columns only
+   /// for the passing groups (gatherGroups, re-pointed at havingSel); the
+   /// input column is then compacted in place. Blocks with no passing group
+   /// are skipped.
+   std::unique_ptr<Op> havingInput;
+   std::unique_ptr<Expression> havingCondition;
+   pos_t* havingSel = nullptr;
+   void* havingInputTarget = nullptr;
+   size_t havingInputSize = 0;
+   /// output element size of each gatherGroups op, in order
+   std::vector<size_t> gatherSizes;
+#endif
 
    struct Continuation
    /// state for control flow

@@ -7,6 +7,8 @@
 #include "vectorwise/SimdCrc.hpp"
 #include "vectorwise/SimdHash.hpp"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <tuple>
@@ -1514,6 +1516,66 @@ pos_t Hashjoin::joinBoncz() {
    return 0;
 }
 
+#ifdef VW_JOIN_DISPATCH
+// VW_JOIN_DISPATCH: without it, next() re-decides per probe vector whether
+// the probe hash is fused (fusedReady), whether the Bloom filter runs (its
+// adaptive skip counter) and whether the join is VW_NEW_JOIN (pointer
+// compares). Everything those depend on is fixed once the build is done:
+//   plan facts       semi marker, key count/types (semiCandidate,
+//                    fusedReady), build keys through a selection
+//                    (buildKeysSelected), the join function
+//   build summary    build rows (filter allocated iff >= MIN_KEYS on a
+//                    filtered build side), key range (semi bitmap size)
+// so resolvePaths() picks the per-vector probe step once:
+//   fused + filter   stepFusedBloom  hash in registers, filter, survivors
+//   fused + new join stepFusedNew    joinNewFirstPass hashes (mode B)
+//   filter           stepHashBloom   probe hash expression, then filter
+//   neither          stepHash        probe hash expression
+// The filter stays on for the whole operator: no data-dependent switch.
+// semiActive (the bitmap path) is decided by the build, as without dispatch.
+void Hashjoin::resolvePaths() {
+   bloomOn = false;
+   fusedCompute = false;
+   const bool bloom = shared.bloom != nullptr;
+   const bool fused = fusedReady();
+#ifdef VW_NEW_JOIN
+   const bool newJoin = join == &Hashjoin::joinAllNew || join == &Hashjoin::joinSelNew;
+#else
+   const bool newJoin = false;
+#endif
+   if (fused && bloom) {
+      probeStep = &Hashjoin::stepFusedBloom;
+   } else if (fused && newJoin) {
+      probeStep = &Hashjoin::stepFusedNew;
+      fusedCompute = true;
+   } else if (bloom) {
+      probeStep = &Hashjoin::stepHashBloom;
+   } else {
+      probeStep = &Hashjoin::stepHash;
+   }
+   // VW_DISPATCH_TRACE=1: one line per join (worker 0) with what was chosen
+   static const bool trace = std::getenv("VW_DISPATCH_TRACE") != nullptr;
+   if (trace && runtime::this_worker->worker_id == 0)
+      std::fprintf(stderr,
+                   "vw join %p: build=%zu keysSelected=%d semi=%d semiBitmap=%d "
+                   "bloom=%d fused=%d newJoin=%d step=%s\n",
+                   static_cast<void*>(this), size_t(shared.found.load()),
+                   int(buildKeysSelected), int(semiJoin), int(semiActive),
+                   int(bloom), int(fused), int(newJoin),
+                   probeStep == &Hashjoin::stepFusedBloom  ? "fused+bloom"
+                   : probeStep == &Hashjoin::stepFusedNew  ? "fused+newjoin"
+                   : probeStep == &Hashjoin::stepHashBloom ? "hash+bloom"
+                                                           : "hash");
+}
+void Hashjoin::stepHash(size_t n) { probeHash.evaluate(n); }
+void Hashjoin::stepHashBloom(size_t n) {
+   probeHash.evaluate(n);
+   bloomFilter(n);
+}
+void Hashjoin::stepFusedBloom(size_t n) { fusedHashFilter(n); }
+void Hashjoin::stepFusedNew(size_t) {}
+#endif
+
 size_t Hashjoin::next() {
    using runtime::Hashmap;
    // --- build
@@ -1535,17 +1597,32 @@ size_t Hashjoin::next() {
 
       // --- build phase 2: insert ht entries
       shared.found.fetch_add(found);
+#ifdef VW_JOIN_BLOOM
+      auto allocBloom = [&](size_t keys) {
+         size_t words = 1;
+         while (words * 64 < keys * VW_JOIN_BLOOM_BITS) words <<= 1;
+         shared.bloom.reset(new uint64_t[words]());
+         shared.bloomMask = words - 1;
+      };
+#endif
+#ifdef VW_JOIN_DISPATCH
+      // plan fact: only a filtered build side (build keys read through a
+      // selection) leaves probes that miss; an unfiltered build side's
+      // foreign-key probes all hit, where the filter only costs. A semi
+      // candidate gets its filter only if the bitmap is ruled out (below).
+      const bool wantBloom = buildKeysSelected;
+#endif
       barrier([&]() {
          auto globalFound = shared.found.load();
          if (globalFound) shared.ht.setSize(globalFound);
 #ifdef VW_JOIN_BLOOM
          shared.bloom.reset();
-         if (globalFound >= VW_JOIN_BLOOM_MIN_KEYS) {
-            size_t words = 1;
-            while (words * 64 < globalFound * VW_JOIN_BLOOM_BITS) words <<= 1;
-            shared.bloom.reset(new uint64_t[words]());
-            shared.bloomMask = words - 1;
-         }
+#ifdef VW_JOIN_DISPATCH
+         if (globalFound >= VW_JOIN_BLOOM_MIN_KEYS && wantBloom && !semiCandidate())
+            allocBloom(globalFound);
+#else
+         if (globalFound >= VW_JOIN_BLOOM_MIN_KEYS) allocBloom(globalFound);
+#endif
 #endif
       });
       auto globalFound = shared.found.load();
@@ -1568,15 +1645,32 @@ size_t Hashjoin::next() {
          barrier([&]() {
             shared.semiOn = false;
             const int64_t lo = shared.semiMin.load(), hi = shared.semiMax.load();
+#ifdef VW_JOIN_DISPATCH
+            // bitmap no larger than VW_JOIN_SEMI_MAX_BYTES (run_joindispatchbench
+            // semi sweep: past that the hash path probes faster)
+            if (hi >= lo && hi - lo < int64_t(VW_JOIN_SEMI_MAX_BYTES) * 8) {
+#else
             if (hi >= lo && hi - lo < (int64_t(1) << 27)) {
+#endif
                shared.semiBits.reset(new uint32_t[((hi - lo) >> 5) + 1]());
                shared.semiOn = true;
             }
+#ifdef VW_JOIN_DISPATCH
+            const size_t keys = shared.found.load();
+            if (!shared.semiOn && wantBloom && keys >= VW_JOIN_BLOOM_MIN_KEYS)
+               allocBloom(keys);
+#endif
          });
          if (shared.semiOn) semiSetBits();
+#ifdef VW_JOIN_DISPATCH
+         else if (shared.bloom) bloomInsert();
+#endif
          barrier();
          semiActive = shared.semiOn;
       }
+#endif
+#ifdef VW_JOIN_DISPATCH
+      resolvePaths(); // once per operator; the build summary is known now
 #endif
    }
    // --- lookup
@@ -1596,6 +1690,10 @@ size_t Hashjoin::next() {
          cont.numProbes = right->next();
          cont.nextProbe = 0;
          if (cont.numProbes == EndOfStream) return EndOfStream;
+#ifdef VW_JOIN_DISPATCH
+         (this->*probeStep)(cont.numProbes);
+      }
+#else
 #ifdef VW_JOIN_FUSED_PROBE
          fusedCompute = false;
          if (fusedReady()) {
@@ -1629,6 +1727,7 @@ size_t Hashjoin::next() {
       probe:;
 #endif
       }
+#endif // VW_JOIN_DISPATCH
       // create join pair vectors with matching hashes (Entry*, pos), where
       // Entry* is for the build side, pos a selection index to the right side
       auto n = (this->*join)();
@@ -1785,6 +1884,32 @@ size_t HashGroup::next() {
          *globalAggregation.htMatches =
              reinterpret_cast<header_t*>(block.first);
          auto n = block.second;
+#ifdef VW_GROUP_HAVING
+         if (havingCondition) {
+            // the condition's input for every group, then only passing groups
+            cont.iter++;
+            havingInput->run(n);
+            const pos_t m = havingCondition->evaluate(n);
+            if (m == 0) continue;
+            gatherGroups.evaluate(m);
+            // compact the condition's input in place (sel is ascending)
+            auto compact = [&](auto* col) {
+               for (pos_t j = 0; j < m; ++j) col[j] = col[havingSel[j]];
+            };
+            switch (havingInputSize) {
+            case 4: compact(static_cast<uint32_t*>(havingInputTarget)); break;
+            case 8: compact(static_cast<uint64_t*>(havingInputTarget)); break;
+            default: {
+               char* in = static_cast<char*>(havingInputTarget);
+               for (pos_t j = 0; j < m; ++j)
+                  std::memmove(in + size_t(j) * havingInputSize,
+                               in + size_t(havingSel[j]) * havingInputSize,
+                               havingInputSize);
+            }
+            }
+            return m;
+         }
+#endif
          gatherGroups.evaluate(n);
          cont.iter++;
          return n;

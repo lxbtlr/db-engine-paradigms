@@ -488,6 +488,47 @@ if(VW_JOIN_SEMI)
   ADD_DEFINITIONS(-DVW_JOIN_SEMI=1)
 endif()
 
+# VW_JOIN_DISPATCH: Hashjoin resolves its probe path once per operator, at the
+# end of the build, from plan facts (semi marker, key count and types, build
+# keys read through a selection, single int32 probe key) and the build
+# summary (row count, key range), then runs one member-function pointer per
+# probe vector instead of today's per-vector checks. It compiles in and
+# chooses between the paths VW_JOIN_SEMI, VW_JOIN_BLOOM and
+# VW_JOIN_FUSED_PROBE add separately (see JOIN_DISPATCH_STUDY.md):
+#   semi bitmap  plan-marked semi join, one int32 key per side, bitmap
+#                <= VW_JOIN_SEMI_MAX_BYTES (VW_JOIN_SEMI alone: 16 MiB)
+#   Bloom filter build >= VW_JOIN_BLOOM_MIN_KEYS rows and build keys read
+#                through a selection (a filtered build side); fixed for the
+#                operator (no per-vector adaptive switch)
+#   fused hash   one int32 probe key, with the filter or VW_NEW_JOIN
+OPTION(VW_JOIN_DISPATCH "Plan-resolved probe path per VectorWise Hashjoin (compiles in VW_JOIN_SEMI, VW_JOIN_BLOOM, VW_JOIN_FUSED_PROBE)" OFF)
+set(VW_JOIN_SEMI_MAX_BYTES 8388608 CACHE STRING "VW_JOIN_DISPATCH: largest semi bitmap in bytes")
+if(VW_JOIN_DISPATCH)
+  if(HASH_SIZE_32)
+    message(FATAL_ERROR "VW_JOIN_DISPATCH needs 64-bit hashes (HASH_SIZE_32 is ON)")
+  endif()
+  if(VW_JOIN_TWOPHASE OR VW_JOIN_SIMD OR VW_JOIN_PREFETCH)
+    message(FATAL_ERROR "VW_JOIN_DISPATCH compiles in VW_JOIN_BLOOM; disable VW_JOIN_TWOPHASE, VW_JOIN_SIMD and VW_JOIN_PREFETCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_DISPATCH=1 -DVW_JOIN_SEMI=1 -DVW_JOIN_BLOOM=1
+                  -DVW_JOIN_BLOOM_BITS=${VW_JOIN_BLOOM_BITS}
+                  -DVW_JOIN_BLOOM_MIN_KEYS=${VW_JOIN_BLOOM_MIN_KEYS}
+                  -DVW_JOIN_FUSED_PROBE=1
+                  -DVW_JOIN_SEMI_MAX_BYTES=${VW_JOIN_SEMI_MAX_BYTES})
+  message(STATUS "Building with VW_JOIN_DISPATCH (semi bitmap <= ${VW_JOIN_SEMI_MAX_BYTES} B)")
+endif()
+
+# VW_GROUP_HAVING: HashGroupBuilder::having(input, condition, selection)
+# filters the group-by's output before it is gathered (SQL HAVING): only the
+# condition's input column is gathered for every group; the other output
+# columns are gathered for the passing groups only. TPC-H Q18 uses it instead
+# of its Select over the group-by output.
+OPTION(VW_GROUP_HAVING "HAVING filter inside VectorWise HashGroup's output (Q18 drops its Select)" OFF)
+if(VW_GROUP_HAVING)
+  ADD_DEFINITIONS(-DVW_GROUP_HAVING=1)
+  message(STATUS "Building with VW_GROUP_HAVING")
+endif()
+
 # Hash join entry layout (QueryBuilder::HashJoinBuilder). All OFF / 8 keeps
 # the existing layout: header, then fields packed in add* call order, stride
 # rounded up to 8.
@@ -1012,6 +1053,17 @@ target_include_directories(run_joinbench PUBLIC
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
 target_link_libraries(run_joinbench common ${TBB_LIBRARIES})
+
+# run_joindispatchbench: cost questions behind Hashjoin::resolvePaths
+# (Q18 Select elision, semi bitmap vs hash, per-vector dispatch)
+add_executable(run_joindispatchbench
+  src/benchmarks/primitives/joindispatchbench.cpp
+  )
+target_include_directories(run_joindispatchbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
+    PRIVATE src)
+target_link_libraries(run_joindispatchbench vectorwise common ${TBB_LIBRARIES})
 
 # run_crcbench: CRC-32C lowerings (x86-64 and aarch64)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|aarch64|arm64|ARM64")

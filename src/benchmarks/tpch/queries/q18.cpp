@@ -231,17 +231,35 @@ std::unique_ptr<Q18Builder::Q18> Q18Builder::getQuery() {
                  primitives::aggr_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
-                 Buffer(l_quantity, sizeof(int64_t)));
+                 Buffer(l_quantity, sizeof(int64_t)))
+#ifdef VW_GROUP_HAVING
+       // HAVING sum(l_quantity) > 300 inside the group-by: only l_quantity is
+       // gathered for every group, l_orderkey for the passing ones
+       .having(Buffer(l_quantity),
+               Expression().addOp(BF(primitives::sel_greater_int64_t_col_int64_t_val),
+                                  Buffer(sel_orderkey, sizeof(pos_t)),
+                                  Buffer(l_quantity), Value(&r->qty_bound)),
+               // sized: argument order is unspecified, either may create it
+               Buffer(sel_orderkey, sizeof(pos_t)))
+#endif
+       ;
+#ifndef VW_GROUP_HAVING
    Select(
        Expression().addOp(BF(primitives::sel_greater_int64_t_col_int64_t_val),
                           Buffer(sel_orderkey, sizeof(pos_t)),
                           Buffer(l_quantity), Value(&r->qty_bound)));
+#endif
    auto orders = Scan("orders");
    HashJoin(Buffer(orders_matches, sizeof(pos_t)))
        .semi() // SQL: o_orderkey in (group-by subquery)
+#ifdef VW_GROUP_HAVING
+       .addBuildKey(Buffer(l_orderkey), primitives::hash_int32_t_col,
+                    primitives::scatter_int32_t_col)
+#else
        .addBuildKey(Buffer(l_orderkey), //
                     Buffer(sel_orderkey), primitives::hash_sel_int32_t_col,
                     primitives::scatter_sel_int32_t_col)
+#endif
        .addProbeKey(Column(orders, "o_orderkey"), //
                     primitives::hash_int32_t_col,
                     primitives::keys_equal_int32_t_col);

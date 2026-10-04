@@ -1,5 +1,7 @@
 #include "vectorwise/QueryBuilder.hpp"
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 
 using namespace std;
 
@@ -139,6 +141,8 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
    r.dataSize = attr.type->rt_size();
    r.data = attr.data();
    r.scan = &scan.scan;
+   r.attribute = attribute;
+   r.rel = &scan.rel;
    return r;
 }
 
@@ -227,7 +231,62 @@ operator std::unique_ptr<vectorwise::Aggregates>() {
 }
 
 QueryBuilder::HashJoinBuilder::HashJoinBuilder(QueryBuilder& b) : base(b) {}
-QueryBuilder::HashJoinBuilder::~HashJoinBuilder() {
+bool QueryBuilder::uniqueBuild(
+    const std::vector<HashJoinBuilder::BuildKey>& keys) const {
+   if (keys.empty()) return false;
+   // one row source: every key through the same selection, which must not
+   // list a row twice
+   void* sel = keys.front().sel;
+   for (auto& k : keys)
+      if (k.sel != sel) return false;
+   if (sel && repeatingSelections.count(sel)) return false;
+   // a group-by's single key output
+   if (keys.size() == 1 && keys[0].col.buf == DataStorage::BufferSpec::Buffer)
+      return uniqueBuffers.count(keys[0].col.data) != 0;
+   // columns of one relation covering its declared primary key
+   const runtime::Relation* rel = keys[0].col.rel;
+   if (!rel || rel->primaryKey.empty()) return false;
+   for (auto& pk : rel->primaryKey) {
+      bool covered = false;
+      for (auto& k : keys) {
+         if (k.col.buf != DataStorage::BufferSpec::Column || k.col.rel != rel)
+            return false;
+         covered |= k.col.attribute == pk;
+      }
+      if (!covered) return false;
+   }
+   return true;
+}
+
+QueryBuilder::HashJoinBuilder::~HashJoinBuilder() noexcept(false) {
+   // derived semi join: unique build keys and no build column used means
+   // each probe row matches at most one build row, so inner join == semi join
+   const bool unique = base.uniqueBuild(buildKeys);
+   const bool buildColumns = !join->buildGather.ops.empty();
+   join->semiJoin = unique && !buildColumns;
+   static const bool trace = std::getenv("VW_DISPATCH_TRACE") != nullptr;
+   if (trace && runtime::this_worker->worker_id == 0)
+      std::fprintf(stderr, "vw plan join %p: buildKeys=%zu uniqueBuild=%d "
+                           "buildColumns=%d semi=%d asserted=%d\n",
+                   static_cast<void*>(join), buildKeys.size(), int(unique),
+                   int(buildColumns), int(join->semiJoin), int(semiAsserted));
+   // the join's output lists a probe row more than once iff a probe row can
+   // match several build rows or the probe selection already repeats rows
+   const bool repeats =
+       !unique ||
+       (join->probeSel && base.repeatingSelections.count(join->probeSel));
+   auto mark = [&](void* s) {
+      if (repeats)
+         base.repeatingSelections.insert(s);
+      else
+         base.repeatingSelections.erase(s);
+   };
+   mark(join->probeMatches);
+   for (void* t : pushedTargets) mark(t);
+   if (semiAsserted && !join->semiJoin)
+      throw runtime_error(
+          "HashJoin::semi(): not derivable: the build keys are not unique by "
+          "declared primary keys or a group-by key, or build columns are used");
 #ifdef VW_JOIN_ENTRY_PAD
    // 16/32/64: entries start on that boundary (allocations are 64-aligned),
    // so an entry's header never straddles a cache line
@@ -280,6 +339,7 @@ QueryBuilder::HashJoin(DS probeMatches, pos_t (Hashjoin::*joinFun)()) {
 QueryBuilder::HashJoinBuilder&
 QueryBuilder::HashJoinBuilder::addBuildKey(DS col, primitives::F2 hash,
                                            primitives::FScatter scatter) {
+   buildKeys.push_back({col, nullptr});
 
 #ifdef VW_JOIN_ALIGN_FIELDS
    join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(col.dataSize));
@@ -311,6 +371,7 @@ QueryBuilder::HashJoinBuilder::addBuildKey(DS col, primitives::F2 hash,
 QueryBuilder::HashJoinBuilder&
 QueryBuilder::HashJoinBuilder::addBuildKey(DS col, DS sel, primitives::F3 hash,
                                            primitives::FScatterSel scatter) {
+   buildKeys.push_back({col, sel.data});
 
 #ifdef VW_JOIN_ALIGN_FIELDS
    join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(col.dataSize));
@@ -323,6 +384,9 @@ QueryBuilder::HashJoinBuilder::addBuildKey(DS col, DS sel, primitives::F3 hash,
    join->semiKeyOffset = entryOffset;
    if (!(col.dataSize == 4 && scatter == primitives::scatter_sel_int32_t_col))
       join->semiOk = false;
+#endif
+#ifdef VW_JOIN_DISPATCH
+   join->buildKeysSelected = true; // the build side is a filtered subset
 #endif
 
    // create hash primitive for build side
@@ -509,6 +573,7 @@ QueryBuilder::HashJoinBuilder::setProbeSelVector(DS sel,
 
 QueryBuilder::HashJoinBuilder&
 QueryBuilder::HashJoinBuilder::pushProbeSelVector(DS sel, DS target) {
+   pushedTargets.push_back(target.data);
    if (probeHasSelection)
       throw runtime_error("Pushing a probe selection vector is in conflict "
                           "with first setting a probe selection vector.");
@@ -520,7 +585,7 @@ QueryBuilder::HashJoinBuilder::pushProbeSelVector(DS sel, DS target) {
 }
 
 QueryBuilder::HashJoinBuilder& QueryBuilder::HashJoinBuilder::semi() {
-   join->semiJoin = true;
+   semiAsserted = true; // checked in ~HashJoinBuilder
    return *this;
 }
 
@@ -605,7 +670,46 @@ QueryBuilder::HashGroupBuilder QueryBuilder::HashGroup() {
    return b;
 }
 
+#ifdef VW_GROUP_HAVING
+QueryBuilder::HashGroupBuilder&
+QueryBuilder::HashGroupBuilder::having(DS input,
+                                       std::unique_ptr<vectorwise::Expression>&& condition,
+                                       DS selection) {
+   auto& op = *group;
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: one having() per group-by; put every "
+                          "conjunct in its Expression");
+   auto& gathers = op.gatherGroups.ops;
+   size_t idx = gathers.size();
+   for (size_t i = 0; i < gathers.size(); ++i) {
+      auto* g = dynamic_cast<GatherOpVal*>(gathers[i].get());
+      if (g && g->target == input.data) idx = i;
+   }
+   if (idx == gathers.size())
+      throw runtime_error("HashGroup::having: input is not an output of this group-by");
+   // the condition's input: gathered for every group
+   op.havingInputTarget = input.data;
+   op.havingInputSize = op.gatherSizes[idx];
+   op.havingInput = move(gathers[idx]);
+   gathers.erase(gathers.begin() + idx);
+   op.gatherSizes.erase(op.gatherSizes.begin() + idx);
+   // every other output: gathered for the passing groups only
+   op.havingSel = selection;
+   for (size_t i = 0; i < gathers.size(); ++i) {
+      auto* g = dynamic_cast<GatherOpVal*>(gathers[i].get());
+      if (!g) throw runtime_error("HashGroup::having: unexpected output op");
+      gathers[i] = make_unique<GatherOpValSel>(g->sourceStart, g->offset,
+                                               g->struct_size, g->target,
+                                               op.gatherSizes[i], op.havingSel);
+   }
+   op.havingCondition = move(condition);
+   return *this;
+}
+#endif
+
 QueryBuilder::HashGroupBuilder::~HashGroupBuilder() {
+   // a group-by's output has one row per key: a single key column is unique
+   if (keyOutputs.size() == 1) base.uniqueBuffers.insert(keyOutputs.front());
 
    // set partitioning buffers in operator
    // This way, op will know the actual output pointers
@@ -658,6 +762,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
     primitives::FScatterSelRow scatterG,
     /**** output *****/
     primitives::FGatherVal gather, DS out) {
+   keyOutputs.push_back(out.data); // unique if it is the only key
    auto& op = *this->group;
    auto& local = op.preAggregation;
    auto& global = op.globalAggregation;
@@ -710,6 +815,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    auto gather_groups = make_unique<GatherOpVal>(
        gather, reinterpret_cast<void**>(global.htMatches), entryOffset,
        &global.ht_entry_size, out);
+#ifdef VW_GROUP_HAVING
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: add every key and value before having()");
+   op.gatherSizes.push_back(out.dataSize);
+#endif
    op.gatherGroups.ops.push_back(move(gather_groups));
    return *this;
 }
@@ -725,6 +835,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
     primitives::FScatterSelRow scatterG,
     /**** output *****/
     primitives::FGatherVal gather, DS out) {
+   keyOutputs.push_back(out.data); // unique if it is the only key
 
    auto& op = *this->group;
    auto& local = op.preAggregation;
@@ -783,6 +894,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    auto gather_groups = make_unique<GatherOpVal>(
        gather, reinterpret_cast<void**>(global.htMatches), entryOffset,
        &global.ht_entry_size, out);
+#ifdef VW_GROUP_HAVING
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: add every key and value before having()");
+   op.gatherSizes.push_back(out.dataSize);
+#endif
    op.gatherGroups.ops.push_back(move(gather_groups));
    return *this;
 }
@@ -834,6 +950,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    auto gather_groups = make_unique<GatherOpVal>(
        gather, reinterpret_cast<void**>(global.htMatches), entryOffset,
        &global.ht_entry_size, out);
+#ifdef VW_GROUP_HAVING
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: add every key and value before having()");
+   op.gatherSizes.push_back(out.dataSize);
+#endif
    op.gatherGroups.ops.push_back(move(gather_groups));
    return *this;
 }
@@ -883,6 +1004,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    auto gather_groups = make_unique<GatherOpVal>(
        gather, reinterpret_cast<void**>(global.htMatches), entryOffset,
        &global.ht_entry_size, out);
+#ifdef VW_GROUP_HAVING
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: add every key and value before having()");
+   op.gatherSizes.push_back(out.dataSize);
+#endif
    op.gatherGroups.ops.push_back(move(gather_groups));
    return *this;
 }

@@ -4,6 +4,7 @@
 #include "vectorwise/VectorAllocator.hpp"
 #include <memory>
 #include <stack>
+#include <unordered_set>
 #include <vector>
 
 namespace vectorwise {
@@ -18,6 +19,12 @@ class QueryBuilder {
    SharedStateManager& operatorState;
    VectorAllocator vecs;
    std::unordered_map<size_t, std::pair<size_t, void*>> buffers;
+   /// uniqueness facts the plan establishes, for deriving semi joins:
+   /// buffers holding a unique column (a group-by's single key output)
+   std::unordered_set<void*> uniqueBuffers;
+   /// selection buffers that may list a row more than once (outputs of joins
+   /// whose build side is not unique); other selections list rows once
+   std::unordered_set<void*> repeatingSelections;
 
    struct DataStorage
    /// handle for data sources, e.g. base table columns or cache buffers
@@ -27,6 +34,8 @@ class QueryBuilder {
       void* data = nullptr;
       class Scan* scan = nullptr;
       std::string attribute;
+      /// Column: the relation it belongs to (declared keys, uniqueBuild)
+      const runtime::Relation* rel = nullptr;
       void registerDS(void** location);
       void registerDS(pos_t** location);
       operator void*() const;
@@ -61,8 +70,20 @@ class QueryBuilder {
       void* buildHashBuffer = nullptr;
       void* probeHashBuffer = nullptr;
       Hashjoin* join;
+      /// build key columns and the selection each is read through (nullptr:
+      /// dense), for uniqueBuild
+      struct BuildKey {
+         DS col;
+         void* sel;
+      };
+      std::vector<BuildKey> buildKeys;
+      /// selections pushProbeSelVector derives from this join's output
+      std::vector<void*> pushedTargets;
+      bool semiAsserted = false;
       HashJoinBuilder(QueryBuilder& b);
-      ~HashJoinBuilder();
+      /// derives the semi join (see semi()); throws if semi() was asserted
+      /// and the derivation fails
+      ~HashJoinBuilder() noexcept(false);
       using B = HashJoinBuilder;
 
       B& addBuildKey(DS col, primitives::F2 hash, primitives::FScatter scatter);
@@ -81,18 +102,17 @@ class QueryBuilder {
       setProbeSelVector(DS vec,
                         pos_t (Hashjoin::*join)() = &Hashjoin::joinSelParallel);
       B& pushProbeSelVector(DS sel, DS target);
-      /// Mark this join a semi join: the plan only asks whether each probe
-      /// key exists on the build side. Requires no build values. Valid for
-      ///  - a semi join in the SQL (Q18: o_orderkey IN (subquery)), or
-      ///  - an inner join whose build side contributes no columns and whose
-      ///    build key is unique (Q3, Q5, Q9: primary keys). Hyper's plans make
-      ///    the same rewrite (Hashset + contains()).
-      /// ASSUMPTION: the build keys are unique; nothing checks it. The joins
-      /// run two ways and both depend on it: the bitmap path (VW_JOIN_SEMI)
-      /// emits each probe row at most once, so on a rewritten inner join it
-      /// would drop the rows duplicate build keys repeat; the hash path (keys
-      /// not one int32 per side, key range over 2^27, or VW_JOIN_SEMI off)
-      /// runs as an inner join, so on a SQL semi join it would repeat them.
+      /// Assert that this join is a semi join. The builder derives it for
+      /// every join (~HashJoinBuilder): when the build keys are unique
+      /// (QueryBuilder::uniqueBuild: declared primary keys, a group-by's key,
+      /// through selections that never repeat a row) and no build column is
+      /// used, each probe row matches at most one build row, so the inner
+      /// join and the semi join return the same rows and Hashjoin::semiJoin
+      /// is set. semi() makes plan building fail (std::runtime_error) when
+      /// that derivation does not hold, so a plan cannot claim a semi join
+      /// the schema and plan do not prove. Q18's IN subquery and the
+      /// primary-key joins of Q3, Q5, Q9 (Hyper's plans use Hashset +
+      /// contains() for the same joins).
       B& semi();
    };
 
@@ -108,6 +128,8 @@ class QueryBuilder {
       } localLookup, globalLookup;
 
       HashGroupBuilder(QueryBuilder& base);
+      /// output buffers of the key columns; a single one is unique
+      std::vector<void*> keyOutputs;
 
       using B = HashGroupBuilder;
       B& addKey(DS col, primitives::F2 hash,
@@ -142,6 +164,14 @@ class QueryBuilder {
                   primitives::FAggrSel aggr, primitives::FAggrRow aggrGlobal,
                   primitives::FGatherVal gather, DS out);
       B& padToAlign(size_t align);
+#ifdef VW_GROUP_HAVING
+      /// SQL HAVING: keep only the groups whose output passes condition, a
+      /// selection Expression over input (one of this group-by's outputs)
+      /// that writes the passing positions to selection. Call after every
+      /// addKey/addValue. Consumers see only the passing groups, densely.
+      B& having(DS input, std::unique_ptr<vectorwise::Expression>&& condition,
+                DS selection);
+#endif
       ~HashGroupBuilder();
    };
 
@@ -178,6 +208,11 @@ class QueryBuilder {
    HashJoin(DS probeMatches,
             pos_t (Hashjoin::*join)() = &Hashjoin::joinAllParallel);
    HashGroupBuilder HashGroup();
+   /// whether a join's build keys are unique, from declared keys and the
+   /// plan (no data): all keys read through the same selection, which never
+   /// lists a row twice, and either a group-by's single key output, or
+   /// columns of one relation that cover its declared primary key
+   bool uniqueBuild(const std::vector<HashJoinBuilder::BuildKey>& keys) const;
 
    ~QueryBuilder();
 

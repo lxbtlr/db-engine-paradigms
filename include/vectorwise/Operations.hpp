@@ -104,6 +104,23 @@ struct GatherOpVal : public Op {
    virtual pos_t run(pos_t n) override;
 };
 
+#ifdef VW_GROUP_HAVING
+/// VW_GROUP_HAVING: GatherOpVal through a selection: target[j] = the field
+/// at offset of entry sel[j] of the block at *sourceStart (entries
+/// *struct_size bytes apart), elemSize bytes per element
+struct GatherOpValSel : public Op {
+   void** sourceStart;
+   size_t offset;
+   size_t* struct_size;
+   void* target;
+   size_t elemSize;
+   pos_t* sel;
+   GatherOpValSel(void** source, size_t off, size_t* struct_size, void* target,
+                  size_t elemSize, pos_t* sel);
+   virtual pos_t run(pos_t n) override;
+};
+#endif
+
 struct EqualityCheck : public Op {
    primitives::EQCheck prim;
    void** pointers;

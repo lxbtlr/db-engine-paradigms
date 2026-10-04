@@ -37,6 +37,23 @@
 #   join_semi            VW_JOIN_SEMI (bitmap semi join on plan-marked joins)
 #   join_all             one config for every machine: join_fused + join_semi +
 #                        VW_GROUP_DISPATCH + VW_GROUP_RUN_HEADS
+#   join_dispatch        VW_JOIN_DISPATCH (JOIN_DISPATCH_STUDY.md): the semi /
+#                        Bloom / fused-probe choice resolved once per join from
+#                        plan facts and the build summary; also builds and runs
+#                        run_joindispatchbench (joindispatchbench.csv)
+#   jd_all               join_dispatch + VW_GROUP_HAVING + VW_GROUP_DISPATCH +
+#                        VW_GROUP_RUN_HEADS (compare with join_all)
+#   join_all_valid       join_all without VW_JOIN_SEMI: join_fused +
+#                        VW_GROUP_DISPATCH + VW_GROUP_RUN_HEADS
+#
+# CONFIGS may contain the group name join_valid, which expands to the configs
+# AUDIT_TPC_OPTIONS.md finds TPC-valid for every query: no VW_PROJ_DENSE
+# (Q1-only plan), no VW_Q9_FIELD_ORDER. The semi-join configs are included:
+# semi joins are derived from the declared primary keys
+# (QueryBuilder::uniqueBuild), not asserted by the plans:
+#   join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom
+#   join_fused join_semi join_all join_dispatch jd_all join_all_valid
+#   grp_base grp_dispatch grp_runheads grp_having
 #
 # Group-by configs (VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
 #   grp_base             today's HashGroup
@@ -53,6 +70,8 @@
 #                        the selected span with contiguous loads, no gather)
 #   grp_dense256         grp_dense with VW_PROJ_DENSE_WIDTH=256 (ymm kernels;
 #                        AVX-512 machines only, elsewhere it equals grp_dense)
+#   grp_having           grp_runheads + VW_GROUP_HAVING (TPC-H Q18: HAVING in
+#                        the group-by instead of a Select over its output)
 # Configs whose ISA this CPU lacks are skipped (their builds would fall back
 # and duplicate another config).
 #
@@ -105,9 +124,12 @@ COMPILERS=${COMPILERS:-"gcc clang"}
 FLAG_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
-JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all"
-GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_dense grp_dense256"
+JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all join_all_valid"
+GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_dense grp_dense256 grp_having"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
+# config group: the TPC-valid join and group-by configs (see header)
+JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all join_all_valid grp_base grp_dispatch grp_runheads grp_having"
+CONFIGS=$(for c in $CONFIGS; do if [ "$c" = join_valid ]; then printf "%s\n" $JOIN_VALID_CONFIGS; else echo "$c"; fi; done | awk '!seen[$0]++' | tr '\n' ' ')
 HASH_BASE=${HASH_BASE:-default}
 # SIMD selection only where the CPU has the kernels' ISA, so a config never
 # claims SIMD selection while silently running the scalar fallback
@@ -192,8 +214,8 @@ summarize() {
 
   # join.csv: join configs, speedup vs join_base (today's probe, same hash)
   { echo "compiler,query,join_config,median_ms,speedup_vs_base"
-    awk -F, '$3 ~ /^(join_|nj_)/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-      END { n = split("join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all", jc, " ")
+    awk -F, '$3 ~ /^(join_|nj_|jd_)/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
+      END { n = split("join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all join_all_valid", jc, " ")
             for (k in cq) { b = m[k ",join_base"]
               for (i = 1; i <= n; i++) if ((k "," jc[i]) in m)
                 printf "%s,%s,%.2f,%s\n", k, jc[i], m[k "," jc[i]], b ? sprintf("%.3f", b / m[k "," jc[i]]) : "" } }' \
@@ -202,7 +224,7 @@ summarize() {
   # group.csv: group-by configs, speedup vs grp_base (today's HashGroup)
   { echo "compiler,query,group_config,median_ms,speedup_vs_base"
     awk -F, '$3 ~ /^grp_/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-      END { n = split("grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_dense grp_dense256", gc, " ")
+      END { n = split("grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_dense grp_dense256 grp_having", gc, " ")
             for (k in cq) { b = m[k ",grp_base"]
               for (i = 1; i <= n; i++) if ((k "," gc[i]) in m)
                 printf "%s,%s,%.2f,%s\n", k, gc[i], m[k "," gc[i]], b ? sprintf("%.3f", b / m[k "," gc[i]]) : "" } }' \
@@ -233,6 +255,7 @@ flags() {
        "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_FUSE_HASH=OFF" \
        "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF" \
        "-DVW_GROUP_DISPATCH=OFF -DVW_GROUP_RUN_HEADS=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF -DVW_PROJ_DENSE=OFF -DVW_PROJ_DENSE_WIDTH=512" \
+       "-DVW_JOIN_DISPATCH=OFF -DVW_GROUP_HAVING=OFF" \
        "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
 config_flags() {
@@ -267,6 +290,9 @@ config_flags() {
     join_fused)          echo "$(config_flags join_base) -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
     join_semi)           echo "$(config_flags join_base) -DVW_JOIN_SEMI=ON" ;;
     join_all)            echo "$(config_flags join_fused) -DVW_JOIN_SEMI=ON -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
+    join_all_valid)      echo "$(config_flags join_fused) -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
+    join_dispatch)       echo "$(config_flags join_base) -DVW_JOIN_DISPATCH=ON" ;;
+    jd_all)              echo "$(config_flags join_dispatch) -DVW_GROUP_HAVING=ON -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
     # group-by configs: HASH_BASE + CRC32 + FAST, then the HashGroup options
     grp_base)            echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     grp_batch)           echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON" ;;
@@ -278,6 +304,7 @@ config_flags() {
     grp_runheads)        echo "$(config_flags grp_dispatch) -DVW_GROUP_RUN_HEADS=ON" ;;
     grp_dense)           echo "$(config_flags grp_runheads) -DVW_PROJ_DENSE=ON" ;;
     grp_dense256)        echo "$(config_flags grp_dense) -DVW_PROJ_DENSE_WIDTH=256" ;;
+    grp_having)          echo "$(config_flags grp_runheads) -DVW_GROUP_HAVING=ON" ;;
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
@@ -342,6 +369,16 @@ for comp in $COMPILERS; do
       else fail "$tag TPC-H tests (see $D/tpch_test.log)"; fi
     elif [ ! -x "$B/test_all" ]; then fail "$tag: test_all not built"
     else log "$tag: no $DATADIR/tpch/sf1, TPC-H tests skipped"; fi
+    # join_dispatch also runs the microbenchmark behind its rules (pinned,
+    # once per compiler; it is the same for every config)
+    if [ "$cfg" = join_dispatch ]; then
+      if [ "$SKIP_BUILD" = 1 ] || cmake --build "$B" -j "$JOBS" --target run_joindispatchbench >> "$D/build.log" 2>&1; then
+        # shellcheck disable=SC2086
+        if tlimit $NUMA "$B/run_joindispatchbench" > "$D/joindispatchbench.csv" 2> "$D/joindispatchbench.err"; then
+          log "$tag run_joindispatchbench: $D/joindispatchbench.csv"
+        else fail "$tag run_joindispatchbench (see $D/joindispatchbench.err)"; fi
+      else fail "$tag build of run_joindispatchbench (see $D/build.log)"; fi
+    fi
   done
 done
 

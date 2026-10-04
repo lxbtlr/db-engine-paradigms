@@ -368,6 +368,16 @@ void importTPCH(std::string dir, Database& db) {
                    {"r_comment", make_unique<algebra::Varchar>(152)}});
       parseColumns(rel, columns, dir, "region");
    }
+
+   // primary keys as the TPC-H schema declares them
+   db["part"].primaryKey = {"p_partkey"};
+   db["supplier"].primaryKey = {"s_suppkey"};
+   db["partsupp"].primaryKey = {"ps_partkey", "ps_suppkey"};
+   db["customer"].primaryKey = {"c_custkey"};
+   db["orders"].primaryKey = {"o_orderkey"};
+   db["lineitem"].primaryKey = {"l_orderkey", "l_linenumber"};
+   db["nation"].primaryKey = {"n_nationkey"};
+   db["region"].primaryKey = {"r_regionkey"};
 }
 
 void importSSB(std::string dir, Database& db) {

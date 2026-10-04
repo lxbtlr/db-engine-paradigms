@@ -354,3 +354,63 @@ TEST(TPCH, q18) {
       checkResult(result->result.get());
    }
 }
+
+// Derived semi joins (QueryBuilder::uniqueBuild): semi() must hold only when
+// the build keys are unique by declared primary keys, and is derived for a
+// join with a unique build and no build columns.
+namespace {
+struct SemiPlan : public vectorwise::QueryBuilder {
+   enum { matches };
+   SemiPlan(Database& db, vectorwise::SharedStateManager& s)
+       : QueryBuilder(db, s, 1024) {
+      // ~QueryBuilder hands `previous` back to the worker's allocator; keep
+      // whatever source it has now (plan building allocates nothing here)
+      previous = runtime::this_worker->allocator.setSource(nullptr);
+   }
+   /// build buildRel's keys, probe probeRel's; returns whether the join
+   /// ended up semi
+   bool join(const char* buildRel, std::vector<std::string> buildKeys,
+             const char* probeRel, std::vector<std::string> probeKeys,
+             bool assertSemi) {
+      using namespace vectorwise;
+      auto build = Scan(buildRel);
+      auto probe = Scan(probeRel);
+      {
+         auto j = HashJoin(Buffer(matches, sizeof(pos_t)));
+         if (assertSemi) j.semi();
+         for (auto& k : buildKeys)
+            j.addBuildKey(Column(build, k), primitives::hash_int32_t_col,
+                          primitives::scatter_int32_t_col);
+         for (auto& k : probeKeys)
+            j.addProbeKey(Column(probe, k), primitives::hash_int32_t_col,
+                          primitives::keys_equal_int32_t_col);
+      } // ~HashJoinBuilder derives (and checks) the semi join
+      auto op = popOperator();
+      return static_cast<vectorwise::Hashjoin*>(op.get())->semiJoin;
+   }
+};
+} // namespace
+
+TEST(TPCH, semiDerivedFromPrimaryKey) {
+   auto& db = TPCH::getDB();
+   vectorwise::SharedStateManager s;
+   SemiPlan p(db, s);
+   EXPECT_TRUE(p.join("orders", {"o_orderkey"}, "lineitem", {"l_orderkey"}, true));
+   EXPECT_TRUE(p.join("orders", {"o_orderkey"}, "lineitem", {"l_orderkey"}, false));
+   // composite primary key: both columns needed
+   EXPECT_TRUE(p.join("partsupp", {"ps_partkey", "ps_suppkey"}, "lineitem",
+                      {"l_partkey", "l_suppkey"}, true));
+}
+
+TEST(TPCH, semiRejectedWithoutUniqueness) {
+   auto& db = TPCH::getDB();
+   vectorwise::SharedStateManager s;
+   SemiPlan p(db, s);
+   // l_orderkey alone is not lineitem's key
+   EXPECT_FALSE(p.join("lineitem", {"l_orderkey"}, "orders", {"o_orderkey"}, false));
+   EXPECT_THROW(p.join("lineitem", {"l_orderkey"}, "orders", {"o_orderkey"}, true),
+                std::runtime_error);
+   // part of a composite key is not unique
+   EXPECT_THROW(p.join("partsupp", {"ps_partkey"}, "part", {"p_partkey"}, true),
+                std::runtime_error);
+}

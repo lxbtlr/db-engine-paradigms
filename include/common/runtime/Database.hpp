@@ -54,6 +54,9 @@ struct Relation {
    std::unordered_map<std::string, Attribute> attributes;
    std::string name;
    size_t nrTuples;
+   /// declared primary key (attribute names; empty: none declared). The query
+   /// builder derives column uniqueness from it (QueryBuilder::uniqueBuild)
+   std::vector<std::string> primaryKey;
    Attribute& operator[](std::string key);
    Attribute& insert(std::string name, std::unique_ptr<Type> t);
 };
