@@ -57,8 +57,8 @@ Because of the context above (hand-built plans, fixed parameters), no build of t
 | `VW_JOIN_FUSED_PROBE` | plan fact: single int32 probe key | none | **OK** | none |
 | `VW_GROUP_HAVING` | plan: the group-by has a HAVING predicate | none (generic builder API; Q18 is the only implemented query with HAVING) | **OK** (exact rewrite) | none |
 | `VW_GROUP_RUN_HEADS` | data order (benefit only); correct for any order; no threshold | **note**: the gain depends on lineitem's load order | OK | none; report the gain together with the load order |
-| `VW_PROJ_DENSE` | Q1's plan only; pays because the selection is ~95–98% dense | **over-tuned (query)** | **TPC-invalid as is** | decide dense vs selective per vector from `n / span` in the primitive, for every projection of total ops |
-| `VW_PROJ_DENSE_WIDTH` | AVX-512 frequency licence (hardware fact) | none | OK | none |
+| `VW_PROJ_DENSE` (**removed**) | Q1's plan only; pays because the selection is ~95–98% dense | **over-tuned (query)** | **TPC-invalid as is** | decide dense vs selective per vector from `n / span` in the primitive, for every projection of total ops |
+| `VW_PROJ_DENSE_WIDTH` (**removed** with it) | AVX-512 frequency licence (hardware fact) | none | OK | none |
 | `VW_Q9_FIELD_ORDER` | names Q9; reorders one join's payload | **over-tuned (query)** | **TPC-invalid as is** (unused in recommended configs) | delete it, or have the builder sort payload fields by alignment (general `VW_JOIN_ALIGN_FIELDS`) |
 | `VW_JOIN_TWOPHASE_MIN_SLOTS` | 4096 slots, justified by Q18's 57-key build | **note** | OK | derive from L1/L2 size |
 | other older VW options | plan facts or hardware choices | none found | OK | none |

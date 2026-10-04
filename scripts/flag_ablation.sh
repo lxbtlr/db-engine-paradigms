@@ -47,10 +47,10 @@
 #                        VW_GROUP_DISPATCH + VW_GROUP_RUN_HEADS
 #
 # CONFIGS may contain the group name join_valid, which expands to the configs
-# AUDIT_TPC_OPTIONS.md finds TPC-valid for every query: no VW_PROJ_DENSE
-# (Q1-only plan), no VW_Q9_FIELD_ORDER. The semi-join configs are included:
-# semi joins are derived from the declared primary keys
-# (QueryBuilder::uniqueBuild), not asserted by the plans:
+# AUDIT_TPC_OPTIONS.md finds TPC-valid for every query (no VW_Q9_FIELD_ORDER;
+# VW_PROJ_DENSE was removed). The semi-join configs are included: semi joins
+# are derived from the declared primary keys (QueryBuilder::uniqueBuild), not
+# asserted by the plans:
 #   join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom
 #   join_fused join_semi join_all join_dispatch jd_all join_all_valid
 #   grp_base grp_dispatch grp_runheads grp_having
@@ -66,10 +66,6 @@
 #                        fused aggregates, spill copy, hash in the lookup)
 #   grp_runheads         grp_dispatch + VW_GROUP_RUN_HEADS (branch-free run-head
 #                        lookup; AVX-512BW/VL run pass, scalar elsewhere)
-#   grp_dense            grp_runheads + VW_PROJ_DENSE (TPC-H Q1: projections over
-#                        the selected span with contiguous loads, no gather)
-#   grp_dense256         grp_dense with VW_PROJ_DENSE_WIDTH=256 (ymm kernels;
-#                        AVX-512 machines only, elsewhere it equals grp_dense)
 #   grp_having           grp_runheads + VW_GROUP_HAVING (TPC-H Q18: HAVING in
 #                        the group-by instead of a Select over its output)
 # Configs whose ISA this CPU lacks are skipped (their builds would fall back
@@ -125,7 +121,7 @@ FLAG_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
 JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all join_all_valid"
-GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_dense grp_dense256 grp_having"
+GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_having"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 # config group: the TPC-valid join and group-by configs (see header)
 JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all join_all_valid grp_base grp_dispatch grp_runheads grp_having"
@@ -224,7 +220,7 @@ summarize() {
   # group.csv: group-by configs, speedup vs grp_base (today's HashGroup)
   { echo "compiler,query,group_config,median_ms,speedup_vs_base"
     awk -F, '$3 ~ /^grp_/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-      END { n = split("grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_dense grp_dense256 grp_having", gc, " ")
+      END { n = split("grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_having", gc, " ")
             for (k in cq) { b = m[k ",grp_base"]
               for (i = 1; i <= n; i++) if ((k "," gc[i]) in m)
                 printf "%s,%s,%.2f,%s\n", k, gc[i], m[k "," gc[i]], b ? sprintf("%.3f", b / m[k "," gc[i]]) : "" } }' \
@@ -254,7 +250,7 @@ flags() {
        "-DVW_NEW_JOIN=OFF -DVW_NEW_JOIN_FULL=tag -DVW_JOIN_BLOOM=OFF -DVW_SIMD_HASH_GATHER=insert" \
        "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_FUSE_HASH=OFF" \
        "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF" \
-       "-DVW_GROUP_DISPATCH=OFF -DVW_GROUP_RUN_HEADS=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF -DVW_PROJ_DENSE=OFF -DVW_PROJ_DENSE_WIDTH=512" \
+       "-DVW_GROUP_DISPATCH=OFF -DVW_GROUP_RUN_HEADS=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
        "-DVW_JOIN_DISPATCH=OFF -DVW_GROUP_HAVING=OFF" \
        "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
@@ -302,8 +298,6 @@ config_flags() {
     grp_all)             echo "$(config_flags grp_q18) -DVW_AGGR_FUSED=ON" ;;
     grp_dispatch)        echo "$(config_flags grp_base) -DVW_GROUP_DISPATCH=ON" ;;
     grp_runheads)        echo "$(config_flags grp_dispatch) -DVW_GROUP_RUN_HEADS=ON" ;;
-    grp_dense)           echo "$(config_flags grp_runheads) -DVW_PROJ_DENSE=ON" ;;
-    grp_dense256)        echo "$(config_flags grp_dense) -DVW_PROJ_DENSE_WIDTH=256" ;;
     grp_having)          echo "$(config_flags grp_runheads) -DVW_GROUP_HAVING=ON" ;;
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
@@ -324,7 +318,6 @@ for cfg in $CONFIGS; do
     hash_crc32_vpclmul) cpu_has vpclmulqdq && cpu_has avx512vl && cpu_has avx512bw && cpu_has avx512dq ||
                         { log "skipping hash_crc32_vpclmul: no VPCLMULQDQ + AVX-512 on this CPU"; continue; } ;;
     join_simd) cpu_has avx512f || { log "skipping join_simd: no AVX-512F on this CPU"; continue; } ;;
-    grp_dense256) cpu_has avx512f || { log "skipping grp_dense256: no AVX-512F, same kernels as grp_dense"; continue; } ;;
   esac
   kept="$kept $cfg"
 done

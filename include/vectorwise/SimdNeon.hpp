@@ -352,7 +352,7 @@ inline void murmur_hash_sel_i32(size_t n, uint64_t* RES out,
    }
 }
 
-//--- VW_PROJ_DENSE (engine: Projection.cpp:159-268, Q1) ----------------------
+//--- dense projections (the removed VW_PROJ_DENSE; kept as measured kernels) -
 // Same contract as the engine's proj_dense_*: every position in
 // [0, inSel[n-1]] is computed, results are position-indexed.
 
@@ -646,8 +646,9 @@ inline pos_t sve_proj_dense_multiplies(pos_t n, pos_t* RES inSel,
 // SimdHash.hpp:31 (AVX512F+DQ)               VW_SIMD_HASH         SCALAR (use VW_USE_CRC32)
 // SimdCrc.hpp:31 (VPCLMULQDQ)                VW_CRC32_VPCLMUL     SCALAR (PMULL 2.6x slower
 //                                                                 than crc32cx on burrata)
-// Projection.cpp:159 (zmm/ymm)               VW_PROJ_DENSE        PORT minus/plus; multiplies
-//                                                                 SCALAR on N1, SVE on V1
+// (removed) dense projections               VW_PROJ_DENSE        REMOVED: choosing dense needs
+//                                                                 the selection density (data);
+//                                                                 plan facts only
 // Operators.cpp:2027 runHeadMask16 (BW+VL)   VW_GROUP_RUN_HEADS   PORT  run_heads<K>
 // Operators.cpp:1008 bloomFilter (AVX512F)   VW_JOIN_BLOOM        REWORK scalar_bf + prefetch
 // Operators.cpp:1114 fusedHashFilter         VW_JOIN_FUSED_PROBE  REWORK scalar fused loop

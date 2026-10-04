@@ -18,7 +18,7 @@
 //             selection vector (VW_SIMD_SEL_GATHER)
 //   hash      hash / hash_sel of int32 keys      SimdHash.hpp:74,184,204    Q3/Q5/Q9 probes
 //             (VW_SIMD_HASH; the CRC32 lowerings are run_crcbench's)
-//   proj      Q1's dense projections (VW_PROJ_DENSE) Projection.cpp:159-268 Q1
+//   proj      Q1's dense projections (VW_PROJ_DENSE, since removed)        Q1
 //             and the gathered ones they replace  Primitives.hpp:204-253
 //   runheads  HashGroup run-head pass 1          Operators.cpp:2027,2115    Q1, Q18
 //             (VW_GROUP_RUN_HEADS)

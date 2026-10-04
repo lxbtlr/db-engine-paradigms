@@ -18,7 +18,7 @@ The one exception is the CRC path: burrata's existing `run_crcbench` output meas
 
 1. **On aarch64 today, every AVX-512 kernel compiles out, and the scalar templates run instead.** There are 14 sites (§1). On burrata these options split two ways:
    - **No effect at all:** `VW_SIMD_SEL`, `VW_SIMD_HASH`, `VW_CRC32_VPCLMUL`, `VW_JOIN_SIMD`.
-   - **Only the scalar fallback runs:** `VW_JOIN_BLOOM`, `VW_JOIN_SEMI`, `VW_NEW_JOIN`, `VW_GROUP_RUN_HEADS`, `VW_PROJ_DENSE`.
+   - **Only the scalar fallback runs:** `VW_JOIN_BLOOM`, `VW_JOIN_SEMI`, `VW_NEW_JOIN`, `VW_GROUP_RUN_HEADS`.
 2. **Translating the kernels with SIMDe is not viable.**
    - **Cost.** On aarch64, the SIMDe translations of the mask, compress and gather kernels run 1.4–4× more instructions than the scalar engine code they would replace. Examples:
      - selection: 17.3 vs 7.0 instructions/element;
@@ -34,7 +34,7 @@ The one exception is the CRC path: burrata's existing `run_crcbench` output meas
 3. **Port to NEON, same algorithm** (gain in llvm-mca N1 cycles per element over the scalar path):
    - **selection** (`VW_SIMD_SEL`): 3.01 → 1.75 for int32 (1.7×), 3.01 → 2.0 for int64 (1.5×);
    - **run-head pass** (`VW_GROUP_RUN_HEADS`): 3.76 → 2.0 for 2-byte keys (1.9×), 3.76 → 2.76 for 4-byte keys (1.36×);
-   - **dense minus/plus** (`VW_PROJ_DENSE`): 2.51 → 0.88 (2.9×).
+   - **dense minus/plus** (`VW_PROJ_DENSE`): 2.51 → 0.88 (2.9×). The option has since been removed (plan facts only: choosing dense needs the selection's density); the kernel stays as a measurement.
 
    NEON has no compress instruction. The kernels replace it with a 16-entry `TBL` lookup plus a full-register store that may overwrite past the end (§3).
 4. **Keep the scalar path on N1:**
@@ -86,7 +86,6 @@ Each site's guard requires x86 AVX-512, so an aarch64 build compiles the `#else`
 | `SimdHash.hpp:31` MurmurHash ×8 | `__AVX512F__ && __AVX512DQ__` | `VW_SIMD_HASH` | joins, group-bys |
 | `SimdCrc.hpp:31` CRC32 ×8 | + `__VPCLMULQDQ__` | `VW_CRC32_VPCLMUL` | joins, group-bys |
 | `Hash.cpp:80`, `Primitives.hpp:1359` hash4/hash8, proj8 | `__AVX512F__` | `SIMDhash` env | — |
-| `Projection.cpp:159` dense projections | `__AVX512F__` / `__AVX2__` | `VW_PROJ_DENSE` | Q1 |
 | `Operators.cpp:346,658` `joinAllSIMD`/`joinSelSIMD` | `__AVX512F__` | `VW_JOIN_SIMD` | Q3, Q5, Q9 |
 | `Operators.cpp:1008` `bloomFilter` | `__AVX512F__ && !VW_POS_16` | `VW_JOIN_BLOOM` | Q3, Q5, Q9 |
 | `Operators.cpp:1114` `fusedHashFilter` / `fusedHash8` | same | `VW_JOIN_FUSED_PROBE` | Q3, Q5, Q9 |
@@ -219,7 +218,7 @@ Element sizes are per family. Selection params are selectivity %; the representa
 
 **What this means for burrata.** It is the mechanism behind the flag study's burrata result: CRC32 is 13–25% faster than MurmurHash there. Use `VW_USE_CRC32` + `VW_CRC32_FAST` and leave both SIMD hash options x86-only.
 
-### Q1 projections (`VW_PROJ_DENSE`) — port minus/plus, keep multiply scalar
+### Q1 projections (`VW_PROJ_DENSE`, since removed from the engine) — port minus/plus, keep multiply scalar
 
 **Today's scalar dense loop barely beats the gather path on N1.** The model gives 2.51 vs 3.02 cycles/element, and both are dispatch-bound.
 
