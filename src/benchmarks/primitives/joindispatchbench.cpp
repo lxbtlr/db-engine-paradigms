@@ -30,12 +30,18 @@
 //             per-vector adaptive switch) against the plain hash path, by
 //             hit rate: whether "filter iff build >= MIN_KEYS" can be fixed
 //             once per operator.
+//   bloom_size the same by build size (256 .. 4M keys, 1% hits): where the
+//             filter starts to pay, against the cache sizes printed first
+//             (family cache, param = bytes); hit1_stream32 also streams 32 B
+//             per probe row through the caches, as a real probe pipeline
+//             does with its other columns
 //   dispatch  per probe vector: today's decision chain in Hashjoin::next
 //             (fusedReady, Bloom skip counter, join pointer compares) against
 //             one member-function pointer resolved once. ns per vector.
 //
-// Usage: run_joindispatchbench [-f elide,semi,bloom,dispatch] [-r reps] [-v vec]
+// Usage: run_joindispatchbench [-f elide,semi,bloom,bloom_size,dispatch] [-r reps] [-v vec]
 // CSV on stdout: family,variant,shape,param,mode,ns_per_row,check
+#include "common/runtime/CacheInfo.hpp"
 #include "common/runtime/Hash.hpp"
 #include "common/runtime/Hashmap.hpp"
 #include "vectorwise/Primitives.hpp"
@@ -505,6 +511,71 @@ void famBloom() {
 }
 
 //=============================================================================
+// bloom_size: the same comparison by build size at a low hit rate (1%), to
+// find where the filter starts to pay: the directory (8 B per slot) leaving
+// a cache level. param carries the directory and filter sizes; compare with
+// the cache rows at the top of the output (VW_JOIN_DISPATCH's rule: filter
+// iff the directory is at least L1)
+//=============================================================================
+void famBloomSize() {
+   std::mt19937_64 rng(5);
+   const size_t P = 2000000;
+   std::vector<pos_t> out(vecSize);
+   // competing stream: the other columns a probe pipeline reads per row
+   // (TPC-H Q9 J4's lineitem scan: ~32 B per row across its columns),
+   // streamed through the caches alongside the probes; 64 MiB, so it never
+   // stays resident
+   constexpr size_t kStreamRowBytes = 32;
+   std::vector<uint64_t> stream((64ull << 20) / 8, 1);
+   volatile uint64_t streamSink = 0;
+   for (size_t K : {256ul, 1024ul, 4096ul, 16384ul, 65536ul, 262144ul, 1048576ul,
+                    4194304ul}) {
+      const auto build = distinctKeys(K, [&] { return int32_t(2 * (rng() % (1u << 29))); }, rng);
+      std::vector<int32_t> probe(P);
+      for (auto& p : probe)
+         p = rng() % 100 == 0 ? build[rng() % build.size()]
+                              : int32_t(2 * (rng() % (1u << 29)) + 1);
+      HashSide hs;
+      hs.build(build);
+      BloomSide bs;
+      bs.build(build);
+      auto probeAll = [&](auto& side, bool check, size_t rowBytes) {
+         uint64_t acc = 0;
+         const size_t words = stream.size();
+         size_t pos = 0;
+         for (size_t off = 0; off < P; off += vecSize) {
+            const size_t n = std::min(vecSize, P - off);
+            if (rowBytes) {
+               // touch every cache line of this vector's share of the stream
+               uint64_t s = 0;
+               const size_t lines = n * rowBytes / 64;
+               for (size_t l = 0; l < lines; ++l, pos = (pos + 8) % words) s += stream[pos];
+               streamSink = streamSink + s;
+            }
+            const size_t f = side.probe(probe.data() + off, n, out.data());
+            if (check)
+               for (size_t j = 0; j < f; ++j) acc = mix(acc, off + out[j]);
+            else
+               acc += f;
+         }
+         return acc;
+      };
+      char param[96];
+      std::snprintf(param, sizeof param, "K%zu_dirKiB%llu_filterKiB%zu", K,
+                    (unsigned long long)((hs.ht->mask + 1) * 8 / 1024),
+                    bs.bloom.size() * 8 / 1024);
+      for (size_t rowBytes : {size_t(0), kStreamRowBytes}) {
+         std::vector<Variant> vs = {
+             {"hash", [&](bool ck) { return probeAll(hs, ck, rowBytes); }},
+             {"bloom_hash", [&](bool ck) { return probeAll(bs, ck, rowBytes); }},
+         };
+         runFamily("bloom_size", rowBytes ? "hit1_stream32" : "hit1", param, "probe", vs,
+                   double(P));
+      }
+   }
+}
+
+//=============================================================================
 // dispatch: per-vector decision chain vs a resolved member-function pointer
 //=============================================================================
 struct FakeJoin {
@@ -586,14 +657,18 @@ int main(int argc, char** argv) {
       else if (opt == 'r') reps = std::max(1, std::atoi(optarg));
       else if (opt == 'v') vecSize = std::strtoull(optarg, nullptr, 10);
       else {
-         std::fprintf(stderr, "usage: %s [-f elide,semi,bloom,dispatch] [-r reps] [-v vec]\n", argv[0]);
+         std::fprintf(stderr, "usage: %s [-f elide,semi,bloom,bloom_size,dispatch] [-r reps] [-v vec]\n", argv[0]);
          return 2;
       }
    }
    std::printf("family,variant,shape,param,mode,ns_per_row,check\n");
+   // this machine's caches (runtime::cacheBytes), param = bytes
+   for (unsigned l = 1; l <= 3; ++l)
+      std::printf("cache,L%u,cpu0,%zu,-,0,n/a\n", l, runtime::cacheBytes(l));
    if (want("elide")) famElide();
    if (want("semi")) famSemi();
    if (want("bloom")) famBloom();
+   if (want("bloom_size")) famBloomSize();
    if (want("dispatch")) famDispatch();
    if (fails) std::fprintf(stderr, "run_joindispatchbench: %d MISMATCH rows\n", fails);
    return fails ? 1 : 0;

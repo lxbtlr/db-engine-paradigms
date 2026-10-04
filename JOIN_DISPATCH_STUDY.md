@@ -23,7 +23,7 @@ Status: implemented behind two new CMake options, `VW_JOIN_DISPATCH` and `VW_GRO
    - **Semi bitmap vs hash** (plan-marked `semi()`, one int32 key per side). Use the bitmap when it is at most `VW_JOIN_SEMI_MAX_BYTES` (default 8 MiB).
      - Zen 4: the bitmap probes 2–4× faster than the hash path up to 8 MiB (0.5–1.0 vs 1.8–5.2 ns/probe), and 2× slower at 16 MiB (3.6–4.1 vs 1.9–2.3).
      - Today's cap is 2^27 bits = 16 MiB, so the largest allowed bitmaps are on the losing side.
-   - **Bloom filter.** Use it when the build has at least `VW_JOIN_BLOOM_MIN_KEYS` rows **and** its build keys are read through a selection vector (a plan fact: the build side is a filtered subset).
+   - **Bloom filter.** Use it when the hash table's directory is at least the L1 data cache (a hardware fact, read from sysfs; `VW_JOIN_BLOOM_MIN_KEYS` rows only if the size is unknown) **and** its build keys are read through a selection vector (a plan fact: the build side is a filtered subset). §4.4 explains why L1 and not L2.
      - Kept always on, the filter wins at 5–50% hit rates (1.16–1.32×) and costs 12–22% at 90–100% hits.
      - Probes into an unfiltered build side are foreign keys that all hit, so the plan fact replaces the per-vector skip counter.
    - **Fused probe hash.** One int32 probe key (a plan fact), unchanged from `VW_JOIN_FUSED_PROBE`.
@@ -183,7 +183,28 @@ The filter is `VW_JOIN_BLOOM`'s: 16 bits per key, 4 bits in one 64-bit word, the
 - **Every TPC-H join with ≥ 4096 build rows and a filtered build has a 1–20% hit rate,** except Q9 J3 (100%, 43K probes; §3).
 - **The q3 J2 row (0.92) disagrees with the engine.** End to end, `VW_JOIN_BLOOM` made Q3 17% faster locally and up to 1.41× on manchego. The bench probes random keys, while Q3's lineitem probes are sorted by `l_orderkey`, so the directory loads there are the expensive part. Treat this row as unexplained until the machines' rows are in.
 
-### 4.4 `dispatch`: the per-vector decision itself
+### 4.4 `bloom_size`: where the filter starts to pay, and why the rule uses L1
+
+The filter replaces a directory load. It can only pay once that load misses cache, so the threshold should be a cache size, not a key count. The old `VW_JOIN_BLOOM_MIN_KEYS` = 4096 was chosen to keep Q18's 57-key builds unfiltered.
+
+`bloom_size` probes builds of 256 to 4M keys at a 1% hit rate. It reports each build's directory size and the machine's caches (`runtime::cacheBytes`, read from sysfs). The `hit1_stream32` shape also streams 32 B per probe row through the caches, as a probe pipeline does with its other columns. Zen 4 laptop (L1d 32 KiB, L2 1 MiB), ns per probe, filter vs hash:
+
+| directory | hit1 (isolated) | hit1_stream32 |
+|---|---|---|
+| 4–64 KiB | filter 13–33% slower | filter 13–21% slower |
+| 256 KiB | filter 12–15% slower | tie (5.29 vs 5.38) |
+| 1 MiB (= L2) | tie to 1.11× | filter 1.32× |
+| 4 MiB+ | filter 1.2–2.6× | filter 1.1–1.6× |
+
+(The two runs differ in absolute speed; the laptop was under varying load.)
+
+- **The isolated crossover is at directory = L2.** A rule built on that ("filter iff directory ≥ L2") lost Q9 by about 13% end to end (63.5–67.5 → 73.3–77.0 ms, 3 rounds). The reason: it switched off Q9 J4's filter (43K keys, 512 KiB directory), which the real query needs.
+- **Cache competition moves the crossover down to about L2/4.** Under the competing stream it sits at about 256 KiB: a probe pipeline's other columns occupy L2, so a directory under L2 does not stay resident.
+- **Why the rule uses L1.** L1 is the level that does survive streaming, and it is a named hardware fact rather than a fitted fraction of L2. On TPC-H it makes the same decisions as an L2/4 rule for every join except Q9's supplier join (128 KiB directory, 100% hits, 43K probes), where the filter costs little either way. It filters Q3 orders, Q5's 30K and 46K builds, Q9 J4 and J5; tiny builds and the semi bitmaps are left out.
+- **What would still have to be fitted.** A threshold between L1 and L2 (such as L2/4) would match the competing-stream sweep more closely, but its factor would come from this sweep.
+- **Open question for the machines.** The `join_dispatch` config's `bloom_size` rows on dubliner, manchego and burrata show whether the competing-stream crossover sits near L2/4 there too.
+
+### 4.5 `dispatch`: the per-vector decision itself
 
 | | ns per probe vector |
 |---|---|

@@ -458,9 +458,10 @@ endif()
 # VW_JOIN_FUSED_PROBE add separately (see JOIN_DISPATCH_STUDY.md):
 #   semi bitmap  plan-marked semi join, one int32 key per side, bitmap
 #                <= VW_JOIN_SEMI_MAX_BYTES (VW_JOIN_SEMI alone: 16 MiB)
-#   Bloom filter build >= VW_JOIN_BLOOM_MIN_KEYS rows and build keys read
-#                through a selection (a filtered build side); fixed for the
-#                operator (no per-vector adaptive switch)
+#   Bloom filter the directory is at least the L1 size (runtime::cacheBytes;
+#                VW_JOIN_BLOOM_MIN_KEYS rows if L1 is unknown) and the build
+#                keys are read through a selection (a filtered build side);
+#                fixed for the operator (no per-vector adaptive switch)
 #   fused hash   one int32 probe key, with the filter or VW_NEW_JOIN
 OPTION(VW_JOIN_DISPATCH "Plan-resolved probe path per VectorWise Hashjoin (compiles in VW_JOIN_SEMI, VW_JOIN_BLOOM, VW_JOIN_FUSED_PROBE)" OFF)
 set(VW_JOIN_SEMI_MAX_BYTES 8388608 CACHE STRING "VW_JOIN_DISPATCH: largest semi bitmap in bytes")

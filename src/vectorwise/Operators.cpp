@@ -1,6 +1,7 @@
 #include "vectorwise/Operators.hpp"
 #include "vectorwise/Primitives.hpp"
 #include "common/Compat.hpp"
+#include "common/runtime/CacheInfo.hpp"
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/SIMD.hpp"
@@ -1557,9 +1558,11 @@ void Hashjoin::resolvePaths() {
    static const bool trace = std::getenv("VW_DISPATCH_TRACE") != nullptr;
    if (trace && runtime::this_worker->worker_id == 0)
       std::fprintf(stderr,
-                   "vw join %p: build=%zu keysSelected=%d semi=%d semiBitmap=%d "
-                   "bloom=%d fused=%d newJoin=%d step=%s\n",
+                   "vw join %p: build=%zu dirKiB=%zu L1KiB=%zu keysSelected=%d "
+                   "semi=%d semiBitmap=%d bloom=%d fused=%d newJoin=%d step=%s\n",
                    static_cast<void*>(this), size_t(shared.found.load()),
+                   size_t(shared.ht.mask + 1) * sizeof(void*) / 1024,
+                   runtime::cacheBytes(1) / 1024,
                    int(buildKeysSelected), int(semiJoin), int(semiActive),
                    int(bloom), int(fused), int(newJoin),
                    probeStep == &Hashjoin::stepFusedBloom  ? "fused+bloom"
@@ -1611,6 +1614,17 @@ size_t Hashjoin::next() {
       // foreign-key probes all hit, where the filter only costs. A semi
       // candidate gets its filter only if the bitmap is ruled out (below).
       const bool wantBloom = buildKeysSelected;
+      // hardware fact: the filter pays once the directory (8 B per slot) is
+      // larger than L1. A probe pipeline streams its other columns through
+      // L2, so only an L1-sized directory stays resident (run_joindispatchbench
+      // bloom_size: in isolation the crossover is at directory == L2; with a
+      // 32 B/row competing stream it moves to ~L2/4; end to end, Q9 J4's
+      // 512 KiB directory needs the filter). Unknown L1: VW_JOIN_BLOOM_MIN_KEYS.
+      auto bloomPays = [&]() {
+         const size_t l1 = runtime::cacheBytes(1);
+         const size_t dirBytes = size_t(shared.ht.mask + 1) * sizeof(void*);
+         return l1 ? dirBytes >= l1 : shared.found.load() >= VW_JOIN_BLOOM_MIN_KEYS;
+      };
 #endif
       barrier([&]() {
          auto globalFound = shared.found.load();
@@ -1618,7 +1632,7 @@ size_t Hashjoin::next() {
 #ifdef VW_JOIN_BLOOM
          shared.bloom.reset();
 #ifdef VW_JOIN_DISPATCH
-         if (globalFound >= VW_JOIN_BLOOM_MIN_KEYS && wantBloom && !semiCandidate())
+         if (globalFound && wantBloom && !semiCandidate() && bloomPays())
             allocBloom(globalFound);
 #else
          if (globalFound >= VW_JOIN_BLOOM_MIN_KEYS) allocBloom(globalFound);
@@ -1657,8 +1671,7 @@ size_t Hashjoin::next() {
             }
 #ifdef VW_JOIN_DISPATCH
             const size_t keys = shared.found.load();
-            if (!shared.semiOn && wantBloom && keys >= VW_JOIN_BLOOM_MIN_KEYS)
-               allocBloom(keys);
+            if (!shared.semiOn && wantBloom && bloomPays()) allocBloom(keys);
 #endif
          });
          if (shared.semiOn) semiSetBits();
