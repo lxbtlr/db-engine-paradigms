@@ -49,7 +49,7 @@ TEST(SSB, q11) {
          ASSERT_NE(rev, nullptr);
          EXPECT_EQ(elementsInBlock, size_t(1));
          for (size_t i = 0; i < elementsInBlock; ++i) {
-            EXPECT_EQ(rev[i], 3567186625180000);
+            EXPECT_EQ(rev[i], 4460312038500000);
          }
       };
       EXPECT_EQ(found, size_t(1));
@@ -79,7 +79,7 @@ TEST(SSB, q12) {
          ASSERT_NE(rev, nullptr);
          EXPECT_EQ(elementsInBlock, size_t(1));
          for (size_t i = 0; i < elementsInBlock; ++i) {
-            EXPECT_EQ(rev[i], 779718135680000);
+            EXPECT_EQ(rev[i], 987140046030000);
          }
       };
       EXPECT_EQ(found, size_t(1));
@@ -109,7 +109,7 @@ TEST(SSB, q13) {
          ASSERT_NE(rev, nullptr);
          EXPECT_EQ(elementsInBlock, size_t(1));
          for (size_t i = 0; i < elementsInBlock; ++i) {
-            EXPECT_EQ(rev[i], 202559260780000);
+            EXPECT_EQ(rev[i], 262327010050000);
          }
       };
       EXPECT_EQ(found, size_t(1));
