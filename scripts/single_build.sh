@@ -9,11 +9,13 @@
 # ablation run of that config. Output has the same layout, under
 # results/single_build_<host>_<timestamp>/ (timing.csv, matrix.csv,
 # machine.txt, driver.log, <compiler>_<config>/{defines.txt,tpch_test.log,...})
-# plus build.txt (config, compiler, commit, effective defines).
+# plus build.txt (config, compiler, autovectorize, commit, effective defines).
 #
 # Environment:
 #   CONFIG     required; one name from flag_ablation.sh's join_valid group
 #   COMPILER   gcc       gcc or clang
+#   AUTOVEC    OFF       ON = build with -DAUTOVECTORIZE=ON; the build is
+#                        registered as <CONFIG>_autovec
 #   QUERIES, REPS, ROUNDS, SETTLE, TEST_THREADS, TIMEOUT, BENCH_HOST, ...
 #              passed through to flag_ablation.sh (see its header)
 set -u -o pipefail
@@ -22,15 +24,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ABL="$ROOT/scripts/flag_ablation.sh"
 CONFIG=${CONFIG:-}
 COMPILER=${COMPILER:-gcc}
+AUTOVEC=${AUTOVEC:-OFF}
 
 die() { echo "single_build: $*" >&2; exit 2; }
 [ -n "$CONFIG" ] || die "CONFIG is required"
 case "$CONFIG" in *[[:space:]]*) die "CONFIG takes one config, got '$CONFIG'" ;; esac
 case "$COMPILER" in gcc|clang) ;; *) die "COMPILER must be gcc or clang, got '$COMPILER'" ;; esac
+case "$AUTOVEC" in ON) NAME=${CONFIG}_autovec ;; OFF) NAME=$CONFIG ;; *) die "AUTOVEC must be ON or OFF, got '$AUTOVEC'" ;; esac
 valid=$(CONFIGS=join_valid PRINT_CONFIGS=1 bash "$ABL") || die "cannot list join_valid configs"
 case " $valid " in *" $CONFIG "*) ;; *) die "$CONFIG is not TPC-valid (join_valid: $valid)" ;; esac
 
-export RESULTS_PREFIX=single_build MICROBENCH=0 CONFIGS="$CONFIG" COMPILERS="$COMPILER"
+export RESULTS_PREFIX=single_build MICROBENCH=0 CONFIGS="$CONFIG" COMPILERS="$COMPILER" AUTOVEC
 unset HASH_BASE SKIP_BUILD SUMMARIZE_ONLY PRINT_CONFIGS
 bash "$ABL"
 rc=$?
@@ -42,16 +46,17 @@ out=$(ls -d "$ROOT"/results/single_build_"$BENCH_HOST"_* 2>/dev/null | sort | ta
 # flag_ablation.sh only logs a missing data directory; a registered build
 # must have passed the TPC-H tests and been timed
 if [ "$rc" -eq 0 ]; then
-  grep -q -E '^\[  PASSED  \]' "$out/${COMPILER}_${CONFIG}/tpch_test.log" 2>/dev/null ||
+  grep -q -E '^\[  PASSED  \]' "$out/${COMPILER}_${NAME}/tpch_test.log" 2>/dev/null ||
     { echo "single_build: TPC-H tests did not run" | tee -a "$out/driver.log" >&2; rc=1; }
   [ "$(wc -l < "$out/timing.csv")" -gt 1 ] ||
     { echo "single_build: no timings" | tee -a "$out/driver.log" >&2; rc=1; }
 fi
 {
-  echo "config: $CONFIG"
+  echo "config: $NAME"
   echo "compiler: $COMPILER"
+  echo "autovectorize: $AUTOVEC"
   echo "commit: $(git -C "$ROOT" rev-parse HEAD)"
   echo "exit: $rc"
-  echo "defines: $(cat "$out/${COMPILER}_${CONFIG}/defines.txt" 2>/dev/null)"
+  echo "defines: $(cat "$out/${COMPILER}_${NAME}/defines.txt" 2>/dev/null)"
 } > "$out/build.txt"
 exit "$rc"

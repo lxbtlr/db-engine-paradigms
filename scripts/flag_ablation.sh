@@ -112,6 +112,8 @@
 #   JOBS       $(nproc)
 #   SKIP_BUILD 0         1 = reuse build dirs
 #   TIMEOUT    1800      seconds per step (0 = none)
+#   AUTOVEC    OFF       ON = -DAUTOVECTORIZE=ON for every build; configs are
+#                        then named <config>_autovec (results, build dirs)
 #   SUMMARIZE_ONLY <dir> recompute matrix/effects/best from <dir>/timing.csv and exit
 #   RESULTS_PREFIX flag_ablation  results directory name before _<host>_<timestamp>
 #   MICROBENCH 1         0 = skip run_joindispatchbench for join_dispatch
@@ -173,6 +175,9 @@ TEST_THREADS=${TEST_THREADS:-4}
 JOBS=${JOBS:-$(nproc)}
 SKIP_BUILD=${SKIP_BUILD:-0}
 TIMEOUT=${TIMEOUT:-1800}
+# AUTOVECTORIZE for every build; ON labels each config <config>_autovec
+AUTOVEC=${AUTOVEC:-OFF}
+case "$AUTOVEC" in ON) AV_SUFFIX=_autovec ;; OFF) AV_SUFFIX= ;; *) echo "AUTOVEC must be ON or OFF" >&2; exit 2 ;; esac
 
 # matrix.csv: compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned
 # median_ms is the median over rounds of the per-invocation medians, so one
@@ -260,7 +265,7 @@ flags() {
        "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF" \
        "-DVW_GROUP_DISPATCH=OFF -DVW_GROUP_RUN_HEADS=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
        "-DVW_JOIN_DISPATCH=OFF -DVW_GROUP_HAVING=OFF -DVW_JOIN_SEMI_MAX_BYTES=0" \
-       "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
+       "-DAUTOVECTORIZE=$AUTOVEC" "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
 config_flags() {
   case "$1" in
@@ -311,7 +316,7 @@ config_flags() {
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
-bdir() { echo "$ROOT/build_flags/$BENCH_HOST/$1_$2"; }
+bdir() { echo "$ROOT/build_flags/$BENCH_HOST/$1_$2$AV_SUFFIX"; }
 # reject unknown config names before building (exit inside $(config_flags)
 # only leaves the subshell)
 for cfg in $CONFIGS; do (config_flags "$cfg") > /dev/null || { rm -rf "$OUT"; exit 2; }; done
@@ -340,14 +345,14 @@ CONFIGS=$kept
   lscpu | grep -E 'Model name|Socket|Core|Thread|NUMA node\(s\)|MHz' || true
   echo -n "governor cpu$CPU: "; cat "/sys/devices/system/cpu/cpu$CPU/cpufreq/scaling_governor" 2>/dev/null || echo n/a
   echo "SEL: $SEL  (avx512: $(grep -o -w -E 'avx512(f|vl)' /proc/cpuinfo | sort -u | tr '\n' ' '))"
-  echo "QUERIES: $QUERIES  REPS: $REPS  ROUNDS: $ROUNDS"
+  echo "QUERIES: $QUERIES  REPS: $REPS  ROUNDS: $ROUNDS  AUTOVEC: $AUTOVEC"
 } | tee "$OUT/machine.txt"
 [ "$MACHINE" = custom ] && log "WARNING: host $(hostname -s) is not a TARGET_MACHINE preset; building with MACHINE=custom (-march=native, default topology). Set MACHINE= to override."
 
 # ------------------------------------------------------- build + correctness
 for comp in $COMPILERS; do
   for cfg in $CONFIGS; do
-    tag="${comp}_${cfg}"; B=$(bdir "$comp" "$cfg"); D="$OUT/$tag"; mkdir -p "$D"
+    tag="${comp}_${cfg}$AV_SUFFIX"; B=$(bdir "$comp" "$cfg"); D="$OUT/$tag"; mkdir -p "$D"
     log "===== $tag ====="
     if [ "$SKIP_BUILD" != 1 ]; then
       # shellcheck disable=SC2046
@@ -394,13 +399,13 @@ else
       for comp in $COMPILERS; do
         for cfg in $CONFIGS; do
           B=$(bdir "$comp" "$cfg"); [ -x "$B/run_tpch" ] || continue
-          f="$OUT/${comp}_${cfg}/q${q}_r$r"
+          f="$OUT/${comp}_${cfg}$AV_SUFFIX/q${q}_r$r"
           # shellcheck disable=SC2086
           if ! tlimit $NUMA "$B/run_tpch" -p "$TPCH_PATH" -e v -q "$q" -r "$REPS" -t 1 -s "$SETTLE" \
                 > "$f.csv" 2> "$f.err"; then
-            fail "${comp}_${cfg} q$q round $r (see $f.err)"; continue
+            fail "${comp}_${cfg}$AV_SUFFIX q$q round $r (see $f.err)"; continue
           fi
-          awk -F, -v c="$comp" -v g="$cfg" -v r="$r" '
+          awk -F, -v c="$comp" -v g="$cfg$AV_SUFFIX" -v r="$r" '
             { l = $1; gsub(/^ +| +$/, "", l) }
             l ~ /^q[0-9]+ v/ { m = $2; n = $4; gsub(/ /, "", m); gsub(/ /, "", n); split(l, p, " ");
                               print c "," g "," r "," p[1] "," m "," n }' "$f.csv" >> "$OUT/timing.csv"
