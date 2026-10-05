@@ -113,6 +113,9 @@
 #   SKIP_BUILD 0         1 = reuse build dirs
 #   TIMEOUT    1800      seconds per step (0 = none)
 #   SUMMARIZE_ONLY <dir> recompute matrix/effects/best from <dir>/timing.csv and exit
+#   RESULTS_PREFIX flag_ablation  results directory name before _<host>_<timestamp>
+#   MICROBENCH 1         0 = skip run_joindispatchbench for join_dispatch
+#   PRINT_CONFIGS 0      1 = print the expanded CONFIGS and exit
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -129,6 +132,8 @@ CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 # config group: the TPC-valid join and group-by configs (see header)
 JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all join_all_valid grp_base grp_dispatch grp_runheads grp_having"
 CONFIGS=$(for c in $CONFIGS; do if [ "$c" = join_valid ]; then printf "%s\n" $JOIN_VALID_CONFIGS; else echo "$c"; fi; done | awk '!seen[$0]++' | tr '\n' ' ')
+# PRINT_CONFIGS=1: print the expanded config list and exit (single_build.sh)
+if [ "${PRINT_CONFIGS:-0}" = 1 ]; then echo $CONFIGS; exit 0; fi
 HASH_BASE=${HASH_BASE:-default}
 # SIMD selection only where the CPU has the kernels' ISA, so a config never
 # claims SIMD selection while silently running the scalar fallback
@@ -235,7 +240,7 @@ if [ -n "${SUMMARIZE_ONLY:-}" ]; then OUT=$SUMMARIZE_ONLY; summarize
   column -t -s, "$OUT/effects.csv"; column -t -s, "$OUT/best.csv"; column -t -s, "$OUT/hash.csv"
   column -t -s, "$OUT/join.csv"; column -t -s, "$OUT/group.csv"; exit 0; fi
 
-OUT="$ROOT/results/flag_ablation_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
+OUT="$ROOT/results/${RESULTS_PREFIX:-flag_ablation}_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUT"
 FAILS=0
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/driver.log"; }
@@ -368,7 +373,7 @@ for comp in $COMPILERS; do
     else log "$tag: no $DATADIR/tpch/sf1, TPC-H tests skipped"; fi
     # join_dispatch also runs the microbenchmark behind its rules (pinned,
     # once per compiler; it is the same for every config)
-    if [ "$cfg" = join_dispatch ]; then
+    if [ "$cfg" = join_dispatch ] && [ "${MICROBENCH:-1}" = 1 ]; then
       if [ "$SKIP_BUILD" = 1 ] || cmake --build "$B" -j "$JOBS" --target run_joindispatchbench >> "$D/build.log" 2>&1; then
         # shellcheck disable=SC2086
         if tlimit $NUMA "$B/run_joindispatchbench" > "$D/joindispatchbench.csv" 2> "$D/joindispatchbench.err"; then
