@@ -200,7 +200,7 @@ void parseColumns(runtime::Relation& r, std::vector<ColumnConfigOwning>& cols,
    if (!allColumnsMMaped) {
       std::vector<std::vector<void*>> attributes;
       attributes.assign(colsC.size(), {});
-      ifstream relationFile(dir + fileName + ".tbl");
+      ifstream relationFile(dir + "/" + fileName + ".tbl");
       if (!relationFile.is_open())
          throw runtime_error("csv file not found: " + dir);
       string line;
