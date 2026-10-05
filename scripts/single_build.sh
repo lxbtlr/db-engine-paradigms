@@ -18,7 +18,8 @@
 #   COMPILER   gcc       gcc or clang
 #   AUTOVEC    OFF       ON = build with -DAUTOVECTORIZE=ON
 #   QUERIES, REPS, ROUNDS, SETTLE, TEST_THREADS, TIMEOUT, ENGINE, THREADS,
-#   VECTOR_SIZE, SF, PIN, SIMDhash, SIMDjoin, SIMDsel, SIMDproj, BENCH_HOST, ...
+#   VECTOR_SIZE, SF, PIN, CPU, SIMDhash, SIMDjoin, SIMDsel, SIMDproj, VW_FLAGS,
+#   PERF, BENCH_HOST, ... (TESTS must stay all)
 #              passed through to flag_ablation.sh (see its header)
 set -u -o pipefail
 
@@ -33,11 +34,13 @@ die() { echo "single_build: $*" >&2; exit 2; }
 case "$CONFIG" in *[[:space:]]*) die "CONFIG takes one config, got '$CONFIG'" ;; esac
 case "$COMPILER" in gcc|clang) ;; *) die "COMPILER must be gcc or clang, got '$COMPILER'" ;; esac
 case "$AUTOVEC" in ON|OFF) ;; *) die "AUTOVEC must be ON or OFF, got '$AUTOVEC'" ;; esac
+# a registered build has passed every TPC-H test
+[ "${TESTS:-all}" = all ] || die "TESTS=$TESTS: a registered build runs all TPC-H tests"
 valid=$(CONFIGS=join_valid PRINT_CONFIGS=1 bash "$ABL") || die "cannot list join_valid configs"
 case " $valid " in *" $CONFIG "*) ;; *) die "$CONFIG is not TPC-valid (join_valid: $valid)" ;; esac
 
 export RESULTS_PREFIX=single_build MICROBENCH=0 CONFIGS="$CONFIG" COMPILERS="$COMPILER" AUTOVEC
-unset HASH_BASE SKIP_BUILD SUMMARIZE_ONLY PRINT_CONFIGS
+unset HASH_BASE SKIP_BUILD SUMMARIZE_ONLY PRINT_CONFIGS TESTS
 bash "$ABL"
 rc=$?
 # exit 2: flag_ablation.sh refused a setting before making a results directory
@@ -65,6 +68,8 @@ fi
   echo "autovectorize: $AUTOVEC"
   echo "engine: ${ENGINE:-v}  threads: ${THREADS:-1}  vector_size: ${VECTOR_SIZE:-1024}  sf: ${SF:-1}  pin: ${PIN:-auto}"
   echo "SIMDhash: ${SIMDhash:-}  SIMDjoin: ${SIMDjoin:-}  SIMDsel: ${SIMDsel:-}  SIMDproj: ${SIMDproj:-}"
+  echo "vw_flags: $(cat "$out/vw_flags.txt" 2>/dev/null)"
+  echo "cpu: ${CPU:-0}  perf: ${PERF:-none}"
   echo "commit: $(git -C "$ROOT" rev-parse HEAD)"
   echo "exit: $rc"
   echo "defines: $(cat "$out/${COMPILER}_${NAME}/defines.txt" 2>/dev/null)"

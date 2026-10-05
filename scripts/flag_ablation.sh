@@ -87,6 +87,10 @@
 #   hash.csv     hash configs: median ms and speedup vs hash_murmur
 #   join.csv     join configs: median ms and speedup vs join_base
 #   group.csv    group-by configs: median ms and speedup vs grp_base
+#   noise.csv    per config x query: rounds, spread of the round medians, and
+#                the median within-invocation stddev/mean (cv)
+#   counters.csv every run_tpch column per invocation, long form
+#                (compiler,config,round,query,metric,value: IPC, LLC-misses, ...)
 #
 # Environment (all optional):
 #   COMPILERS  "gcc clang"
@@ -124,11 +128,20 @@
 #   VECTOR_SIZE 1024     run_tpch -v; also the vector size of test_all
 #   SIMDhash SIMDjoin SIMDsel SIMDproj  0|1, unset = built-in default:
 #              run-time SIMD primitive switches read by run_tpch and test_all
+#   VW_FLAGS   ""        extra CMake options on every config, "VW_X=ON VW_Y=8":
+#                        VW_* (and HUGE_2MB_MALLOC_HUGE) only; configs are
+#                        named _x<hash>, vw_flags.txt maps the hash back
+#   CPU        (above)   also part of the name when not 0 (_cpu<N>)
+#   TESTS      all       TPC-H tests: all, none, or a query list (1,6)
+#   PERF       ""        stat or record: one perf run per config x query after
+#                        the timing; <compiler>_<config>/perf_q<N>.txt
+#                        (PERF_KEEP=1 keeps perf.data)
 #   Each of these that differs from its default is appended to the config
-#   name: <config>[_autovec][_e<engine>][_t<threads>][_v<size>][_sf<SF>]
-#   [_simdhash<0|1>]..., so results and database entries never collide.
-#   Build dirs only carry _autovec. clearCaches (needs root) and the canary
-#   (-c/-C, CANARY_IN_BENCH builds) are not exposed.
+#   name: <config>[_autovec][_x<hash>][_e<engine>][_t<threads>][_v<size>]
+#   [_sf<SF>][_cpu<N>][_simdhash<0|1>]..., so results and database entries
+#   never collide; summaries compare configs with the same suffix.
+#   Build dirs carry _autovec and _x<hash>. clearCaches (needs root) and the
+#   canary (-c/-C, CANARY_IN_BENCH builds) are not exposed.
 #   SUMMARIZE_ONLY <dir> recompute matrix/effects/best from <dir>/timing.csv and exit
 #   RESULTS_PREFIX flag_ablation  results directory name before _<host>_<timestamp>
 #   MICROBENCH 1         0 = skip run_joindispatchbench for join_dispatch
@@ -217,6 +230,37 @@ done
 for n in VECTOR_SIZE SF; do
   case "${!n}" in ''|*[!0-9]*|0) echo "$n must be a positive integer" >&2; exit 2 ;; esac
 done
+case "$CPU" in ''|*[!0-9]*) echo "CPU must be a CPU number" >&2; exit 2 ;; esac
+[ -d "/sys/devices/system/cpu/cpu$CPU" ] || { echo "CPU $CPU does not exist on $(hostname -s)" >&2; exit 2; }
+# TESTS: all (default), none, or a comma list of TPC-H queries to test
+TESTS=${TESTS:-all}
+case "$TESTS" in
+  all) TEST_FILTER='TPCH.*' ;;
+  none) TEST_FILTER= ;;
+  *) case "$TESTS" in *[!0-9,]*|,*|*,|*,,*) echo "TESTS must be all, none or a comma list of queries" >&2; exit 2 ;; esac
+     TEST_FILTER=$(echo "$TESTS" | sed 's/[0-9]*/TPCH.q&/g; s/,/:/g') ;;
+esac
+# PERF: profile each config x query once, after the timing: stat (perf stat
+# -d) or record (perf record -g, report kept as text; PERF_KEEP=1 keeps
+# perf.data too)
+PERF=${PERF:-}
+case "$PERF" in ''|stat|record) ;; *) echo "PERF must be stat or record" >&2; exit 2 ;; esac
+# VW_FLAGS: extra CMake options applied on top of every config, last -D wins
+# ("VW_JOIN_BLOOM=ON VW_JOIN_SEMI_MAX_BYTES=4194304"). Configs are then named
+# <config>_x<hash> after the sorted option list (vw_flags.txt maps it back).
+VW_FLAGS=${VW_FLAGS:-}
+VW_FLAGS_D= VW_FLAGS_HASH=
+if [ -n "$VW_FLAGS" ]; then
+  for kv in $VW_FLAGS; do
+    [[ $kv =~ ^(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE)=[A-Za-z0-9_.]+$ ]] ||
+      { echo "VW_FLAGS: $kv is not OPTION=VALUE with a VW_ option" >&2; exit 2; }
+  done
+  [ -n "$(tr ' ' '\n' <<< "$VW_FLAGS" | grep . | cut -d= -f1 | sort | uniq -d)" ] &&
+    { echo "VW_FLAGS sets an option twice" >&2; exit 2; }
+  VW_FLAGS=$(tr ' ' '\n' <<< "$VW_FLAGS" | grep . | sort | tr '\n' ' ' | sed 's/ $//')
+  VW_FLAGS_D=$(sed 's/[^ ]*/-D&/g' <<< "$VW_FLAGS")
+  VW_FLAGS_HASH=$(printf '%s' "$VW_FLAGS" | sha1sum | cut -c1-8)
+fi
 # run_tpch and test_all read these from the environment (configFromEnv)
 export vectorSize=$VECTOR_SIZE
 for n in SIMDhash SIMDjoin SIMDsel SIMDproj; do
@@ -224,16 +268,18 @@ for n in SIMDhash SIMDjoin SIMDsel SIMDproj; do
 done
 # Every setting that differs from the default is part of the config name
 # (results, build dirs, database), so runs never collide:
-# <config>[_autovec][_e<engine>][_t<threads>][_v<vector size>][_sf<SF>][_simd<x>]...
+# <config>[_autovec][_x<VW_FLAGS hash>][_e<engine>][_t<threads>][_v<vector size>]
+# [_sf<SF>][_cpu<CPU>][_simd<x>]...
 # With THREADS other than 1, each timing row is named with its own count
 # (_t<N>) and the per-build directory with all of them (_t1-4-8). The build
-# dir only depends on AUTOVEC (the rest are run-time settings).
-AV_SUFFIX=$([ "$AUTOVEC" = ON ] && echo _autovec)
+# dir only depends on AUTOVEC and VW_FLAGS (the rest are run-time settings).
+AV_SUFFIX=$([ "$AUTOVEC" = ON ] && echo _autovec)${VW_FLAGS_HASH:+_x$VW_FLAGS_HASH}
 PRE_SUFFIX=$AV_SUFFIX
 [ "$ENGINE" = v ] || PRE_SUFFIX+=_e$ENGINE
 POST_SUFFIX=
 [ "$VECTOR_SIZE" = 1024 ] || POST_SUFFIX+=_v$VECTOR_SIZE
 [ "$SF" = 1 ] || POST_SUFFIX+=_sf$SF
+[ "$CPU" = 0 ] || POST_SUFFIX+=_cpu$CPU
 for n in SIMDhash SIMDjoin SIMDsel SIMDproj; do
   [ -n "${!n:-}" ] && POST_SUFFIX+=_$(echo "$n" | tr '[:upper:]' '[:lower:]')${!n}
 done
@@ -243,63 +289,90 @@ RUN_SUFFIX=$PRE_SUFFIX${TN:+_t${THREADS//,/-}}$POST_SUFFIX
 # matrix.csv: compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned
 # median_ms is the median over rounds of the per-invocation medians, so one
 # disturbed invocation (seen on dubliner: 2-3x slower rounds) does not skew it.
+# A config name is a known config plus the suffix of its run settings
+# (_autovec, _t4, ...; see RUN_SUFFIX). Every comparison pairs configs with
+# the same suffix: jd_all_t4 is compared with join_base_t4, never join_base.
+# noise.csv: per compiler x query x config, the spread of the round medians
+# ((max - min) / median) and the median within-invocation coefficient of
+# variation (stddev / mean, from counters.csv); either above 0.05 means the
+# median is not trustworthy to a few percent.
 # The header is printed outside sort so it stays on line 1.
+KNOWN_CONFIGS="$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"
 summarize() {
-  awk -F, '
+  : > "$OUT/matrix.body"; : > "$OUT/noise.body"; : > "$OUT/effects.body"
+  awk -F, -v known="$(echo $KNOWN_CONFIGS)" -v out="$OUT" -v counters="$OUT/counters.csv" '
     function median(str,   a, n, i, j, t) {
       n = split(str, a, " ")
       for (i = 2; i <= n; i++) { t = a[i] + 0; for (j = i - 1; j >= 1 && a[j] + 0 > t; j--) a[j + 1] = a[j]; a[j + 1] = t }
       return (n % 2) ? a[(n + 1) / 2] : (a[n / 2] + a[n / 2 + 1]) / 2
     }
-    NR > 1 { k = $1 "," $4 "," $2; v[k] = v[k] " " $5; if (!(k in mn) || $6 < mn[k]) mn[k] = $6 }
-    END { for (k in v) m[k] = median(v[k])
-          for (k in m) { split(k, p, ","); d = p[1] "," p[2] ",default"; t = p[1] "," p[2] ",tuned"
-            printf "%s,%.2f,%.2f,%s,%s\n", k, m[k], mn[k],
-                   (d in m) ? sprintf("%.3f", m[d] / m[k]) : "", (t in m) ? sprintf("%.3f", m[t] / m[k]) : "" } }' \
-    "$OUT/timing.csv" | sort -t, -k1,1 -k2,2V -k3,3 > "$OUT/matrix.body"
-  { echo "compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned"; cat "$OUT/matrix.body"; } > "$OUT/matrix.csv"
-
-  # effects.csv: add_speedup = default / add_<flag>, drop_speedup = drop_<flag> / tuned
+    # base(c): the longest known config that c is, or starts with plus "_";
+    # sets SUF to the rest (the run-setting suffix)
+    function base(c,   i, k, best) {
+      best = ""
+      for (i = 1; i <= nk; i++) { k = K[i]
+        if ((c == k || substr(c, 1, length(k) + 1) == k "_") && length(k) > length(best)) best = k }
+      SUF = best == "" ? "" : substr(c, length(best) + 1)
+      return best
+    }
+    function sp(b, x) { return (b != "" && x + 0 > 0) ? sprintf("%.3f", b / x) : "" }
+    # one family table: rows in family order, each vs its base with the same suffix
+    function family(file, hdr, list, b,   n, F, k, s, i, c, cmd, rows, nr) {
+      n = split(list, F, " ")
+      print hdr > file
+      nr = 0
+      for (k in cqs) { split(k, p, SUBSEP); s = p[3]
+        for (i = 1; i <= n; i++) { c = F[i] s
+          if ((p[1] "," p[2] "," c) in m)
+            rows[++nr] = p[1] "," p[2] "," s "," i "," c "," sprintf("%.2f", m[p[1] "," p[2] "," c]) "," sp(m[p[1] "," p[2] "," b s], m[p[1] "," p[2] "," c]) } }
+      close(file)
+      # sort on compiler, query, suffix, family order; drop the two sort keys
+      cmd = "sort -t, -k1,1 -k2,2V -k3,3 -k4,4n | cut -d, -f1,2,5- >> \"" file "\""
+      for (i = 1; i <= nr; i++) print rows[i] | cmd
+      close(cmd)
+    }
+    BEGIN { nk = split(known, K, " ") }
+    FILENAME == counters { if (FNR > 1 && ($5 == "stddev" || $5 == "mean")) cv[$1 "," $4 "," $2 "," $3, $5] = $6; next }
+    FNR > 1 { k = $1 "," $4 "," $2; v[k] = v[k] " " $5; if (!(k in mn) || $6 < mn[k]) mn[k] = $6
+              if (!(k in hi) || $5 > hi[k]) hi[k] = $5; if (!(k in lo) || $5 < lo[k]) lo[k] = $5; nr_[k]++
+              if ((k "," $3, "mean") in cv && cv[k "," $3, "mean"] > 0) cvs[k] = cvs[k] " " cv[k "," $3, "stddev"] / cv[k "," $3, "mean"] }
+    END {
+      for (k in v) { m[k] = median(v[k]); split(k, p, ","); base(p[3]); cqs[p[1], p[2], SUF] = 1; sufs[SUF] = 1 }
+      mf = out "/matrix.body"
+      for (k in m) { split(k, p, ","); base(p[3])
+        d = p[1] "," p[2] ",default" SUF; t = p[1] "," p[2] ",tuned" SUF
+        printf "%s,%.2f,%.2f,%s,%s\n", k, m[k], mn[k], (d in m) ? sp(m[d], m[k]) : "", (t in m) ? sp(m[t], m[k]) : "" > mf }
+      close(mf)
+      nf = out "/noise.body"
+      for (k in m) printf "%s,%.2f,%.2f,%d,%.3f,%s\n", k, m[k], mn[k], nr_[k], (m[k] > 0 ? (hi[k] - lo[k]) / m[k] : 0),
+                          (k in cvs) ? sprintf("%.3f", median(cvs[k])) : "" > nf
+      close(nf)
+      # effects.csv: add_speedup = default / add_<flag>, drop_speedup = drop_<flag> / tuned
+      ef = out "/effects.body"; nfl = split("group_aggr group_aggr_sel pos16 crc32 huge2mb", fl, " ")
+      for (k in cqs) { split(k, p, SUBSEP); s = p[3]; cq = p[1] "," p[2]
+        if (!((cq ",default" s) in m) && !((cq ",tuned" s) in m)) continue
+        for (i = 1; i <= nfl; i++) { f = fl[i]
+          d = m[cq ",default" s]; a = m[cq ",add_" f s]; t = m[cq ",tuned" s]; x = m[cq ",drop_" f s]
+          printf "%s,%s,%s,%s\n", cq, f s, (d && a) ? sprintf("%.3f", d / a) : "", (t && x) ? sprintf("%.3f", x / t) : "" > ef } }
+      close(ef)
+      family(out "/hash.csv", "compiler,query,hash_config,median_ms,speedup_vs_murmur",
+             "hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul", "hash_murmur")
+      family(out "/join.csv", "compiler,query,join_config,median_ms,speedup_vs_base",
+             "join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_semi join_all_valid", "join_base")
+      family(out "/group.csv", "compiler,query,group_config,median_ms,speedup_vs_base",
+             "grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_having", "grp_base")
+    }' $([ -f "$OUT/counters.csv" ] && echo "$OUT/counters.csv") "$OUT/timing.csv"
+  { echo "compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned"
+    sort -t, -k1,1 -k2,2V -k3,3 "$OUT/matrix.body"; } > "$OUT/matrix.csv"
+  { echo "compiler,query,config,median_ms,best_ms,rounds,round_spread,cv"
+    sort -t, -k1,1 -k2,2V -k3,3 "$OUT/noise.body"; } > "$OUT/noise.csv"
   { echo "compiler,query,flag,add_speedup,drop_speedup"
-    awk -F, '{ m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-      END { split("group_aggr group_aggr_sel pos16 crc32 huge2mb", fl, " ")
-            for (k in cq) for (i = 1; i <= 5; i++) { f = fl[i]
-              d = m[k ",default"]; a = m[k ",add_" f]; t = m[k ",tuned"]; x = m[k ",drop_" f]
-              printf "%s,%s,%s,%s\n", k, f, (d && a) ? sprintf("%.3f", d / a) : "", (t && x) ? sprintf("%.3f", x / t) : "" } }' \
-      "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/effects.csv"
-
+    sort -t, -k1,1 -k2,2V "$OUT/effects.body" 2> /dev/null; } > "$OUT/effects.csv"
   # best.csv: fastest config per compiler x query (by median_ms)
   { echo "compiler,query,best_config,median_ms,vs_default,vs_tuned"
     awk -F, '{ k = $1 "," $2; if (!(k in b) || $4 < b[k]) { b[k] = $4; c[k] = $3; d[k] = $6; t[k] = $7 } }
       END { for (k in b) printf "%s,%s,%.2f,%s,%s\n", k, c[k], b[k], d[k], t[k] }' "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/best.csv"
-
-  # hash.csv: hash configs, speedup vs hash_murmur (the default hash)
-  { echo "compiler,query,hash_config,median_ms,speedup_vs_murmur"
-    awk -F, '$3 ~ /^hash_/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-      END { n = split("hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul", hc, " ")
-            for (k in cq) { b = m[k ",hash_murmur"]
-              for (i = 1; i <= n; i++) if ((k "," hc[i]) in m)
-                printf "%s,%s,%.2f,%s\n", k, hc[i], m[k "," hc[i]], b ? sprintf("%.3f", b / m[k "," hc[i]]) : "" } }' \
-      "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/hash.csv"
-
-  # join.csv: join configs, speedup vs join_base (today's probe, same hash)
-  { echo "compiler,query,join_config,median_ms,speedup_vs_base"
-    awk -F, '$3 ~ /^(join_|nj_|jd_)/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-      END { n = split("join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_semi join_all_valid", jc, " ")
-            for (k in cq) { b = m[k ",join_base"]
-              for (i = 1; i <= n; i++) if ((k "," jc[i]) in m)
-                printf "%s,%s,%.2f,%s\n", k, jc[i], m[k "," jc[i]], b ? sprintf("%.3f", b / m[k "," jc[i]]) : "" } }' \
-      "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/join.csv"
-
-  # group.csv: group-by configs, speedup vs grp_base (today's HashGroup)
-  { echo "compiler,query,group_config,median_ms,speedup_vs_base"
-    awk -F, '$3 ~ /^grp_/ { m[$1 "," $2 "," $3] = $4; cq[$1 "," $2] = 1 }
-      END { n = split("grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_having", gc, " ")
-            for (k in cq) { b = m[k ",grp_base"]
-              for (i = 1; i <= n; i++) if ((k "," gc[i]) in m)
-                printf "%s,%s,%.2f,%s\n", k, gc[i], m[k "," gc[i]], b ? sprintf("%.3f", b / m[k "," gc[i]]) : "" } }' \
-      "$OUT/matrix.body" | sort -t, -k1,1 -k2,2V; } > "$OUT/group.csv"
-  rm -f "$OUT/matrix.body"
+  rm -f "$OUT/matrix.body" "$OUT/noise.body" "$OUT/effects.body"
 }
 # SUMMARIZE_ONLY=<results dir>: recompute the summaries from its timing.csv
 if [ -n "${SUMMARIZE_ONLY:-}" ]; then OUT=$SUMMARIZE_ONLY; summarize
@@ -409,7 +482,9 @@ CONFIGS=$kept
   echo "QUERIES: $QUERIES  REPS: $REPS  ROUNDS: $ROUNDS  AUTOVEC: $AUTOVEC"
   echo "ENGINE: $ENGINE  THREADS: $THREADS  VECTOR_SIZE: $VECTOR_SIZE  SF: $SF ($TPCH_PATH)  PIN: $PIN"
   echo "SIMDhash: ${SIMDhash:-}  SIMDjoin: ${SIMDjoin:-}  SIMDsel: ${SIMDsel:-}  SIMDproj: ${SIMDproj:-}  label suffix: ${RUN_SUFFIX:-none}"
+  echo "VW_FLAGS: ${VW_FLAGS:-none}${VW_FLAGS_HASH:+ (x$VW_FLAGS_HASH)}  TESTS: $TESTS  PERF: ${PERF:-none}"
 } | tee "$OUT/machine.txt"
+[ -n "$VW_FLAGS" ] && echo "x$VW_FLAGS_HASH $VW_FLAGS" > "$OUT/vw_flags.txt"
 [ "$MACHINE" = custom ] && log "WARNING: host $(hostname -s) is not a TARGET_MACHINE preset; building with MACHINE=custom (-march=native, default topology). Set MACHINE= to override."
 
 # ------------------------------------------------------- build + correctness
@@ -421,7 +496,7 @@ for comp in $COMPILERS; do
       # shellcheck disable=SC2046
       if ! cmake -S "$ROOT" -B "$B" -DCMAKE_BUILD_TYPE=Release -DCOMPILER="$comp" \
             -DTARGET_MACHINE="$MACHINE" -DTARGET_ARCH= -DDATADIR="$DATADIR" \
-            $(config_flags "$cfg") > "$D/cmake.log" 2>&1; then
+            $(config_flags "$cfg") $VW_FLAGS_D > "$D/cmake.log" 2>&1; then
         fail "$tag cmake (see $D/cmake.log)"; continue
       fi
       : > "$D/build.log"
@@ -433,8 +508,9 @@ for comp in $COMPILERS; do
     # the effective defines, to confirm each config is what it claims
     cat "$B/build.ninja" "$B/CMakeFiles/vectorwise.dir/flags.make" 2>/dev/null | grep -o -E -- '-D(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE)(=[^ ]*)?' | sort -u | tr '\n' ' ' > "$D/defines.txt"
     log "$tag defines: $(cat "$D/defines.txt")"
-    if [ -x "$B/test_all" ] && [ -d "$DATADIR/tpch/sf1" ]; then
-      if threads=$TEST_THREADS tlimit "$B/test_all" --gtest_filter='TPCH.*' > "$D/tpch_test.log" 2>&1; then
+    if [ -z "$TEST_FILTER" ]; then log "$tag: TPC-H tests skipped (TESTS=none)"
+    elif [ -x "$B/test_all" ] && [ -d "$DATADIR/tpch/sf1" ]; then
+      if threads=$TEST_THREADS tlimit "$B/test_all" --gtest_filter="$TEST_FILTER" > "$D/tpch_test.log" 2>&1; then
         log "$tag TPC-H: $(grep -E '^\[  PASSED  \]' "$D/tpch_test.log")"
       else fail "$tag TPC-H tests (see $D/tpch_test.log)"; fi
     elif [ ! -x "$B/test_all" ]; then fail "$tag: test_all not built"
@@ -454,6 +530,7 @@ done
 
 # ------------------------------------------------------------------ timing
 echo "compiler,config,round,query,median_ms,min_ms" > "$OUT/timing.csv"
+echo "compiler,config,round,query,metric,value" > "$OUT/counters.csv"
 if [ ! -d "$TPCH_PATH" ]; then
   log "no TPCH_PATH=$TPCH_PATH, timing skipped"
 else
@@ -468,17 +545,54 @@ else
                 > "$f.csv" 2> "$f.err"; then
             fail "${comp}_${cfg}$RUN_SUFFIX q$q round $r (see $f.err)"; continue
           fi
+          # timing.csv gets median and min; counters.csv every run_tpch column
+          # (IPC, LLC-misses, ...) in long form, named as in its header
           awk -F, -v c="$comp" -v g="$cfg$PRE_SUFFIX" -v post="$POST_SUFFIX" -v tn="$TN" \
-              -v r="$r" -v e="$ENGINE" '
+              -v r="$r" -v e="$ENGINE" -v tf="$OUT/timing.csv" -v cf="$OUT/counters.csv" '
             { l = $1; gsub(/^ +| +$/, "", l) }
+            l == "name" { for (i = 2; i <= NF; i++) { h[i] = $i; gsub(/^ +| +$/, "", h[i]); gsub(/[ .]+/, "-", h[i]); sub(/-$/, "", h[i]) } }
             # label "q6 v  t4": p[1] = query, p[3] = thread count
-            l ~ "^q[0-9]+ " e { m = $2; n = $4; gsub(/ /, "", m); gsub(/ /, "", n); split(l, p, " ");
-                              print c "," g (tn ? "_" p[3] : "") post "," r "," p[1] "," m "," n }' "$f.csv" >> "$OUT/timing.csv"
+            l ~ "^q[0-9]+ " e { m = $2; n = $4; gsub(/ /, "", m); gsub(/ /, "", n); split(l, p, " ")
+                              name = g (tn ? "_" p[3] : "") post
+                              print c "," name "," r "," p[1] "," m "," n >> tf
+                              for (i = 2; i <= NF; i++) { v = $i; gsub(/ /, "", v)
+                                if (h[i] != "" && v != "") print c "," name "," r "," p[1] "," h[i] "," v >> cf } }' "$f.csv"
         done
       done
     done
     log "q$q done"
   done
+fi
+
+# ----------------------------------------------------------------- profiling
+# after the timing, so profiling never disturbs it: one perf run per config x
+# query, same settings, into <compiler>_<config>/perf_q<N>.txt
+if [ -n "$PERF" ] && [ -d "$TPCH_PATH" ]; then
+  if ! command -v perf > /dev/null; then fail "PERF=$PERF: perf is not installed on $(hostname -s)"
+  else
+    for comp in $COMPILERS; do
+      for cfg in $CONFIGS; do
+        B=$(bdir "$comp" "$cfg"); [ -x "$B/run_tpch" ] || continue
+        D="$OUT/${comp}_${cfg}$RUN_SUFFIX"
+        for q in ${QUERIES//,/ }; do
+          run=("$B/run_tpch" -p "$TPCH_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE")
+          if [ "$PERF" = stat ]; then
+            # shellcheck disable=SC2086
+            tlimit $NUMA perf stat -d -o "$D/perf_q$q.txt" -- "${run[@]}" > /dev/null 2> "$D/perf_q$q.err" ||
+              fail "${comp}_${cfg}$RUN_SUFFIX perf stat q$q (see $D/perf_q$q.err)"
+          else
+            # shellcheck disable=SC2086
+            if tlimit $NUMA perf record -g -o "$D/perf_q$q.data" -- "${run[@]}" > /dev/null 2> "$D/perf_q$q.err"; then
+              perf report --stdio --no-children --percent-limit 0.5 -i "$D/perf_q$q.data" > "$D/perf_q$q.txt" 2>> "$D/perf_q$q.err" ||
+                fail "${comp}_${cfg}$RUN_SUFFIX perf report q$q (see $D/perf_q$q.err)"
+              [ "${PERF_KEEP:-0}" = 1 ] || rm -f "$D/perf_q$q.data"
+            else fail "${comp}_${cfg}$RUN_SUFFIX perf record q$q (see $D/perf_q$q.err)"; fi
+          fi
+        done
+      done
+    done
+    log "perf $PERF: <compiler>_<config>/perf_q<N>.txt"
+  fi
 fi
 
 # ---------------------------------------------------------------- summaries
