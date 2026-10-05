@@ -99,21 +99,36 @@
 #              otherwise (Zen 3, ARM, ...) "-DVW_SIMD_SEL=OFF"
 #   MACHINE    $(hostname -s) if it is a preset (dubliner, roquefort, manchego, burrata, kafir, rpi5), else custom
 #   DATADIR    /tank/alexb/swole/          test_all reads $DATADIR/tpch/sf1/
-#   TPCH_PATH  /tank/alexb/swole/tpch/sf1  run_tpch -p
+#   SF         1         scale factor: TPCH_PATH default /tank/alexb/swole/tpch/sf$SF
+#   TPCH_PATH  /tank/alexb/swole/tpch/sf$SF  run_tpch -p
 #   QUERIES    1,3,6,9,18
 #   REPS       30        run_tpch -r per invocation
 #   ROUNDS     3
 #   SETTLE     2         run_tpch -s
 #   CPU        0
 #   NODE       NUMA node of CPU (from sysfs)
-#   NUMA       "numactl --physcpubind=$CPU --membind=$NODE"; taskset -c $CPU
-#              without numactl; "" = no pinning
+#   NUMA       pinning command; default from PIN:
+#              cpu = "numactl --physcpubind=$CPU --membind=$NODE" (taskset -c $CPU without numactl)
+#   PIN        cpu if THREADS=1, else none: cpu (NUMA default above; refused
+#              with more than one thread), node
+#              (numactl --cpunodebind=$NODE --membind=$NODE) or none; ignored if
+#              NUMA is set
 #   TEST_THREADS 4       worker threads for test_all
 #   JOBS       $(nproc)
 #   SKIP_BUILD 0         1 = reuse build dirs
 #   TIMEOUT    1800      seconds per step (0 = none)
-#   AUTOVEC    OFF       ON = -DAUTOVECTORIZE=ON for every build; configs are
-#                        then named <config>_autovec (results, build dirs)
+#   AUTOVEC    OFF       ON = -DAUTOVECTORIZE=ON for every build
+#   ENGINE     v         run_tpch -e: v (Vectorwise), h (Hyper), b (Hyper Q6, branching)
+#   THREADS    1         run_tpch -t: a count or a comma list (1,4,8), all
+#                        in one invocation; each count is its own config _t<N>
+#   VECTOR_SIZE 1024     run_tpch -v; also the vector size of test_all
+#   SIMDhash SIMDjoin SIMDsel SIMDproj  0|1, unset = built-in default:
+#              run-time SIMD primitive switches read by run_tpch and test_all
+#   Each of these that differs from its default is appended to the config
+#   name: <config>[_autovec][_e<engine>][_t<threads>][_v<size>][_sf<SF>]
+#   [_simdhash<0|1>]..., so results and database entries never collide.
+#   Build dirs only carry _autovec. clearCaches (needs root) and the canary
+#   (-c/-C, CANARY_IN_BENCH builds) are not exposed.
 #   SUMMARIZE_ONLY <dir> recompute matrix/effects/best from <dir>/timing.csv and exit
 #   RESULTS_PREFIX flag_ablation  results directory name before _<host>_<timestamp>
 #   MICROBENCH 1         0 = skip run_joindispatchbench for join_dispatch
@@ -152,8 +167,13 @@ detect_machine() {
 }
 MACHINE=${MACHINE:-$(detect_machine)}
 DATADIR=${DATADIR:-/tank/alexb/swole/}
-TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf1}
+SF=${SF:-1}
+TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf$SF}
 QUERIES=${QUERIES:-1,3,6,9,18}
+ENGINE=${ENGINE:-v}
+THREADS=${THREADS:-1}
+VECTOR_SIZE=${VECTOR_SIZE:-1024}
+PIN=${PIN:-$([ "$THREADS" = 1 ] && echo cpu || echo none)}
 REPS=${REPS:-30}
 ROUNDS=${ROUNDS:-3}
 SETTLE=${SETTLE:-2}
@@ -165,19 +185,60 @@ cpu_node() {
   echo 0
 }
 NODE=${NODE:-$(cpu_node "$CPU")}
-# pin with numactl (CPU + its local memory), else taskset (CPU only), else none
+# PIN=cpu: numactl (CPU + its local memory), else taskset (CPU only);
+# PIN=node: numactl on CPU's NUMA node (cores + memory); PIN=none: no pinning
+NUMA_SET=${NUMA+1} # NUMA given explicitly: PIN is ignored
 if [ -z "${NUMA+x}" ]; then
-  if command -v numactl > /dev/null; then NUMA="numactl --physcpubind=$CPU --membind=$NODE"
-  elif command -v taskset > /dev/null; then NUMA="taskset -c $CPU"
-  else NUMA=""; fi
+  case "$PIN" in
+    cpu) if command -v numactl > /dev/null; then NUMA="numactl --physcpubind=$CPU --membind=$NODE"
+         elif command -v taskset > /dev/null; then NUMA="taskset -c $CPU"
+         else NUMA=""; fi ;;
+    node) command -v numactl > /dev/null || { echo "PIN=node needs numactl" >&2; exit 2; }
+          NUMA="numactl --cpunodebind=$NODE --membind=$NODE" ;;
+    none) NUMA="" ;;
+    *) echo "PIN must be cpu, node or none" >&2; exit 2 ;;
+  esac
 fi
 TEST_THREADS=${TEST_THREADS:-4}
 JOBS=${JOBS:-$(nproc)}
 SKIP_BUILD=${SKIP_BUILD:-0}
 TIMEOUT=${TIMEOUT:-1800}
-# AUTOVECTORIZE for every build; ON labels each config <config>_autovec
 AUTOVEC=${AUTOVEC:-OFF}
-case "$AUTOVEC" in ON) AV_SUFFIX=_autovec ;; OFF) AV_SUFFIX= ;; *) echo "AUTOVEC must be ON or OFF" >&2; exit 2 ;; esac
+case "$AUTOVEC" in ON|OFF) ;; *) echo "AUTOVEC must be ON or OFF" >&2; exit 2 ;; esac
+case "$ENGINE" in v|h|b) ;; *) echo "ENGINE must be v, h or b" >&2; exit 2 ;; esac
+# THREADS: one count or a comma list (run_tpch -t runs each in one invocation)
+case "$THREADS" in ''|*[!0-9,]*|,*|*,|*,,*) echo "THREADS must be a count or a comma list of counts" >&2; exit 2 ;; esac
+for t in ${THREADS//,/ }; do
+  case "$t" in 0*) echo "THREADS: $t is not a positive count" >&2; exit 2 ;; esac
+done
+[ -n "$(tr , '\n' <<< "$THREADS" | sort | uniq -d)" ] && { echo "THREADS repeats a count" >&2; exit 2; }
+[ "$PIN" = cpu ] && [ "$THREADS" != 1 ] && [ -z "${NUMA_SET:-}" ] &&
+  { echo "PIN=cpu pins every thread to CPU $CPU; use PIN=node or none with THREADS=$THREADS" >&2; exit 2; }
+for n in VECTOR_SIZE SF; do
+  case "${!n}" in ''|*[!0-9]*|0) echo "$n must be a positive integer" >&2; exit 2 ;; esac
+done
+# run_tpch and test_all read these from the environment (configFromEnv)
+export vectorSize=$VECTOR_SIZE
+for n in SIMDhash SIMDjoin SIMDsel SIMDproj; do
+  case "${!n:-}" in ''|0|1) ;; *) echo "$n must be 0 or 1" >&2; exit 2 ;; esac
+done
+# Every setting that differs from the default is part of the config name
+# (results, build dirs, database), so runs never collide:
+# <config>[_autovec][_e<engine>][_t<threads>][_v<vector size>][_sf<SF>][_simd<x>]...
+# With THREADS other than 1, each timing row is named with its own count
+# (_t<N>) and the per-build directory with all of them (_t1-4-8). The build
+# dir only depends on AUTOVEC (the rest are run-time settings).
+AV_SUFFIX=$([ "$AUTOVEC" = ON ] && echo _autovec)
+PRE_SUFFIX=$AV_SUFFIX
+[ "$ENGINE" = v ] || PRE_SUFFIX+=_e$ENGINE
+POST_SUFFIX=
+[ "$VECTOR_SIZE" = 1024 ] || POST_SUFFIX+=_v$VECTOR_SIZE
+[ "$SF" = 1 ] || POST_SUFFIX+=_sf$SF
+for n in SIMDhash SIMDjoin SIMDsel SIMDproj; do
+  [ -n "${!n:-}" ] && POST_SUFFIX+=_$(echo "$n" | tr '[:upper:]' '[:lower:]')${!n}
+done
+TN=$([ "$THREADS" = 1 ] || echo 1) # 1: name timing rows _t<N>
+RUN_SUFFIX=$PRE_SUFFIX${TN:+_t${THREADS//,/-}}$POST_SUFFIX
 
 # matrix.csv: compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned
 # median_ms is the median over rounds of the per-invocation medians, so one
@@ -346,13 +407,15 @@ CONFIGS=$kept
   echo -n "governor cpu$CPU: "; cat "/sys/devices/system/cpu/cpu$CPU/cpufreq/scaling_governor" 2>/dev/null || echo n/a
   echo "SEL: $SEL  (avx512: $(grep -o -w -E 'avx512(f|vl)' /proc/cpuinfo | sort -u | tr '\n' ' '))"
   echo "QUERIES: $QUERIES  REPS: $REPS  ROUNDS: $ROUNDS  AUTOVEC: $AUTOVEC"
+  echo "ENGINE: $ENGINE  THREADS: $THREADS  VECTOR_SIZE: $VECTOR_SIZE  SF: $SF ($TPCH_PATH)  PIN: $PIN"
+  echo "SIMDhash: ${SIMDhash:-}  SIMDjoin: ${SIMDjoin:-}  SIMDsel: ${SIMDsel:-}  SIMDproj: ${SIMDproj:-}  label suffix: ${RUN_SUFFIX:-none}"
 } | tee "$OUT/machine.txt"
 [ "$MACHINE" = custom ] && log "WARNING: host $(hostname -s) is not a TARGET_MACHINE preset; building with MACHINE=custom (-march=native, default topology). Set MACHINE= to override."
 
 # ------------------------------------------------------- build + correctness
 for comp in $COMPILERS; do
   for cfg in $CONFIGS; do
-    tag="${comp}_${cfg}$AV_SUFFIX"; B=$(bdir "$comp" "$cfg"); D="$OUT/$tag"; mkdir -p "$D"
+    tag="${comp}_${cfg}$RUN_SUFFIX"; B=$(bdir "$comp" "$cfg"); D="$OUT/$tag"; mkdir -p "$D"
     log "===== $tag ====="
     if [ "$SKIP_BUILD" != 1 ]; then
       # shellcheck disable=SC2046
@@ -399,16 +462,18 @@ else
       for comp in $COMPILERS; do
         for cfg in $CONFIGS; do
           B=$(bdir "$comp" "$cfg"); [ -x "$B/run_tpch" ] || continue
-          f="$OUT/${comp}_${cfg}$AV_SUFFIX/q${q}_r$r"
+          f="$OUT/${comp}_${cfg}$RUN_SUFFIX/q${q}_r$r"
           # shellcheck disable=SC2086
-          if ! tlimit $NUMA "$B/run_tpch" -p "$TPCH_PATH" -e v -q "$q" -r "$REPS" -t 1 -s "$SETTLE" \
+          if ! tlimit $NUMA "$B/run_tpch" -p "$TPCH_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE" \
                 > "$f.csv" 2> "$f.err"; then
-            fail "${comp}_${cfg}$AV_SUFFIX q$q round $r (see $f.err)"; continue
+            fail "${comp}_${cfg}$RUN_SUFFIX q$q round $r (see $f.err)"; continue
           fi
-          awk -F, -v c="$comp" -v g="$cfg$AV_SUFFIX" -v r="$r" '
+          awk -F, -v c="$comp" -v g="$cfg$PRE_SUFFIX" -v post="$POST_SUFFIX" -v tn="$TN" \
+              -v r="$r" -v e="$ENGINE" '
             { l = $1; gsub(/^ +| +$/, "", l) }
-            l ~ /^q[0-9]+ v/ { m = $2; n = $4; gsub(/ /, "", m); gsub(/ /, "", n); split(l, p, " ");
-                              print c "," g "," r "," p[1] "," m "," n }' "$f.csv" >> "$OUT/timing.csv"
+            # label "q6 v  t4": p[1] = query, p[3] = thread count
+            l ~ "^q[0-9]+ " e { m = $2; n = $4; gsub(/ /, "", m); gsub(/ /, "", n); split(l, p, " ");
+                              print c "," g (tn ? "_" p[3] : "") post "," r "," p[1] "," m "," n }' "$f.csv" >> "$OUT/timing.csv"
         done
       done
     done
