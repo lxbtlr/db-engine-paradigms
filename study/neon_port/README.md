@@ -1,6 +1,6 @@
 # NEON port study: scripts and data
 
-Write-up: [`NEON_PORT_STUDY.md`](../../NEON_PORT_STUDY.md).
+Write-up: [`study/NEON_PORT_STUDY.md`](../NEON_PORT_STUDY.md).
 
 | file | what |
 |---|---|

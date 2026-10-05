@@ -1,5 +1,5 @@
 // run_joindispatchbench: the cost questions behind a plan-resolved
-// Hashjoin::resolvePaths (JOIN_DISPATCH_STUDY.md). Every variant of a family
+// Hashjoin::resolvePaths (study/JOIN_DISPATCH_STUDY.md). Every variant of a family
 // must produce the same output as the family's first variant (count +
 // checksum); exit status 1 on any MISMATCH.
 //

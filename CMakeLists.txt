@@ -459,7 +459,7 @@ endif()
 # summary (row count, key range), then runs one member-function pointer per
 # probe vector instead of today's per-vector checks. It compiles in and
 # chooses between the paths VW_JOIN_SEMI, VW_JOIN_BLOOM and
-# VW_JOIN_FUSED_PROBE add separately (see JOIN_DISPATCH_STUDY.md):
+# VW_JOIN_FUSED_PROBE add separately (see study/JOIN_DISPATCH_STUDY.md):
 #   semi bitmap  derived semi join, one int32 key per side, bitmap
 #                <= VW_JOIN_SEMI_MAX_BYTES. Default 0: OFF, no semi join is a
 #                bitmap candidate (no key-range scan); the bitmap is a data
@@ -1042,7 +1042,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|aarch64|arm64|ARM64")
 endif()
 
 # run_neonbench: the engine's AVX-512 kernels against their aarch64 options
-# (scalar engine code, SIMDe translation, NEON, SVE); see NEON_PORT_STUDY.md.
+# (scalar engine code, SIMDe translation, NEON, SVE); see study/NEON_PORT_STUDY.md.
 # run_neonbench_autovec is the same source without -fno-tree-vectorize:
 # SIMDe's generic fallbacks lean on the vectorizer that AUTOVECTORIZE=OFF
 # turns off for the engine.

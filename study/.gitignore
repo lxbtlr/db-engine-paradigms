@@ -1,0 +1,3 @@
+# study write-ups and data stay local; files already tracked stay tracked
+*
+!.gitignore

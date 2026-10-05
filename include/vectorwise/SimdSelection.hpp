@@ -4,7 +4,7 @@
 //
 // Selection is the only primitive family with compressed (variable-length)
 // output, and neither gcc nor clang autovectorizes it (see
-// VW_AUTOVEC_STUDY.md). These kernels do compare -> compress -> masked store,
+// study/VW_AUTOVEC_STUDY.md). These kernels do compare -> compress -> masked store,
 // 16 elements per iteration, with masked tails (no scalar epilogue).
 //
 // Every kernel has the same signature as the scalar template it replaces in

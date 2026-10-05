@@ -1,6 +1,6 @@
 // run_widthbench: how many instructions / micro-ops per cycle an aarch64 core
 // sustains, to check llvm-mca's Neoverse N1 model (dispatch width 3, which
-// makes the scalar VectorWise loops front-end bound in NEON_PORT_STUDY.md)
+// makes the scalar VectorWise loops front-end bound in study/NEON_PORT_STUDY.md)
 // against the core. Arm documents N1 as 4-wide decode/rename and 8-wide issue.
 //
 // Each test is an inline-asm loop of BODY repeated, plus subs + b.ne.

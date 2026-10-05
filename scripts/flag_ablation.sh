@@ -37,7 +37,7 @@
 #   join_semi            VW_JOIN_SEMI (bitmap semi join on plan-marked joins)
 #   join_all             one config for every machine: join_fused + join_semi +
 #                        VW_GROUP_DISPATCH + VW_GROUP_RUN_HEADS
-#   join_dispatch        VW_JOIN_DISPATCH (JOIN_DISPATCH_STUDY.md): the semi /
+#   join_dispatch        VW_JOIN_DISPATCH (study/JOIN_DISPATCH_STUDY.md): the semi /
 #                        Bloom / fused-probe choice resolved once per join from
 #                        plan facts and the build summary; also builds and runs
 #                        run_joindispatchbench (joindispatchbench.csv)
@@ -58,7 +58,7 @@
 #   join_fused join_semi join_all join_dispatch jd_all join_all_valid
 #   grp_base grp_dispatch grp_runheads grp_having
 #
-# Group-by configs (VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
+# Group-by configs (study/VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
 #   grp_base             today's HashGroup
 #   grp_batch            VW_GROUP_BATCH_CREATE
 #   grp_global           VW_GROUP_GLOBAL_DIRECT

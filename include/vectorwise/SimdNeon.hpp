@@ -3,7 +3,7 @@
 // NEON (and SVE) kernels for the aarch64 port of the AVX-512 VectorWise
 // kernels. Measured by run_neonbench (src/benchmarks/primitives/neonbench.cpp)
 // against the scalar engine templates and the AVX-512 kernels compiled
-// through SIMDe; see NEON_PORT_STUDY.md for the per-kernel decision.
+// through SIMDe; see study/NEON_PORT_STUDY.md for the per-kernel decision.
 //
 // NOT WIRED INTO THE ENGINE YET. Every AVX-512 kernel in the engine is
 // guarded by __AVX512F__ (and friends), so an aarch64 build runs the scalar
@@ -628,7 +628,7 @@ inline pos_t sve_proj_dense_multiplies(pos_t n, pos_t* RES inSel,
 
 //=============================================================================
 // Engine wiring (SKELETON: nothing below is called yet). One entry per
-// AVX-512 site, with the decision from NEON_PORT_STUDY.md section 4:
+// AVX-512 site, with the decision from study/NEON_PORT_STUDY.md section 4:
 //   PORT     the NEON kernel above replaces the scalar path under the same
 //            CMake option
 //   SVE      only worth it with SVE (V1/V2); N1 keeps scalar
