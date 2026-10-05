@@ -74,9 +74,9 @@
 # Configs whose ISA this CPU lacks are skipped (their builds would fall back
 # and duplicate another config).
 #
-# For every compiler x config it builds run_tpch + test_all into
-# build_flags/<host>/<compiler>_<config>, runs the TPC-H correctness tests, then
-# times run_tpch -e v on QUERIES at 1 thread pinned to one CPU, ROUNDS rounds
+# For every compiler x config it builds run_tpch (run_ssb with BENCH=ssb) +
+# test_all into build_flags/<host>/<compiler>_<config>, runs the TPC-H (SSB)
+# correctness tests, then times the runner -e v on QUERIES at 1 thread pinned to one CPU, ROUNDS rounds
 # with all builds alternating in each round.
 # Output: results/flag_ablation_<timestamp>/
 #   timing.csv   one row per run_tpch invocation
@@ -102,10 +102,14 @@
 #              AVX-512F only "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg",
 #              otherwise (Zen 3, ARM, ...) "-DVW_SIMD_SEL=OFF"
 #   MACHINE    $(hostname -s) if it is a preset (dubliner, roquefort, manchego, burrata, kafir, rpi5), else custom
-#   DATADIR    /tank/alexb/swole/          test_all reads $DATADIR/tpch/sf1/
-#   SF         1         scale factor: TPCH_PATH default /tank/alexb/swole/tpch/sf$SF
-#   TPCH_PATH  /tank/alexb/swole/tpch/sf$SF  run_tpch -p
-#   QUERIES    1,3,6,9,18
+#   BENCH      tpch      tpch (run_tpch, TPCH.* tests) or ssb (run_ssb, SSB.*
+#                        tests); ssb adds _ssb to every config name
+#   DATADIR    /tank/alexb/swole/          test_all reads $DATADIR/<BENCH>/sf1/
+#   SF         1         scale factor: TPCH_PATH/SSB_PATH default .../<BENCH>/sf$SF
+#   TPCH_PATH  /tank/alexb/swole/tpch/sf$SF  run_tpch -p (BENCH=tpch)
+#   SSB_PATH   /tank/alexb/swole/ssb/sf$SF   run_ssb -p (BENCH=ssb)
+#   QUERIES    tpch: 1,3,6,9,18; ssb: 11,12,13,21,22,23,31,32,33,34,41,42,43
+#              (run_ssb also takes 1.1 ... 4.3; unknown ids fail the run)
 #   REPS       30        run_tpch -r per invocation
 #   ROUNDS     3
 #   SETTLE     2         run_tpch -s
@@ -132,7 +136,7 @@
 #                        VW_* (and HUGE_2MB_MALLOC_HUGE) only; configs are
 #                        named _x<hash>, vw_flags.txt maps the hash back
 #   CPU        (above)   also part of the name when not 0 (_cpu<N>)
-#   TESTS      all       TPC-H tests: all, none, or a query list (1,6)
+#   TESTS      all       TPCH/SSB tests: all, none, or a query list (1,6 or 11,21)
 #   PERF       ""        stat or record: one perf run per config x query after
 #                        the timing; <compiler>_<config>/perf_q<N>.txt
 #                        (PERF_KEEP=1 keeps perf.data)
@@ -181,8 +185,16 @@ detect_machine() {
 MACHINE=${MACHINE:-$(detect_machine)}
 DATADIR=${DATADIR:-/tank/alexb/swole/}
 SF=${SF:-1}
-TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf$SF}
-QUERIES=${QUERIES:-1,3,6,9,18}
+BENCH=${BENCH:-tpch}
+case "$BENCH" in
+  tpch) RUNNER=run_tpch; BENCH_NAME=TPC-H; TEST_PREFIX=TPCH
+        TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf$SF}; DATA_PATH=$TPCH_PATH
+        QUERIES=${QUERIES:-1,3,6,9,18} ;;
+  ssb)  RUNNER=run_ssb; BENCH_NAME=SSB; TEST_PREFIX=SSB
+        SSB_PATH=${SSB_PATH:-/tank/alexb/swole/ssb/sf$SF}; DATA_PATH=$SSB_PATH
+        QUERIES=${QUERIES:-11,12,13,21,22,23,31,32,33,34,41,42,43} ;;
+  *) echo "BENCH must be tpch or ssb" >&2; exit 2 ;;
+esac
 ENGINE=${ENGINE:-v}
 THREADS=${THREADS:-1}
 VECTOR_SIZE=${VECTOR_SIZE:-1024}
@@ -232,13 +244,14 @@ for n in VECTOR_SIZE SF; do
 done
 case "$CPU" in ''|*[!0-9]*) echo "CPU must be a CPU number" >&2; exit 2 ;; esac
 [ -d "/sys/devices/system/cpu/cpu$CPU" ] || { echo "CPU $CPU does not exist on $(hostname -s)" >&2; exit 2; }
-# TESTS: all (default), none, or a comma list of TPC-H queries to test
+# TESTS: all (default), none, or a comma list of queries to test
+# (TPCH.q<N> or SSB.q<N> by BENCH)
 TESTS=${TESTS:-all}
 case "$TESTS" in
-  all) TEST_FILTER='TPCH.*' ;;
+  all) TEST_FILTER="$TEST_PREFIX.*" ;;
   none) TEST_FILTER= ;;
   *) case "$TESTS" in *[!0-9,]*|,*|*,|*,,*) echo "TESTS must be all, none or a comma list of queries" >&2; exit 2 ;; esac
-     TEST_FILTER=$(echo "$TESTS" | sed 's/[0-9]*/TPCH.q&/g; s/,/:/g') ;;
+     TEST_FILTER=$(echo "$TESTS" | sed "s/[0-9]*/$TEST_PREFIX.q&/g; s/,/:/g") ;;
 esac
 # PERF: profile each config x query once, after the timing: stat (perf stat
 # -d) or record (perf record -g, report kept as text; PERF_KEEP=1 keeps
@@ -277,6 +290,7 @@ AV_SUFFIX=$([ "$AUTOVEC" = ON ] && echo _autovec)${VW_FLAGS_HASH:+_x$VW_FLAGS_HA
 PRE_SUFFIX=$AV_SUFFIX
 [ "$ENGINE" = v ] || PRE_SUFFIX+=_e$ENGINE
 POST_SUFFIX=
+[ "$BENCH" = tpch ] || POST_SUFFIX+=_$BENCH
 [ "$VECTOR_SIZE" = 1024 ] || POST_SUFFIX+=_v$VECTOR_SIZE
 [ "$SF" = 1 ] || POST_SUFFIX+=_sf$SF
 [ "$CPU" = 0 ] || POST_SUFFIX+=_cpu$CPU
@@ -480,7 +494,7 @@ CONFIGS=$kept
   echo -n "governor cpu$CPU: "; cat "/sys/devices/system/cpu/cpu$CPU/cpufreq/scaling_governor" 2>/dev/null || echo n/a
   echo "SEL: $SEL  (avx512: $(grep -o -w -E 'avx512(f|vl)' /proc/cpuinfo | sort -u | tr '\n' ' '))"
   echo "QUERIES: $QUERIES  REPS: $REPS  ROUNDS: $ROUNDS  AUTOVEC: $AUTOVEC"
-  echo "ENGINE: $ENGINE  THREADS: $THREADS  VECTOR_SIZE: $VECTOR_SIZE  SF: $SF ($TPCH_PATH)  PIN: $PIN"
+  echo "BENCH: $BENCH ($RUNNER)  ENGINE: $ENGINE  THREADS: $THREADS  VECTOR_SIZE: $VECTOR_SIZE  SF: $SF ($DATA_PATH)  PIN: $PIN"
   echo "SIMDhash: ${SIMDhash:-}  SIMDjoin: ${SIMDjoin:-}  SIMDsel: ${SIMDsel:-}  SIMDproj: ${SIMDproj:-}  label suffix: ${RUN_SUFFIX:-none}"
   echo "VW_FLAGS: ${VW_FLAGS:-none}${VW_FLAGS_HASH:+ (x$VW_FLAGS_HASH)}  TESTS: $TESTS  PERF: ${PERF:-none}"
 } | tee "$OUT/machine.txt"
@@ -500,7 +514,7 @@ for comp in $COMPILERS; do
         fail "$tag cmake (see $D/cmake.log)"; continue
       fi
       : > "$D/build.log"
-      for tgt in run_tpch test_all; do
+      for tgt in $RUNNER test_all; do
         echo "### target $tgt" >> "$D/build.log"
         cmake --build "$B" -j "$JOBS" --target "$tgt" >> "$D/build.log" 2>&1 || fail "$tag build of $tgt (see $D/build.log)"
       done
@@ -508,13 +522,13 @@ for comp in $COMPILERS; do
     # the effective defines, to confirm each config is what it claims
     cat "$B/build.ninja" "$B/CMakeFiles/vectorwise.dir/flags.make" 2>/dev/null | grep -o -E -- '-D(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE)(=[^ ]*)?' | sort -u | tr '\n' ' ' > "$D/defines.txt"
     log "$tag defines: $(cat "$D/defines.txt")"
-    if [ -z "$TEST_FILTER" ]; then log "$tag: TPC-H tests skipped (TESTS=none)"
-    elif [ -x "$B/test_all" ] && [ -d "$DATADIR/tpch/sf1" ]; then
-      if threads=$TEST_THREADS tlimit "$B/test_all" --gtest_filter="$TEST_FILTER" > "$D/tpch_test.log" 2>&1; then
-        log "$tag TPC-H: $(grep -E '^\[  PASSED  \]' "$D/tpch_test.log")"
-      else fail "$tag TPC-H tests (see $D/tpch_test.log)"; fi
+    if [ -z "$TEST_FILTER" ]; then log "$tag: $BENCH_NAME tests skipped (TESTS=none)"
+    elif [ -x "$B/test_all" ] && [ -d "$DATADIR/$BENCH/sf1" ]; then
+      if threads=$TEST_THREADS tlimit "$B/test_all" --gtest_filter="$TEST_FILTER" > "$D/${BENCH}_test.log" 2>&1; then
+        log "$tag $BENCH_NAME: $(grep -E '^\[  PASSED  \]' "$D/${BENCH}_test.log")"
+      else fail "$tag $BENCH_NAME tests (see $D/${BENCH}_test.log)"; fi
     elif [ ! -x "$B/test_all" ]; then fail "$tag: test_all not built"
-    else log "$tag: no $DATADIR/tpch/sf1, TPC-H tests skipped"; fi
+    else log "$tag: no $DATADIR/$BENCH/sf1, $BENCH_NAME tests skipped"; fi
     # join_dispatch also runs the microbenchmark behind its rules (pinned,
     # once per compiler; it is the same for every config)
     if [ "$cfg" = join_dispatch ] && [ "${MICROBENCH:-1}" = 1 ]; then
@@ -531,17 +545,17 @@ done
 # ------------------------------------------------------------------ timing
 echo "compiler,config,round,query,median_ms,min_ms" > "$OUT/timing.csv"
 echo "compiler,config,round,query,metric,value" > "$OUT/counters.csv"
-if [ ! -d "$TPCH_PATH" ]; then
-  log "no TPCH_PATH=$TPCH_PATH, timing skipped"
+if [ ! -d "$DATA_PATH" ]; then
+  log "no data at $DATA_PATH, timing skipped"
 else
   for q in ${QUERIES//,/ }; do
     for r in $(seq 1 "$ROUNDS"); do
       for comp in $COMPILERS; do
         for cfg in $CONFIGS; do
-          B=$(bdir "$comp" "$cfg"); [ -x "$B/run_tpch" ] || continue
+          B=$(bdir "$comp" "$cfg"); [ -x "$B/$RUNNER" ] || continue
           f="$OUT/${comp}_${cfg}$RUN_SUFFIX/q${q}_r$r"
           # shellcheck disable=SC2086
-          if ! tlimit $NUMA "$B/run_tpch" -p "$TPCH_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE" \
+          if ! tlimit $NUMA "$B/$RUNNER" -p "$DATA_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE" \
                 > "$f.csv" 2> "$f.err"; then
             fail "${comp}_${cfg}$RUN_SUFFIX q$q round $r (see $f.err)"; continue
           fi
@@ -567,15 +581,15 @@ fi
 # ----------------------------------------------------------------- profiling
 # after the timing, so profiling never disturbs it: one perf run per config x
 # query, same settings, into <compiler>_<config>/perf_q<N>.txt
-if [ -n "$PERF" ] && [ -d "$TPCH_PATH" ]; then
+if [ -n "$PERF" ] && [ -d "$DATA_PATH" ]; then
   if ! command -v perf > /dev/null; then fail "PERF=$PERF: perf is not installed on $(hostname -s)"
   else
     for comp in $COMPILERS; do
       for cfg in $CONFIGS; do
-        B=$(bdir "$comp" "$cfg"); [ -x "$B/run_tpch" ] || continue
+        B=$(bdir "$comp" "$cfg"); [ -x "$B/$RUNNER" ] || continue
         D="$OUT/${comp}_${cfg}$RUN_SUFFIX"
         for q in ${QUERIES//,/ }; do
-          run=("$B/run_tpch" -p "$TPCH_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE")
+          run=("$B/$RUNNER" -p "$DATA_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE")
           if [ "$PERF" = stat ]; then
             # shellcheck disable=SC2086
             tlimit $NUMA perf stat -d -o "$D/perf_q$q.txt" -- "${run[@]}" > /dev/null 2> "$D/perf_q$q.err" ||

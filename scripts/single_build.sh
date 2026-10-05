@@ -15,6 +15,8 @@
 #
 # Environment:
 #   CONFIG     required; one name from flag_ablation.sh's join_valid group
+#              (any flag_ablation.sh config with BENCH=ssb)
+#   BENCH      tpch      tpch or ssb (run_ssb, SSB.* tests, _ssb names)
 #   COMPILER   gcc       gcc or clang
 #   AUTOVEC    OFF       ON = build with -DAUTOVECTORIZE=ON
 #   QUERIES, REPS, ROUNDS, SETTLE, TEST_THREADS, TIMEOUT, ENGINE, THREADS,
@@ -28,18 +30,23 @@ ABL="$ROOT/scripts/flag_ablation.sh"
 CONFIG=${CONFIG:-}
 COMPILER=${COMPILER:-gcc}
 AUTOVEC=${AUTOVEC:-OFF}
+BENCH=${BENCH:-tpch}
 
 die() { echo "single_build: $*" >&2; exit 2; }
 [ -n "$CONFIG" ] || die "CONFIG is required"
 case "$CONFIG" in *[[:space:]]*) die "CONFIG takes one config, got '$CONFIG'" ;; esac
 case "$COMPILER" in gcc|clang) ;; *) die "COMPILER must be gcc or clang, got '$COMPILER'" ;; esac
 case "$AUTOVEC" in ON|OFF) ;; *) die "AUTOVEC must be ON or OFF, got '$AUTOVEC'" ;; esac
-# a registered build has passed every TPC-H test
-[ "${TESTS:-all}" = all ] || die "TESTS=$TESTS: a registered build runs all TPC-H tests"
-valid=$(CONFIGS=join_valid PRINT_CONFIGS=1 bash "$ABL") || die "cannot list join_valid configs"
-case " $valid " in *" $CONFIG "*) ;; *) die "$CONFIG is not TPC-valid (join_valid: $valid)" ;; esac
+case "$BENCH" in tpch|ssb) ;; *) die "BENCH must be tpch or ssb, got '$BENCH'" ;; esac
+# a registered build has passed every test of its benchmark
+[ "${TESTS:-all}" = all ] || die "TESTS=$TESTS: a registered build runs all $BENCH tests"
+# join_valid is the TPC-H audit; SSB builds may use any config
+if [ "$BENCH" = tpch ]; then
+  valid=$(CONFIGS=join_valid PRINT_CONFIGS=1 bash "$ABL") || die "cannot list join_valid configs"
+  case " $valid " in *" $CONFIG "*) ;; *) die "$CONFIG is not TPC-valid (join_valid: $valid)" ;; esac
+fi
 
-export RESULTS_PREFIX=single_build MICROBENCH=0 CONFIGS="$CONFIG" COMPILERS="$COMPILER" AUTOVEC
+export RESULTS_PREFIX=single_build MICROBENCH=0 CONFIGS="$CONFIG" COMPILERS="$COMPILER" AUTOVEC BENCH
 unset HASH_BASE SKIP_BUILD SUMMARIZE_ONLY PRINT_CONFIGS TESTS
 bash "$ABL"
 rc=$?
@@ -55,10 +62,10 @@ build=$(ls -d "$out/${COMPILER}_${CONFIG}"*/ 2>/dev/null)
 [ "$(echo "$build" | grep -c .)" -eq 1 ] || { echo "single_build: expected one ${COMPILER}_${CONFIG}* directory in $out" >&2; exit 1; }
 NAME=$(basename "$build"); NAME=${NAME#"${COMPILER}_"}
 # flag_ablation.sh only logs a missing data directory; a registered build
-# must have passed the TPC-H tests and been timed
+# must have passed its benchmark's tests and been timed
 if [ "$rc" -eq 0 ]; then
-  grep -q -E '^\[  PASSED  \]' "$out/${COMPILER}_${NAME}/tpch_test.log" 2>/dev/null ||
-    { echo "single_build: TPC-H tests did not run" | tee -a "$out/driver.log" >&2; rc=1; }
+  grep -q -E '^\[  PASSED  \]' "$out/${COMPILER}_${NAME}/${BENCH}_test.log" 2>/dev/null ||
+    { echo "single_build: $BENCH tests did not run" | tee -a "$out/driver.log" >&2; rc=1; }
   [ "$(wc -l < "$out/timing.csv")" -gt 1 ] ||
     { echo "single_build: no timings" | tee -a "$out/driver.log" >&2; rc=1; }
 fi
@@ -66,6 +73,7 @@ fi
   echo "config: $NAME"
   echo "compiler: $COMPILER"
   echo "autovectorize: $AUTOVEC"
+  echo "bench: $BENCH"
   echo "engine: ${ENGINE:-v}  threads: ${THREADS:-1}  vector_size: ${VECTOR_SIZE:-1024}  sf: ${SF:-1}  pin: ${PIN:-auto}"
   echo "SIMDhash: ${SIMDhash:-}  SIMDjoin: ${SIMDjoin:-}  SIMDsel: ${SIMDsel:-}  SIMDproj: ${SIMDproj:-}"
   echo "vw_flags: $(cat "$out/vw_flags.txt" 2>/dev/null)"
