@@ -296,6 +296,9 @@ class Hashjoin : public BinaryOperator {
    struct F3_Op* semiProbeSel = nullptr;
    bool semiActive = false;
    bool semiCandidate() const {
+#if defined(VW_JOIN_DISPATCH) && VW_JOIN_SEMI_MAX_BYTES == 0
+      return false; // bitmap off (VW_JOIN_SEMI_MAX_BYTES=0): no range scan
+#endif
       return semiJoin && semiOk && semiBuildKeys == 1 &&
              buildGather.ops.empty() &&
              (semiProbeDense || semiProbeSel) && probeHash.ops.size() == 1;
@@ -311,8 +314,10 @@ class Hashjoin : public BinaryOperator {
    std::vector<runtime::Hashmap::hash_t> bloomHashes;
    size_t bloomCount = 0;
    bool bloomOn = false;
-   /// vectors to skip the filter for after one where most probes passed
-   uint32_t bloomSkip = 0;
+   /// plan fact recorded by QueryBuilder::addBuildKey: the build keys are
+   /// read through a selection vector, i.e. the build side is a filtered
+   /// subset of its input (the filter's precondition)
+   bool buildKeysSelected = false;
    void bloomInsert();
    void bloomFilter(size_t n);
 #endif
@@ -349,11 +354,6 @@ class Hashjoin : public BinaryOperator {
 #endif
 
 #ifdef VW_JOIN_DISPATCH
-   /// plan fact recorded by QueryBuilder::addBuildKey: the build keys are
-   /// read through a selection vector, i.e. the build side is a filtered
-   /// subset of its input (the Bloom filter's precondition)
-   bool buildKeysSelected = false;
-
  private:
    /// VW_JOIN_DISPATCH: the probe path, resolved once at the end of the
    /// build from plan facts and the build summary (resolvePaths); next()

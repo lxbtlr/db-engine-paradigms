@@ -400,12 +400,16 @@ endif()
 # filter (VW_JOIN_BLOOM_BITS bits per build key, 4 bits per key in one 64-bit
 # word) next to the shared hash table, and filters every probe vector with it
 # (AVX-512, 8 hashes at a time) before the directory is touched; the join's
-# first pass visits only the survivors. Builds under VW_JOIN_BLOOM_MIN_KEYS
-# keys get no filter; mostly-hitting probe streams switch it off adaptively.
+# first pass visits only the survivors. Whether a join gets a filter is fixed
+# once per operator from a plan fact and a hardware fact (the same rule as
+# VW_JOIN_DISPATCH): the build keys are read through a selection (a filtered
+# build side) and the hash directory is at least the L1 data cache
+# (runtime::cacheBytes). No per-vector switch. VW_JOIN_BLOOM_MIN_KEYS is used
+# only when the cache size cannot be read.
 # Works with the default join and VW_NEW_JOIN; 64-bit hashes only.
 OPTION(VW_JOIN_BLOOM "VectorWise-owned Bloom filter in front of hash join probes" OFF)
 set(VW_JOIN_BLOOM_BITS 16 CACHE STRING "VW_JOIN_BLOOM: filter bits per build key")
-set(VW_JOIN_BLOOM_MIN_KEYS 4096 CACHE STRING "VW_JOIN_BLOOM: smallest build that gets a filter")
+set(VW_JOIN_BLOOM_MIN_KEYS 4096 CACHE STRING "VW_JOIN_BLOOM: smallest filtered build when the L1 size is unknown")
 if(VW_JOIN_BLOOM)
   if(HASH_SIZE_32)
     message(FATAL_ERROR "VW_JOIN_BLOOM needs 64-bit hashes (HASH_SIZE_32 is ON)")
@@ -456,15 +460,18 @@ endif()
 # probe vector instead of today's per-vector checks. It compiles in and
 # chooses between the paths VW_JOIN_SEMI, VW_JOIN_BLOOM and
 # VW_JOIN_FUSED_PROBE add separately (see JOIN_DISPATCH_STUDY.md):
-#   semi bitmap  plan-marked semi join, one int32 key per side, bitmap
-#                <= VW_JOIN_SEMI_MAX_BYTES (VW_JOIN_SEMI alone: 16 MiB)
+#   semi bitmap  derived semi join, one int32 key per side, bitmap
+#                <= VW_JOIN_SEMI_MAX_BYTES. Default 0: OFF, no semi join is a
+#                bitmap candidate (no key-range scan); the bitmap is a data
+#                structure Typer's plans do not get, so it is opt-in
+#                (VW_JOIN_SEMI alone keeps its 16 MiB cap)
 #   Bloom filter the directory is at least the L1 size (runtime::cacheBytes;
 #                VW_JOIN_BLOOM_MIN_KEYS rows if L1 is unknown) and the build
 #                keys are read through a selection (a filtered build side);
 #                fixed for the operator (no per-vector adaptive switch)
 #   fused hash   one int32 probe key, with the filter or VW_NEW_JOIN
 OPTION(VW_JOIN_DISPATCH "Plan-resolved probe path per VectorWise Hashjoin (compiles in VW_JOIN_SEMI, VW_JOIN_BLOOM, VW_JOIN_FUSED_PROBE)" OFF)
-set(VW_JOIN_SEMI_MAX_BYTES 8388608 CACHE STRING "VW_JOIN_DISPATCH: largest semi bitmap in bytes")
+set(VW_JOIN_SEMI_MAX_BYTES 0 CACHE STRING "VW_JOIN_DISPATCH: largest semi bitmap in bytes (0 = no bitmap)")
 if(VW_JOIN_DISPATCH)
   if(HASH_SIZE_32)
     message(FATAL_ERROR "VW_JOIN_DISPATCH needs 64-bit hashes (HASH_SIZE_32 is ON)")

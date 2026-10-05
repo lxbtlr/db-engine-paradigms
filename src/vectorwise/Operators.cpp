@@ -1051,7 +1051,6 @@ void Hashjoin::bloomFilter(size_t n) {
    }
    bloomCount = m;
    bloomOn = true;
-   if (m * 2 > n) bloomSkip = 31; // mostly hits: filter costs more than it saves
 }
 #endif // VW_JOIN_BLOOM
 
@@ -1166,7 +1165,6 @@ void Hashjoin::fusedHashFilter(size_t n) {
    for (size_t k = 0; k < m; ++k) probeHashes[out[k]] = hs[k];
    bloomCount = m;
    bloomOn = true;
-   if (m * 2 > n) bloomSkip = 31;
 }
 #endif // VW_JOIN_BLOOM
 #endif // VW_JOIN_FUSED_PROBE
@@ -1525,8 +1523,9 @@ pos_t Hashjoin::joinBoncz() {
 //   plan facts       semi marker, key count/types (semiCandidate,
 //                    fusedReady), build keys through a selection
 //                    (buildKeysSelected), the join function
-//   build summary    build rows (filter allocated iff >= MIN_KEYS on a
-//                    filtered build side), key range (semi bitmap size)
+//   build summary    directory size (filter allocated iff >= the L1 data
+//                    cache on a filtered build side), key range (semi
+//                    bitmap size)
 // so resolvePaths() picks the per-vector probe step once:
 //   fused + filter   stepFusedBloom  hash in registers, filter, survivors
 //   fused + new join stepFusedNew    joinNewFirstPass hashes (mode B)
@@ -1607,8 +1606,8 @@ size_t Hashjoin::next() {
          shared.bloom.reset(new uint64_t[words]());
          shared.bloomMask = words - 1;
       };
-#endif
-#ifdef VW_JOIN_DISPATCH
+      // The filter's rule (VW_JOIN_BLOOM alone or under VW_JOIN_DISPATCH),
+      // fixed for the operator, no per-vector switch.
       // plan fact: only a filtered build side (build keys read through a
       // selection) leaves probes that miss; an unfiltered build side's
       // foreign-key probes all hit, where the filter only costs. A semi
@@ -1625,18 +1624,19 @@ size_t Hashjoin::next() {
          const size_t dirBytes = size_t(shared.ht.mask + 1) * sizeof(void*);
          return l1 ? dirBytes >= l1 : shared.found.load() >= VW_JOIN_BLOOM_MIN_KEYS;
       };
+#ifdef VW_JOIN_SEMI
+      const bool bloomDeferred = semiCandidate();
+#else
+      const bool bloomDeferred = false;
+#endif
 #endif
       barrier([&]() {
          auto globalFound = shared.found.load();
          if (globalFound) shared.ht.setSize(globalFound);
 #ifdef VW_JOIN_BLOOM
          shared.bloom.reset();
-#ifdef VW_JOIN_DISPATCH
-         if (globalFound && wantBloom && !semiCandidate() && bloomPays())
+         if (globalFound && wantBloom && !bloomDeferred && bloomPays())
             allocBloom(globalFound);
-#else
-         if (globalFound >= VW_JOIN_BLOOM_MIN_KEYS) allocBloom(globalFound);
-#endif
 #endif
       });
       auto globalFound = shared.found.load();
@@ -1669,13 +1669,13 @@ size_t Hashjoin::next() {
                shared.semiBits.reset(new uint32_t[((hi - lo) >> 5) + 1]());
                shared.semiOn = true;
             }
-#ifdef VW_JOIN_DISPATCH
+#ifdef VW_JOIN_BLOOM
             const size_t keys = shared.found.load();
             if (!shared.semiOn && wantBloom && bloomPays()) allocBloom(keys);
 #endif
          });
          if (shared.semiOn) semiSetBits();
-#ifdef VW_JOIN_DISPATCH
+#ifdef VW_JOIN_BLOOM
          else if (shared.bloom) bloomInsert();
 #endif
          barrier();
@@ -1712,11 +1712,10 @@ size_t Hashjoin::next() {
          if (fusedReady()) {
 #ifdef VW_JOIN_BLOOM
             bloomOn = false;
-            if (shared.bloom && !bloomSkip) {
+            if (shared.bloom) {
                fusedHashFilter(cont.numProbes); // mode A
                goto probe;
             }
-            if (shared.bloom) --bloomSkip;
 #endif
 #ifdef VW_NEW_JOIN
             if (join == &Hashjoin::joinAllNew || join == &Hashjoin::joinSelNew) {
@@ -1729,12 +1728,7 @@ size_t Hashjoin::next() {
          probeHash.evaluate(cont.numProbes);
 #ifdef VW_JOIN_BLOOM
          bloomOn = false;
-         if (shared.bloom) {
-            if (bloomSkip)
-               --bloomSkip;
-            else
-               bloomFilter(cont.numProbes);
-         }
+         if (shared.bloom) bloomFilter(cont.numProbes);
 #endif
 #ifdef VW_JOIN_FUSED_PROBE
       probe:;
