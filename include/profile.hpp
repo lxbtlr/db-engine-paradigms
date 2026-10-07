@@ -125,10 +125,27 @@ struct PerfEvents {
       add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
       add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
 
-      // PERF_COUNT_HW_CACHE_LL via PERF_TYPE_HW_CACHE is unreliable on ARM —
-      // many PMU drivers don't map it. Use generic PERF_COUNT_HW_CACHE_MISSES
-      // for LLC-misses on all ARM targets.
-      add("LLC-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES);
+      // burrata (Neoverse N1) has NO level-3 cache in the core-visible
+      // hierarchy: sysfs shows only index0 (L1d 64K/4-way), index1 (L1i 64K)
+      // and index2 (L2 1M/8-way) per CPU -- there is no level=3 index. The
+      // Ampere Altra SLC is owned by the DSU (mesh) and is not part of the
+      // core's cache hierarchy, which is also why its PMU is a separate,
+      // system-wide, per-cluster block (40 instances) that this per-thread
+      // loop cannot read.
+      //
+      // So the last level a core can see and we can count is L2. LLC-misses is
+      // therefore re-purposed to l2d_cache_refill (0x17): the L2 refill count,
+      // i.e. traffic leaving the core. This is NOT L1D-demand-miss-equivalent:
+      // l2d_cache_refill includes prefetch fills, so it is an off-core traffic
+      // proxy rather than demand misses (verified 2026-10-07, see the pmu
+      // report). It replaces PERF_COUNT_HW_CACHE_MISSES, which this kernel maps
+      // to the SAME core L1D read-miss event as l1-misses below (both read
+      // 0.110), so the column used to duplicate l1-misses exactly.
+      //
+      // Column name and ordinal are unchanged, so no header-version migration
+      // is needed; the name now means "last core-visible cache level (L2) on
+      // N1" and is not the same quantity as LLC-misses on the x86 machines.
+      add("LLC-misses", PERF_TYPE_RAW, 0x17);
       add("l1-misses", PERF_TYPE_HW_CACHE,
           PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
               (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
