@@ -232,10 +232,16 @@ struct PerfEvents {
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
          // Generic PERF_COUNT_HW_STALLED_CYCLES_BACKEND reports 0 on SPR (the
-         // hardware generic backend-stall counter is not wired up there); the
-         // named cycle_activity.stalls_mem_any event counts real memory stalls
-         // (same event dubliner/Cascade Lake uses).
-         add("mem_stall", "cycle_activity.stalls_mem_any");
+         // hardware generic backend-stall counter is not wired up there).
+         // CYCLE_ACTIVITY.STALLS_MEM_ANY also does not exist on SPR (it is not
+         // in the 6-8F JSON, so resolve_event fails and the column silently
+         // reads 0); SPR splits that family into CYCLES_MEM_ANY and the
+         // MEMORY_ACTIVITY.STALLS_* set. Use memory_activity.stalls_l1d_miss:
+         // a real stall event, verified to resolve and count on manchego.
+         // NOTE: this is stalls-on-L1D-miss, not the old "any memory stall"
+         // definition dubliner/Cascade Lake and Zen use, so the manchego
+         // mem_stall column is not directly comparable with those machines'.
+         add("mem_stall", "memory_activity.stalls_l1d_miss");
       } else {
          add("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
          add("LLC-misses", PERF_TYPE_HW_CACHE,
