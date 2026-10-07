@@ -1784,7 +1784,11 @@ size_t HashGroup::next() {
             for (auto entry = reinterpret_cast<header_t*>(alloc.first),
                       end = addBytes(entry, alloc.second * entry_size);
                  entry < end; entry = addBytes(entry, entry_size))
+#ifdef VW_SPILL_WORD_COPY
+               spill.push_back_words(&entry->hash, entry->hash);
+#else
                spill.push_back(&entry->hash, entry->hash);
+#endif
          }
          preAggregation.allocations.clear();
          preAggregation.clearHashtable(ht);

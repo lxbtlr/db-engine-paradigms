@@ -197,8 +197,10 @@ if(VW_GROUP_NO_CONCAT)
   message(STATUS "Building with VW_GROUP_NO_CONCAT")
 endif()
 
-# VW_SPILL_WORD_COPY: PartitionedDeque::push_back copies rows of <= 64
-# bytes inline as 8-byte words instead of calling memcpy per row.
+# VW_SPILL_WORD_COPY: VectorWise's HashGroup spills through
+# PartitionedDeque::push_back_words, which copies rows of <= 64 bytes inline
+# as 8-byte words instead of calling memcpy per row. Hyper's GroupBy keeps
+# push_back, so its code is the same with or without this option.
 OPTION(VW_SPILL_WORD_COPY "Inline word copy for spilled rows in PartitionedDeque" OFF)
 if(VW_SPILL_WORD_COPY)
   ADD_DEFINITIONS(-DVW_SPILL_WORD_COPY=1)

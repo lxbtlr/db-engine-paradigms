@@ -35,6 +35,7 @@ class PartitionedDeque
       Chunk* last = nullptr;
       void* current = nullptr;
       void* end = nullptr;
+      template <bool words = false>
       void push_back(void* element, size_t size);
       size_t size(Chunk* chunk, size_t entrySize) const;
 
@@ -60,6 +61,11 @@ class PartitionedDeque
    ~PartitionedDeque();
 
    void push_back(void* element, hash_t hash);
+#ifdef VW_SPILL_WORD_COPY
+   /// push_back with an inline word copy, for VectorWise's HashGroup spill
+   /// only; Hyper's GroupBy keeps push_back
+   void push_back_words(void* element, hash_t hash);
+#endif
 
    const std::vector<Partition>& getPartitions();
 
@@ -122,7 +128,15 @@ void PartitionedDeque<chunkSize>::push_back(void* element, hash_t hash) {
    partitions[hash >> shift].push_back(element, entrySize);
 }
 
+#ifdef VW_SPILL_WORD_COPY
 template <size_t chunkSize>
+void PartitionedDeque<chunkSize>::push_back_words(void* element, hash_t hash) {
+   partitions[hash >> shift].template push_back<true>(element, entrySize);
+}
+#endif
+
+template <size_t chunkSize>
+template <bool words>
 void PartitionedDeque<chunkSize>::Partition::push_back(void* element,
                                                        size_t entrySize) {
    if (!first) {
@@ -139,11 +153,12 @@ void PartitionedDeque<chunkSize>::Partition::push_back(void* element,
       current = created->template data<void>();
       end = addBytes(current, entrySize * chunkSize);
    }
-#ifdef VW_SPILL_WORD_COPY
    // spilled HashGroup rows are small multiples of 8 bytes (entry size is
    // 8-aligned, minus the next pointer); copy them inline in words instead
-   // of a memcpy call with a run-time size per row (TPC-H Q18: 1.5M rows)
-   if (entrySize % 8 == 0 && entrySize <= 64) {
+   // of a memcpy call with a run-time size per row (TPC-H Q18: 1.5M rows).
+   // Only VectorWise's push_back_words takes this path, so Hyper's GroupBy
+   // spill is the same code with or without VW_SPILL_WORD_COPY.
+   if (words && entrySize % 8 == 0 && entrySize <= 64) {
       auto* d = static_cast<char*>(current);
       auto* s = static_cast<const char*>(element);
       for (size_t k = 0; k < entrySize; k += 8) {
@@ -152,7 +167,6 @@ void PartitionedDeque<chunkSize>::Partition::push_back(void* element,
          std::memcpy(d + k, &w, 8);
       }
    } else
-#endif
       std::memcpy(current, element, entrySize);
    current = addBytes(current, entrySize);
 }
