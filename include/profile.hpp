@@ -3,6 +3,7 @@
 #include "canary.hpp"
 #endif
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -103,12 +104,31 @@ struct PerfEvents {
    std::unordered_map<std::string, std::vector<event>> events;
    std::vector<std::string> ordered_names;
 
+   // Opt-in grouped mode (PERF_GROUP=<G0..G8, G3a, G3b>): cycles + instr. and
+   // one event group, opened as one perf group so they are scheduled together
+   // (no multiplexing), plus events opened on their own (task-clock, msr).
+   // Unset, the per-CPU default lists below are used unchanged.
+   std::string perfGroup;
+   std::vector<std::string> groupNames; // leader first
+   std::vector<std::string> unresolved;
+   int groupLeaderFd = -1;
+
    PerfEvents() {
       if (GLOBAL)
          counters = 1;
       else {
          counters = std::thread::hardware_concurrency();
       }
+#ifdef __linux__
+      if (const char* g = getenv("PERF_GROUP");
+          g && *g && !getenv("EXTERNALPROFILE")) {
+         perfGroup = g;
+         addGroup();
+         add("task-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK);
+         registerAll();
+         return;
+      }
+#endif
 #ifdef __linux__
 #ifdef __aarch64__
       {
@@ -326,8 +346,10 @@ struct PerfEvents {
       for (auto& event : eventsPerThread) {
          auto& pe = event.pe;
          memset(&pe, 0, sizeof(struct perf_event_attr));
-         if (resolve_event(const_cast<char*>(str.c_str()), &pe) < 0)
+         if (resolve_event(const_cast<char*>(str.c_str()), &pe) < 0) {
             std::cerr << "Error resolving perf event " << str << std::endl;
+            unresolved.push_back(str);
+         }
          pe.disabled = true;
          pe.inherit = 1;
          pe.inherit_stat = 0;
@@ -341,7 +363,227 @@ struct PerfEvents {
 #endif
    }
 
+#ifdef __linux__
+   [[noreturn]] void groupFail(const std::string& why) {
+      std::cerr << "PERF_GROUP=" << perfGroup << ": " << why << std::endl;
+      std::exit(2);
+   }
+
+   // Event groups, from PMU_EVENT_GROUPS.md. Each is sized to fit next to
+   // cycles + instr. without multiplexing (4 free counters on Cascade Lake
+   // and Zen 3, 8 on Sapphire Rapids, 5 on Neoverse N1). G0's branch events
+   // are the generic ones, so G0 also works on CPUs without a table here.
+   void addGroup() {
+      const std::string& g = perfGroup;
+      auto member = [&](const std::string& name) { groupNames.push_back(name); };
+      auto hw = [&](const char* name, uint64_t type, uint64_t config) {
+         add(name, type, config);
+         member(name);
+      };
+      [[maybe_unused]] auto named = [&](const char* name, const char* ev) {
+         add(name, ev);
+         member(name);
+      };
+      // anchors; cycles leads the group
+      hw("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
+      hw("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
+      const size_t anchors = groupNames.size();
+      if (g == "G0") {
+         hw("branches", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_INSTRUCTIONS);
+         hw("br-misp", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
+      }
+#ifdef __aarch64__
+      // architectural PMUv3 common events (raw codes; jevents is stubbed here)
+      auto raw = [&](const char* name, uint64_t code) {
+         hw(name, PERF_TYPE_RAW, code);
+      };
+      if (g == "G0") {
+         raw("inst-spec", 0x1B);
+      } else if (g == "G1") {
+         raw("ld-spec", 0x70);
+         raw("l1d-refill", 0x03);
+         raw("l2d-refill", 0x17); // includes prefetch fills
+      } else if (g == "G2") {
+         raw("stall-backend", 0x24);
+      } else if (g == "G4") {
+         raw("unaligned-ld-spec", 0x68);
+      } else if (g == "G6") {
+         raw("l1i-refill", 0x01);
+         raw("stall-frontend", 0x23);
+      } else if (g == "G7") {
+         raw("ase-spec", 0x74);
+         raw("dp-spec", 0x73);
+         raw("vfp-spec", 0x75);
+      } else if (g == "G8") {
+         raw("st-spec", 0x71);
+         raw("bus-access", 0x19);
+         raw("l1d-tlb-refill", 0x05);
+      }
+#else
+      const std::string cpu(get_cpu_str());
+      if (cpu == "GenuineIntel-6-55-core") { // Cascade Lake (dubliner)
+         if (g == "G0") {
+            hw("ref-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES);
+         } else if (g == "G1") {
+            named("loads", "mem_inst_retired.all_loads");
+            named("l1-miss", "mem_load_retired.l1_miss");
+            named("l2-miss", "mem_load_retired.l2_miss");
+            named("l3-miss", "mem_load_retired.l3_miss");
+         } else if (g == "G2") {
+            named("stall-l1d", "cycle_activity.stalls_l1d_miss");
+            named("stall-l2", "cycle_activity.stalls_l2_miss");
+            named("stall-l3", "cycle_activity.stalls_l3_miss");
+            named("stall-mem", "cycle_activity.stalls_mem_any");
+         } else if (g == "G3a") {
+            named("l1d-pend", "l1d_pend_miss.pending"); // counter-restricted
+         } else if (g == "G3b") {
+            named("l1d-pend-cyc", "l1d_pend_miss.pending_cycles");
+            named("offcore-out", "offcore_requests_outstanding.all_data_rd");
+            named("offcore-out-cyc",
+                  "offcore_requests_outstanding.cycles_with_data_rd");
+         } else if (g == "G4") {
+            named("stall-total", "cycle_activity.stalls_total");
+            named("st-fwd-block", "ld_blocks.store_forward");
+            named("alias-4k", "ld_blocks_partial.address_alias");
+            named("split-loads", "mem_inst_retired.split_loads");
+         } else if (g == "G5") {
+            named("license0", "core_power.lvl0_turbo_license");
+            named("license1", "core_power.lvl1_turbo_license");
+            named("license2", "core_power.lvl2_turbo_license");
+            named("ms-uops", "idq.ms_uops");
+         } else if (g == "G6") {
+            named("dsb-uops", "idq.dsb_uops");
+            named("mite-uops", "idq.mite_uops");
+            named("dsb-miss", "frontend_retired.dsb_miss");
+            named("icache-stall", "icache_16b.ifdata_stall");
+         } else if (g == "G7") {
+            named("port0", "uops_dispatched_port.port_0");
+            named("port1", "uops_dispatched_port.port_1");
+            named("port5", "uops_dispatched_port.port_5");
+         } else if (g == "G8") {
+            named("stores", "mem_inst_retired.all_stores");
+            named("offcore-rd", "offcore_requests.all_data_rd");
+            named("offcore-all", "offcore_requests.all_requests");
+            named("dtlb-walk", "dtlb_load_misses.walk_completed");
+         }
+      } else if (cpu == "GenuineIntel-6-8F-core") { // Sapphire Rapids (manchego)
+         if (g == "G0") {
+            hw("ref-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES);
+         } else if (g == "G1") {
+            named("loads", "mem_inst_retired.all_loads");
+            named("l1-miss", "mem_load_retired.l1_miss");
+            named("l2-miss", "mem_load_retired.l2_miss");
+            named("l3-miss", "mem_load_retired.l3_miss");
+         } else if (g == "G2") {
+            named("stall-l1d", "memory_activity.stalls_l1d_miss");
+            named("stall-l2", "memory_activity.stalls_l2_miss");
+            named("stall-l3", "memory_activity.stalls_l3_miss");
+         } else if (g == "G3a") {
+            named("l1d-pend", "l1d_pend_miss.pending");
+         } else if (g == "G3b") {
+            named("l1d-pend-cyc", "l1d_pend_miss.pending_cycles");
+            named("offcore-out", "offcore_requests_outstanding.all_data_rd");
+            named("offcore-out-cyc",
+                  "offcore_requests_outstanding.cycles_with_data_rd");
+         } else if (g == "G4") {
+            named("stall-total", "cycle_activity.stalls_total");
+            named("st-fwd-block", "ld_blocks.store_forward");
+            named("alias-4k", "ld_blocks.address_alias");
+            named("split-loads", "mem_inst_retired.split_loads");
+         } else if (g == "G5") { // no license events on SPR
+            named("ms-uops", "idq.ms_uops");
+            named("ms-retired", "uops_retired.ms");
+         } else if (g == "G6") {
+            named("dsb-uops", "idq.dsb_uops");
+            named("mite-uops", "idq.mite_uops");
+            named("dsb-miss", "frontend_retired.dsb_miss");
+            named("icache-stall", "icache_data.stalls");
+         } else if (g == "G7") {
+            named("port0", "uops_dispatched.port_0");
+            named("port1", "uops_dispatched.port_1");
+            named("port5-11", "uops_dispatched.port_5_11");
+         } else if (g == "G8") {
+            named("stores", "mem_inst_retired.all_stores");
+            named("offcore-rd", "offcore_requests.data_rd");
+            named("dtlb-walk", "dtlb_load_misses.walk_completed");
+         }
+      } else if (cpu == "AuthenticAMD-25-1-core") { // Zen 3 (roquefort)
+         if (g == "G0") {
+            // msr PMU: outside the group (a group can't span PMUs) and without
+            // exclusion bits, which the msr PMU rejects
+            for (const char* ev : {"msr/aperf/", "msr/mperf/"}) {
+               std::string name = ev[4] == 'a' ? "aperf" : "mperf";
+               add(name, ev);
+               auto& pe = events[name][0].pe;
+               pe.exclude_kernel = 0;
+               pe.exclude_hv = 0;
+            }
+         } else if (g == "G1") {
+            named("loads", "ls_dispatch.ld_dispatch");
+            hw("l1-miss", PERF_TYPE_HW_CACHE,
+               PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
+                   (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
+            named("l2-miss", "l2_cache_req_stat.ls_rd_blk_c");
+            named("dram-fills", "ls_dmnd_fills_from_sys.mem_io_local");
+         } else if (g == "G2") { // no memory-stall event on Zen 3: proxies
+            named("ldq-stall",
+                  "de_dis_dispatch_token_stalls1.load_queue_rsrc_stall");
+            named("retire-stall",
+                  "de_dis_dispatch_token_stalls2.retire_token_stall");
+         } else if (g == "G4") {
+            named("st-fwd", "ls_stlf");
+            named("st-fwd-block", "ls_bad_status2.stli_other");
+            named("alias-4k", "ls_misal_loads.ma4k");
+            named("misal-64", "ls_misal_loads.ma64");
+         } else if (g == "G6") {
+            named("opcache-acc", "op_cache_hit_miss.all_op_cache_accesses");
+            named("opcache-miss", "op_cache_hit_miss.op_cache_miss");
+            named("icache-miss", "ic_tag_hit_miss.instruction_cache_miss");
+            named("fetch-stall", "ic_fetch_stall.ic_stall_any");
+         } else if (g == "G7") {
+            named("sse-avx", "ex_ret_mmx_fp_instr.sse_instr"); // int + FP
+         } else if (g == "G8") {
+            named("stores", "ls_dispatch.store_dispatch");
+            named("mab-loads", "ls_mab_alloc.loads");
+            named("pf-dram-fills", "ls_hw_pf_dc_fills.mem_io_local");
+            named("dtlb-miss", "ls_l1_d_tlb_miss.all");
+         }
+      }
+#endif
+      if (!unresolved.empty())
+         groupFail("cannot resolve " + unresolved.front());
+      if (groupNames.size() == anchors)
+         groupFail("no such group on this CPU (G0..G8, G3a, G3b; see "
+                   "PMU_EVENT_GROUPS.md)");
+   }
+#endif
+
    void registerAll() {
+#ifdef __linux__
+      if (!perfGroup.empty()) {
+         // the group: cycles leads; it can't run partially, so a group that
+         // doesn't fit fails to open (or reports .run = 0) instead of rotating
+         for (auto& name : groupNames) {
+            auto& event = events[name][0];
+            event.fd = syscall(__NR_perf_event_open, &event.pe, 0, -1,
+                               groupLeaderFd, 0);
+            if (event.fd < 0)
+               groupFail("cannot open " + name + ": " + strerror(errno));
+            if (groupLeaderFd < 0) groupLeaderFd = event.fd;
+         }
+         // everything else (task-clock, msr) on its own
+         for (auto& name : ordered_names) {
+            if (std::find(groupNames.begin(), groupNames.end(), name) !=
+                groupNames.end())
+               continue;
+            auto& event = events[name][0];
+            event.fd = syscall(__NR_perf_event_open, &event.pe, 0, -1, -1, 0);
+            if (event.fd < 0)
+               groupFail("cannot open " + name + ": " + strerror(errno));
+         }
+         return;
+      }
+#endif
       for (auto& ev : events) {
          size_t i = 0;
          for (auto& event : ev.second) {
@@ -363,7 +605,29 @@ struct PerfEvents {
       }
    }
 
+   bool inGroup(const std::string& name) const {
+      return std::find(groupNames.begin(), groupNames.end(), name) !=
+             groupNames.end();
+   }
+
    void startAll() {
+#ifdef __linux__
+      if (!perfGroup.empty()) {
+         // enable the whole group at once, the rest one by one, then take
+         // the start readings
+         ioctl(groupLeaderFd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
+         for (auto& name : ordered_names)
+            if (!inGroup(name))
+               ioctl(events[name][0].fd, PERF_EVENT_IOC_ENABLE, 0);
+         for (auto& name : ordered_names) {
+            auto& event = events[name][0];
+            if (read(event.fd, &event.prev, sizeof(uint64_t) * 3) !=
+                sizeof(uint64_t) * 3)
+               groupFail("cannot read " + name);
+         }
+         return;
+      }
+#endif
       for (auto& ev : events) {
          for (auto& event : ev.second) {
 #ifdef __linux__
@@ -389,6 +653,23 @@ struct PerfEvents {
    }
 
    void readAll() {
+#ifdef __linux__
+      if (!perfGroup.empty()) {
+         // read everything before disabling anything: a disabled leader
+         // stops its members while their enabled time keeps running
+         for (auto& name : ordered_names) {
+            auto& event = events[name][0];
+            if (read(event.fd, &event.data, sizeof(uint64_t) * 3) !=
+                sizeof(uint64_t) * 3)
+               groupFail("cannot read " + name);
+         }
+         ioctl(groupLeaderFd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
+         for (auto& name : ordered_names)
+            if (!inGroup(name))
+               ioctl(events[name][0].fd, PERF_EVENT_IOC_DISABLE, 0);
+         return;
+      }
+#endif
       for (auto& ev : events)
          for (auto& event : ev.second) {
 #ifdef __linux__
@@ -403,16 +684,49 @@ struct PerfEvents {
    }
 
    void printHeader(std::ostream& out) {
-      for (auto& name : ordered_names)
+      for (auto& name : ordered_names) {
          out << std::setw(printFieldWidth) << name << ",";
+         // grouped mode: each event's share of time actually counted
+         if (!perfGroup.empty())
+            out << std::setw(printFieldWidth) << name + ".run" << ",";
+      }
+   }
+
+   // time_running / time_enabled over the last measurement; 1 = counted the
+   // whole time, < 1 = multiplexed or not scheduled
+   double runShare(const std::string& name) {
+#ifdef __linux__
+      auto& event = events[name][0];
+      double enabled = (double)(event.data.time_enabled - event.prev.time_enabled);
+      return enabled > 0
+                 ? (double)(event.data.time_running - event.prev.time_running) /
+                       enabled
+                 : 0;
+#else
+      compat::unused(name);
+      return 0;
+#endif
    }
 
    void printAll(std::ostream& out, double n) {
+      // grouped mode prints 6 decimals so rare events don't round to 0
+      auto oldPrecision = out.precision();
+      if (!perfGroup.empty()) out.precision(6);
       for (auto& name : ordered_names) {
          double aggr = 0;
          for (auto& event : events[name]) aggr += event.readCounter();
          out << std::setw(printFieldWidth) << aggr / n << ",";
+         if (!perfGroup.empty()) {
+            double share = runShare(name);
+            out << std::setw(printFieldWidth) << share << ",";
+            if (share < 0.999)
+               std::cerr << "PERF_GROUP=" << perfGroup << ": " << name
+                         << " counted " << share
+                         << " of the time (multiplexed or not scheduled)"
+                         << std::endl;
+         }
       }
+      out.precision(oldPrecision);
    }
 
    double operator[](std::string index) {

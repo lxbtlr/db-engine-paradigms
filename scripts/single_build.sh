@@ -21,7 +21,7 @@
 #   AUTOVEC    OFF       ON = build with -DAUTOVECTORIZE=ON
 #   QUERIES, REPS, ROUNDS, SETTLE, TEST_THREADS, TIMEOUT, ENGINE, THREADS,
 #   VECTOR_SIZE, SF, PIN, CPU, SIMDhash, SIMDjoin, SIMDsel, SIMDproj, VW_FLAGS,
-#   PERF, BENCH_HOST, ... (TESTS must stay all)
+#   PERF, PERF_GROUP, BENCH_HOST, ... (TESTS must stay all)
 #              passed through to flag_ablation.sh (see its header)
 set -u -o pipefail
 
