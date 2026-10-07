@@ -220,10 +220,20 @@ struct PerfEvents {
          add("all_rd", "ls_mab_alloc.loads");
          add("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
          add("br. misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
-         // Generic STALLED_CYCLES_BACKEND; perf maps it on AMD Zen3/Zen4 as a
-         // backend stall proxy. Verified to open and count on roquefort.
-         add("mem_stall", PERF_TYPE_HARDWARE,
-             PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
+         // Zen3 has no memory-stall event, and generic STALLED_CYCLES_BACKEND
+         // opens but barely counts there (0.015-0.136 per tuple against 9-44
+         // cycles on roquefort, 2026-10-07-counters-default-3). Use dispatch
+         // stalls on retire-queue tokens instead: verified to resolve and count
+         // through this path on roquefort. NOTE: this is dispatch stalls, not
+         // memory stalls, so the roquefort mem_stall column is not directly
+         // comparable with the other machines'. Zen4 renamed the dispatch-stall
+         // events, so it keeps the generic event (not verified on Zen4).
+         if (cpu == "AuthenticAMD-25-1-core")
+            add("mem_stall",
+                "de_dis_dispatch_token_stalls2.retire_token_stall");
+         else
+            add("mem_stall", PERF_TYPE_HARDWARE,
+                PERF_COUNT_HW_STALLED_CYCLES_BACKEND);
       } else if (cpu == "GenuineIntel-6-8F-core") {
          // Sapphire Rapids (SPR): Xeon Silver 4509Y (manchego).  Lean, proven
          // set: keep the generic PERF_TYPE_HARDWARE/HW_CACHE forms for the
