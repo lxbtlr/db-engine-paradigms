@@ -398,6 +398,9 @@ mkdir -p "$OUT"
 FAILS=0
 log() { echo "[$(date +%T)] $*" | tee -a "$OUT/driver.log"; }
 fail() { log "FAIL: $*"; FAILS=$((FAILS + 1)); }
+# excerpt FILE [N]: the last N lines of a failed step's log into driver.log
+# and stdout, so the cause survives when only the job's stdout is kept
+excerpt() { [ -s "$1" ] && tail -n "${2:-10}" "$1" | sed 's/^/    | /' | tee -a "$OUT/driver.log"; }
 tlimit() { if [ "$TIMEOUT" -gt 0 ]; then timeout --kill-after=30 "$TIMEOUT" "$@"; else "$@"; fi; }
 
 # flags <group_aggr> <group_aggr_sel> <pos16> <crc32> <huge2mb>
@@ -511,12 +514,12 @@ for comp in $COMPILERS; do
       if ! cmake -S "$ROOT" -B "$B" -DCMAKE_BUILD_TYPE=Release -DCOMPILER="$comp" \
             -DTARGET_MACHINE="$MACHINE" -DTARGET_ARCH= -DDATADIR="$DATADIR" \
             $(config_flags "$cfg") $VW_FLAGS_D > "$D/cmake.log" 2>&1; then
-        fail "$tag cmake (see $D/cmake.log)"; continue
+        fail "$tag cmake (see $D/cmake.log)"; excerpt "$D/cmake.log"; continue
       fi
       : > "$D/build.log"
       for tgt in $RUNNER test_all; do
         echo "### target $tgt" >> "$D/build.log"
-        cmake --build "$B" -j "$JOBS" --target "$tgt" >> "$D/build.log" 2>&1 || fail "$tag build of $tgt (see $D/build.log)"
+        cmake --build "$B" -j "$JOBS" --target "$tgt" >> "$D/build.log" 2>&1 || { fail "$tag build of $tgt (see $D/build.log)"; excerpt "$D/build.log"; }
       done
     fi
     # the effective defines, to confirm each config is what it claims
@@ -526,7 +529,7 @@ for comp in $COMPILERS; do
     elif [ -x "$B/test_all" ] && [ -d "$DATADIR/$BENCH/sf1" ]; then
       if threads=$TEST_THREADS tlimit "$B/test_all" --gtest_filter="$TEST_FILTER" > "$D/${BENCH}_test.log" 2>&1; then
         log "$tag $BENCH_NAME: $(grep -E '^\[  PASSED  \]' "$D/${BENCH}_test.log")"
-      else fail "$tag $BENCH_NAME tests (see $D/${BENCH}_test.log)"; fi
+      else fail "$tag $BENCH_NAME tests (see $D/${BENCH}_test.log)"; excerpt "$D/${BENCH}_test.log" 15; fi
     elif [ ! -x "$B/test_all" ]; then fail "$tag: test_all not built"
     else log "$tag: no $DATADIR/$BENCH/sf1, $BENCH_NAME tests skipped"; fi
     # join_dispatch also runs the microbenchmark behind its rules (pinned,
@@ -557,7 +560,9 @@ else
           # shellcheck disable=SC2086
           if ! tlimit $NUMA "$B/$RUNNER" -p "$DATA_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE" \
                 > "$f.csv" 2> "$f.err"; then
-            fail "${comp}_${cfg}$RUN_SUFFIX q$q round $r (see $f.err)"; continue
+            fail "${comp}_${cfg}$RUN_SUFFIX q$q round $r (see $f.err)"
+            [ "$r" = 1 ] && excerpt "$f.err" 5
+            continue
           fi
           # timing.csv gets median and min; counters.csv every run_tpch column
           # (IPC, LLC-misses, ...) in long form, named as in its header
