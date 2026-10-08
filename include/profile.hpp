@@ -370,12 +370,16 @@ struct PerfEvents {
    }
 
    // Event groups, from PMU_EVENT_GROUPS.md. Each is sized to fit next to
-   // cycles + instr. without multiplexing. On Cascade Lake and Zen 3 that is
-   // at most 3 events: a 4-event group never got scheduled there (bridge runs
-   // 2026-10-07-pg-*; on dubliner the NMI watchdog holds the fixed cycles
-   // counter, so the group's cycles needs a general-purpose one), so their
-   // fourth event moved to a "b" group (G1b, G2b, G4b, G5b, G6b, G8b).
-   // Sapphire Rapids (8 free) and Neoverse N1 (5) keep the full groups.
+   // cycles + instr. without multiplexing, as measured by bridge runs
+   // 2026-10-07-pg-* and 2026-10-08-pg-* (a group that doesn't fit never
+   // gets scheduled: .run = 0 for every member):
+   // - Cascade Lake: at most 3 events (the NMI watchdog holds the fixed
+   //   cycles counter, so the group's cycles needs a general-purpose one);
+   //   the fourth event of G1, G2, G4, G5, G6, G8 is in a "b" group.
+   // - Zen 3 (roquefort): at most 2 events, although the EPYC 7443P has 6
+   //   core counters (two appear taken by something else on the node);
+   //   G1, G4, G6, G8 are split 2 + 2 into a "b" group.
+   // - Sapphire Rapids (8 free) and Neoverse N1 (5) keep the full groups.
    // G0's branch events are generic on x86 (raw codes on aarch64), so G0
    // also works on x86 CPUs without a table here.
    void addGroup() {
@@ -539,8 +543,8 @@ struct PerfEvents {
             hw("l1-miss", PERF_TYPE_HW_CACHE,
                PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
                    (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
-            named("l2-miss", "l2_cache_req_stat.ls_rd_blk_c");
          } else if (g == "G1b") {
+            named("l2-miss", "l2_cache_req_stat.ls_rd_blk_c");
             named("dram-fills", "ls_dmnd_fills_from_sys.mem_io_local");
          } else if (g == "G2") { // no memory-stall event on Zen 3: proxies
             named("ldq-stall",
@@ -550,22 +554,22 @@ struct PerfEvents {
          } else if (g == "G4") {
             named("st-fwd", "ls_stlf");
             named("st-fwd-block", "ls_bad_status2.stli_other");
-            named("alias-4k", "ls_misal_loads.ma4k");
          } else if (g == "G4b") {
+            named("alias-4k", "ls_misal_loads.ma4k");
             named("misal-64", "ls_misal_loads.ma64");
          } else if (g == "G6") {
             named("opcache-acc", "op_cache_hit_miss.all_op_cache_accesses");
             named("opcache-miss", "op_cache_hit_miss.op_cache_miss");
-            named("icache-miss", "ic_tag_hit_miss.instruction_cache_miss");
          } else if (g == "G6b") {
+            named("icache-miss", "ic_tag_hit_miss.instruction_cache_miss");
             named("fetch-stall", "ic_fetch_stall.ic_stall_any");
          } else if (g == "G7") {
             named("sse-avx", "ex_ret_mmx_fp_instr.sse_instr"); // int + FP
          } else if (g == "G8") {
             named("stores", "ls_dispatch.store_dispatch");
             named("mab-loads", "ls_mab_alloc.loads");
-            named("pf-dram-fills", "ls_hw_pf_dc_fills.mem_io_local");
          } else if (g == "G8b") {
+            named("pf-dram-fills", "ls_hw_pf_dc_fills.mem_io_local");
             named("dtlb-miss", "ls_l1_d_tlb_miss.all");
          }
       }
