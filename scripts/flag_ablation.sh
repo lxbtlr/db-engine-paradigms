@@ -140,7 +140,8 @@
 #   PERF       ""        stat or record: one perf run per config x query after
 #                        the timing; <compiler>_<config>/perf_q<N>.txt
 #                        (PERF_KEEP=1 keeps perf.data)
-#   PERF_GROUP ""        G0..G8, G3a, G3b: run_tpch counts that event group
+#   PERF_GROUP ""        G0..G8, G3a, G3b (+ G1b G2b G4b G5b G6b G8b on
+#                        Cascade Lake / Zen 3): run_tpch counts that group
 #                        (cycles + instr. + the group, scheduled together,
 #                        with a <event>.run column) instead of the default
 #                        counters; see PMU_EVENT_GROUPS.md
@@ -284,7 +285,7 @@ for n in SIMDhash SIMDjoin SIMDsel SIMDproj; do
   case "${!n:-}" in ''|0|1) ;; *) echo "$n must be 0 or 1" >&2; exit 2 ;; esac
 done
 # run_tpch reads PERF_GROUP from the environment (profile.hpp)
-case "${PERF_GROUP:-}" in ''|G[0-8]|G3a|G3b) ;; *) echo "PERF_GROUP must be G0..G8, G3a or G3b" >&2; exit 2 ;; esac
+case "${PERF_GROUP:-}" in ''|G[0-8]|G3a|G3b|G[124568]b) ;; *) echo "PERF_GROUP must be G0..G8, G3a, G3b or G1b, G2b, G4b, G5b, G6b, G8b" >&2; exit 2 ;; esac
 [ -n "${PERF_GROUP:-}" ] && export PERF_GROUP
 # Every setting that differs from the default is part of the config name
 # (results, build dirs, database), so runs never collide:

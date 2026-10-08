@@ -370,9 +370,14 @@ struct PerfEvents {
    }
 
    // Event groups, from PMU_EVENT_GROUPS.md. Each is sized to fit next to
-   // cycles + instr. without multiplexing (4 free counters on Cascade Lake
-   // and Zen 3, 8 on Sapphire Rapids, 5 on Neoverse N1). G0's branch events
-   // are the generic ones, so G0 also works on CPUs without a table here.
+   // cycles + instr. without multiplexing. On Cascade Lake and Zen 3 that is
+   // at most 3 events: a 4-event group never got scheduled there (bridge runs
+   // 2026-10-07-pg-*; on dubliner the NMI watchdog holds the fixed cycles
+   // counter, so the group's cycles needs a general-purpose one), so their
+   // fourth event moved to a "b" group (G1b, G2b, G4b, G5b, G6b, G8b).
+   // Sapphire Rapids (8 free) and Neoverse N1 (5) keep the full groups.
+   // G0's branch events are generic on x86 (raw codes on aarch64), so G0
+   // also works on x86 CPUs without a table here.
    void addGroup() {
       const std::string& g = perfGroup;
       auto member = [&](const std::string& name) { groupNames.push_back(name); };
@@ -388,16 +393,21 @@ struct PerfEvents {
       hw("cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES);
       hw("instr.", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS);
       const size_t anchors = groupNames.size();
+#ifndef __aarch64__
       if (g == "G0") {
          hw("branches", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_INSTRUCTIONS);
          hw("br-misp", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES);
       }
+#endif
 #ifdef __aarch64__
       // architectural PMUv3 common events (raw codes; jevents is stubbed here)
       auto raw = [&](const char* name, uint64_t code) {
          hw(name, PERF_TYPE_RAW, code);
       };
       if (g == "G0") {
+         // the generic branch-instructions event doesn't open on burrata
+         raw("branches", 0x21);
+         raw("br-misp", 0x22);
          raw("inst-spec", 0x1B);
       } else if (g == "G1") {
          raw("ld-spec", 0x70);
@@ -428,11 +438,13 @@ struct PerfEvents {
             named("loads", "mem_inst_retired.all_loads");
             named("l1-miss", "mem_load_retired.l1_miss");
             named("l2-miss", "mem_load_retired.l2_miss");
+         } else if (g == "G1b") {
             named("l3-miss", "mem_load_retired.l3_miss");
          } else if (g == "G2") {
             named("stall-l1d", "cycle_activity.stalls_l1d_miss");
             named("stall-l2", "cycle_activity.stalls_l2_miss");
             named("stall-l3", "cycle_activity.stalls_l3_miss");
+         } else if (g == "G2b") {
             named("stall-mem", "cycle_activity.stalls_mem_any");
          } else if (g == "G3a") {
             named("l1d-pend", "l1d_pend_miss.pending"); // counter-restricted
@@ -445,16 +457,19 @@ struct PerfEvents {
             named("stall-total", "cycle_activity.stalls_total");
             named("st-fwd-block", "ld_blocks.store_forward");
             named("alias-4k", "ld_blocks_partial.address_alias");
+         } else if (g == "G4b") {
             named("split-loads", "mem_inst_retired.split_loads");
          } else if (g == "G5") {
             named("license0", "core_power.lvl0_turbo_license");
             named("license1", "core_power.lvl1_turbo_license");
             named("license2", "core_power.lvl2_turbo_license");
+         } else if (g == "G5b") {
             named("ms-uops", "idq.ms_uops");
          } else if (g == "G6") {
             named("dsb-uops", "idq.dsb_uops");
             named("mite-uops", "idq.mite_uops");
             named("dsb-miss", "frontend_retired.dsb_miss");
+         } else if (g == "G6b") {
             named("icache-stall", "icache_16b.ifdata_stall");
          } else if (g == "G7") {
             named("port0", "uops_dispatched_port.port_0");
@@ -464,6 +479,7 @@ struct PerfEvents {
             named("stores", "mem_inst_retired.all_stores");
             named("offcore-rd", "offcore_requests.all_data_rd");
             named("offcore-all", "offcore_requests.all_requests");
+         } else if (g == "G8b") {
             named("dtlb-walk", "dtlb_load_misses.walk_completed");
          }
       } else if (cpu == "GenuineIntel-6-8F-core") { // Sapphire Rapids (manchego)
@@ -524,6 +540,7 @@ struct PerfEvents {
                PERF_COUNT_HW_CACHE_L1D | (PERF_COUNT_HW_CACHE_OP_READ << 8) |
                    (PERF_COUNT_HW_CACHE_RESULT_MISS << 16));
             named("l2-miss", "l2_cache_req_stat.ls_rd_blk_c");
+         } else if (g == "G1b") {
             named("dram-fills", "ls_dmnd_fills_from_sys.mem_io_local");
          } else if (g == "G2") { // no memory-stall event on Zen 3: proxies
             named("ldq-stall",
@@ -534,11 +551,13 @@ struct PerfEvents {
             named("st-fwd", "ls_stlf");
             named("st-fwd-block", "ls_bad_status2.stli_other");
             named("alias-4k", "ls_misal_loads.ma4k");
+         } else if (g == "G4b") {
             named("misal-64", "ls_misal_loads.ma64");
          } else if (g == "G6") {
             named("opcache-acc", "op_cache_hit_miss.all_op_cache_accesses");
             named("opcache-miss", "op_cache_hit_miss.op_cache_miss");
             named("icache-miss", "ic_tag_hit_miss.instruction_cache_miss");
+         } else if (g == "G6b") {
             named("fetch-stall", "ic_fetch_stall.ic_stall_any");
          } else if (g == "G7") {
             named("sse-avx", "ex_ret_mmx_fp_instr.sse_instr"); // int + FP
@@ -546,6 +565,7 @@ struct PerfEvents {
             named("stores", "ls_dispatch.store_dispatch");
             named("mab-loads", "ls_mab_alloc.loads");
             named("pf-dram-fills", "ls_hw_pf_dc_fills.mem_io_local");
+         } else if (g == "G8b") {
             named("dtlb-miss", "ls_l1_d_tlb_miss.all");
          }
       }
@@ -553,7 +573,8 @@ struct PerfEvents {
       if (!unresolved.empty())
          groupFail("cannot resolve " + unresolved.front());
       if (groupNames.size() == anchors)
-         groupFail("no such group on this CPU (G0..G8, G3a, G3b; see "
+         groupFail("no such group on this CPU (G0..G8, G3a, G3b, and on "
+                   "Cascade Lake / Zen 3 G1b G2b G4b G5b G6b G8b; see "
                    "PMU_EVENT_GROUPS.md)");
    }
 #endif
