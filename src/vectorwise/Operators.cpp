@@ -8,12 +8,14 @@
 #include "vectorwise/SimdCrc.hpp"
 #include "vectorwise/SimdHash.hpp"
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #ifndef SIMDE_ENABLE_NATIVE_ALIASES
 #define SIMDE_ENABLE_NATIVE_ALIASES
 #endif
@@ -1960,9 +1962,103 @@ void aggrFusedBlock(pos_t n, runtime::Hashmap::EntryHeader** RES entries,
          *reinterpret_cast<int64_t*>(e + o[d]) += c[d][s[d][i]];
    }
 }
+
+#ifdef VW_AGGR_FUSED_KINDS
+// VW_AGGR_FUSED_KINDS: aggrFusedBlock reads every aggregate as col[sel[i]],
+// so a dense column costs an extra load through the identity selection,
+// COUNT(*) loads a column of ones, and aggregates sharing one selection
+// vector each load sel[i] (Q1's 5 aggregates: 16 loads per row). Here the
+// plan's kinds are compile-time counts: KD dense columns read as col[i], KS
+// columns read through one shared selection loaded once per row, and
+// COUNT(*) as += 1 (11 loads per row; bench_aggr on Q1's group sequence:
+// 2.43 -> 1.59 ns/row gcc, 2.75 -> 1.87 clang, Zen 4).
+constexpr size_t kKindsMax = 4; // per kind; larger shapes use aggrFusedBlock
+template <size_t KD, size_t KS, bool Count>
+void aggrKindsBlock(pos_t n, runtime::Hashmap::EntryHeader** RES entries,
+                    const int64_t* const* dcols, const size_t* doffs,
+                    const pos_t* RES sel, const int64_t* const* scols,
+                    const size_t* soffs, size_t countOff) {
+   const int64_t* dc[KD + 1];
+   size_t od[KD + 1];
+   const int64_t* sc[KS + 1];
+   size_t os[KS + 1];
+   for (size_t d = 0; d < KD; ++d) dc[d] = dcols[d], od[d] = doffs[d];
+   for (size_t d = 0; d < KS; ++d) sc[d] = scols[d], os[d] = soffs[d];
+   for (pos_t i = 0; i < n; i++) {
+      char* e = reinterpret_cast<char*>(entries[i]);
+      for (size_t d = 0; d < KD; ++d)
+         *reinterpret_cast<int64_t*>(e + od[d]) += dc[d][i];
+      if constexpr (KS > 0) {
+         const pos_t s = sel[i];
+         for (size_t d = 0; d < KS; ++d)
+            *reinterpret_cast<int64_t*>(e + os[d]) += sc[d][s];
+      }
+      if constexpr (Count) *reinterpret_cast<int64_t*>(e + countOff) += 1;
+   }
+}
+using AggrKindsFn = void (*)(pos_t, runtime::Hashmap::EntryHeader**,
+                             const int64_t* const*, const size_t*, const pos_t*,
+                             const int64_t* const*, const size_t*, size_t);
+// index (KD * (kKindsMax + 1) + KS) * 2 + Count
+template <size_t... I>
+constexpr std::array<AggrKindsFn, sizeof...(I)>
+aggrKindsTable(std::index_sequence<I...>) {
+   return {&aggrKindsBlock<I / 2 / (kKindsMax + 1), I / 2 % (kKindsMax + 1),
+                           I % 2 == 1>...};
+}
+constexpr auto aggrKindsFns = aggrKindsTable(
+    std::make_index_sequence<(kKindsMax + 1) * (kKindsMax + 1) * 2>());
+#endif
 } // namespace
 
+#ifdef VW_AGGR_FUSED_KINDS
+bool HashGroup::updateGroupsKinds(pos_t n) {
+   if (!kindsResolved) {
+      // the kinds are fixed by the plan: split once
+      kindsResolved = true;
+      size_t counts = 0;
+      for (size_t d = 0; d < fusedAggrs.size(); ++d)
+         switch (fusedAggrs[d].kind) {
+         case FusedAggr::Col: kindsDense.push_back(d); break;
+         case FusedAggr::SelCol: kindsSel.push_back(d); break;
+         case FusedAggr::Count: kindsCount = int(d); ++counts; break;
+         }
+      kindsSupported = counts <= 1 && kindsDense.size() <= kKindsMax &&
+                       kindsSel.size() <= kKindsMax;
+   }
+   if (!kindsSupported) return false;
+   const int64_t* dcols[kKindsMax];
+   size_t doffs[kKindsMax];
+   const int64_t* scols[kKindsMax];
+   size_t soffs[kKindsMax];
+   const pos_t* sel = nullptr;
+   for (size_t d = 0; d < kindsDense.size(); ++d) {
+      auto& fa = fusedAggrs[kindsDense[d]];
+      dcols[d] = static_cast<const int64_t*>(static_cast<FAggrOp*>(fa.op)->get<1>());
+      doffs[d] = fa.offset;
+   }
+   for (size_t d = 0; d < kindsSel.size(); ++d) {
+      auto& fa = fusedAggrs[kindsSel[d]];
+      auto op = static_cast<FAggrSelOp*>(fa.op);
+      // one shared selection vector; aggregates over different selections
+      // keep the generic kernel
+      if (d == 0) sel = op->get<1>();
+      else if (op->get<1>() != sel) return false;
+      scols[d] = static_cast<const int64_t*>(op->get<2>());
+      soffs[d] = fa.offset;
+   }
+   const size_t countOff = kindsCount >= 0 ? fusedAggrs[kindsCount].offset : 0;
+   aggrKindsFns[(kindsDense.size() * (kKindsMax + 1) + kindsSel.size()) * 2 +
+                (kindsCount >= 0)](n, preAggregation.htMatches, dcols, doffs,
+                                   sel, scols, soffs, countOff);
+   return true;
+}
+#endif
+
 void HashGroup::updateGroupsFused(pos_t n) {
+#ifdef VW_AGGR_FUSED_KINDS
+   if (updateGroupsKinds(n)) return;
+#endif
    if (identitySel.size() < n) {
       identitySel.resize(std::max<size_t>(n, vecSize));
       for (size_t i = 0; i < identitySel.size(); ++i) identitySel[i] = pos_t(i);

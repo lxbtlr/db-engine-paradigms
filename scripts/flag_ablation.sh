@@ -56,7 +56,7 @@
 # asserted by the plans:
 #   join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom
 #   join_fused join_semi join_all join_dispatch jd_all join_all_valid
-#   grp_base grp_dispatch grp_runheads grp_having
+#   grp_base grp_dispatch grp_kinds grp_runheads grp_having
 #
 # Group-by configs (study/VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
 #   grp_base             today's HashGroup
@@ -67,6 +67,8 @@
 #   grp_all              grp_q18 + VW_AGGR_FUSED
 #   grp_dispatch         VW_GROUP_DISPATCH (plan-resolved paths: batch, global,
 #                        fused aggregates, spill copy, hash in the lookup)
+#   grp_kinds            grp_dispatch + VW_AGGR_FUSED_KINDS (fused aggregate
+#                        pass specialized by aggregate kind)
 #   grp_runheads         grp_dispatch + VW_GROUP_RUN_HEADS (branch-free run-head
 #                        lookup; AVX-512BW/VL run pass, scalar elsewhere)
 #   grp_having           grp_runheads + VW_GROUP_HAVING (TPC-H Q18: HAVING in
@@ -166,10 +168,10 @@ FLAG_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
 JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_semi join_all_valid"
-GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_having"
+GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds grp_runheads grp_having"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 # config group: the TPC-valid join and group-by configs (see header)
-JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all join_all_valid grp_base grp_dispatch grp_runheads grp_having"
+JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all join_all_valid grp_base grp_dispatch grp_kinds grp_runheads grp_having"
 CONFIGS=$(for c in $CONFIGS; do if [ "$c" = join_valid ]; then printf "%s\n" $JOIN_VALID_CONFIGS; else echo "$c"; fi; done | awk '!seen[$0]++' | tr '\n' ' ')
 # PRINT_CONFIGS=1: print the expanded config list and exit (single_build.sh)
 if [ "${PRINT_CONFIGS:-0}" = 1 ]; then echo $CONFIGS; exit 0; fi
@@ -383,7 +385,7 @@ summarize() {
       family(out "/join.csv", "compiler,query,join_config,median_ms,speedup_vs_base",
              "join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_semi join_all_valid", "join_base")
       family(out "/group.csv", "compiler,query,group_config,median_ms,speedup_vs_base",
-             "grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_runheads grp_having", "grp_base")
+             "grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds grp_runheads grp_having", "grp_base")
     }' $([ -f "$OUT/counters.csv" ] && echo "$OUT/counters.csv") "$OUT/timing.csv"
   { echo "compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned"
     sort -t, -k1,1 -k2,2V -k3,3 "$OUT/matrix.body"; } > "$OUT/matrix.csv"
@@ -422,7 +424,7 @@ flags() {
        "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF -DVW_JOIN_TWOPHASE=OFF -DVW_JOIN_SIMD=OFF" \
        "-DVW_NEW_JOIN=OFF -DVW_NEW_JOIN_FULL=tag -DVW_JOIN_BLOOM=OFF -DVW_SIMD_HASH_GATHER=insert" \
        "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_FUSE_HASH=OFF" \
-       "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF" \
+       "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF -DVW_AGGR_FUSED_KINDS=OFF" \
        "-DVW_GROUP_DISPATCH=OFF -DVW_GROUP_RUN_HEADS=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
        "-DVW_JOIN_DISPATCH=OFF -DVW_GROUP_HAVING=OFF -DVW_JOIN_SEMI_MAX_BYTES=0" \
        "-DAUTOVECTORIZE=$AUTOVEC" "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
@@ -471,6 +473,7 @@ config_flags() {
                               "-DVW_FUSE_HASH=ON -DVW_GROUP_NO_CONCAT=ON -DVW_SPILL_WORD_COPY=ON" ;;
     grp_all)             echo "$(config_flags grp_q18) -DVW_AGGR_FUSED=ON" ;;
     grp_dispatch)        echo "$(config_flags grp_base) -DVW_GROUP_DISPATCH=ON" ;;
+    grp_kinds)           echo "$(config_flags grp_dispatch) -DVW_AGGR_FUSED_KINDS=ON" ;;
     grp_runheads)        echo "$(config_flags grp_dispatch) -DVW_GROUP_RUN_HEADS=ON" ;;
     grp_having)          echo "$(config_flags grp_runheads) -DVW_GROUP_HAVING=ON" ;;
     *) echo "unknown config $1" >&2; exit 2 ;;

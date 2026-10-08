@@ -499,6 +499,17 @@ class HashGroup : public UnaryOperator {
    std::vector<pos_t> identitySel;
    std::vector<int64_t> ones;
    void updateGroupsFused(pos_t n);
+#ifdef VW_AGGR_FUSED_KINDS
+   /// VW_AGGR_FUSED_KINDS: fusedAggrs split by kind once (dense columns,
+   /// columns read through a selection vector, COUNT(*)), so the fused pass
+   /// reads dense columns directly, loads a shared selection once per row
+   /// and counts with += 1. False if the shape has no specialized kernel.
+   bool updateGroupsKinds(pos_t n);
+   bool kindsResolved = false;
+   bool kindsSupported = false;
+   std::vector<size_t> kindsDense, kindsSel;
+   int kindsCount = -1;
+#endif
 #endif
 
    /// ------ phase 2: global aggregation

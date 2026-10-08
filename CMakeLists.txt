@@ -249,6 +249,19 @@ if(VW_AGGR_FUSED)
   message(STATUS "Building with VW_AGGR_FUSED")
 endif()
 
+# VW_AGGR_FUSED_KINDS: the fused aggregate pass specialized by aggregate kind,
+# resolved once from the plan: dense columns read directly (no identity
+# selection), columns sharing one selection vector load it once per row,
+# COUNT(*) adds 1 (no column of ones). Other shapes keep the generic kernel.
+OPTION(VW_AGGR_FUSED_KINDS "Kind-specialized fused aggregate update in VectorWise HashGroup" OFF)
+if(VW_AGGR_FUSED_KINDS)
+  if(NOT VW_AGGR_FUSED AND NOT VW_GROUP_DISPATCH)
+    message(FATAL_ERROR "VW_AGGR_FUSED_KINDS specializes the fused aggregate update; enable VW_AGGR_FUSED or VW_GROUP_DISPATCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_AGGR_FUSED_KINDS=1)
+  message(STATUS "Building with VW_AGGR_FUSED_KINDS")
+endif()
+
 OPTION(VW_GROUP_AGGR_SEL "Perform selection vector batching for VectorWise" OFF)
 if(VW_GROUP_AGGR_SEL)
   ADD_DEFINITIONS(-DVW_GROUP_AGGR_SEL=1)
