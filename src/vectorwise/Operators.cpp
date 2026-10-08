@@ -2014,24 +2014,36 @@ constexpr auto aggrKindsFns = aggrKindsTable(
 #ifdef VW_AGGR_FUSED_KINDS
 bool HashGroup::updateGroupsKinds(pos_t n) {
    if (!kindsResolved) {
-      // the kinds are fixed by the plan: split once
+      // the kinds and the selection Buffers are fixed by the plan: choose
+      // the kernel once for the operator's lifetime
       kindsResolved = true;
       size_t counts = 0;
+      bool oneSel = true;
       for (size_t d = 0; d < fusedAggrs.size(); ++d)
          switch (fusedAggrs[d].kind) {
          case FusedAggr::Col: kindsDense.push_back(d); break;
-         case FusedAggr::SelCol: kindsSel.push_back(d); break;
+         case FusedAggr::SelCol:
+            if (!fusedAggrs[d].sel ||
+                (!kindsSel.empty() &&
+                 fusedAggrs[d].sel != fusedAggrs[kindsSel.front()].sel))
+               oneSel = false;
+            kindsSel.push_back(d);
+            break;
          case FusedAggr::Count: kindsCount = int(d); ++counts; break;
          }
-      kindsSupported = counts <= 1 && kindsDense.size() <= kKindsMax &&
+      kindsSupported = oneSel && counts <= 1 &&
+                       kindsDense.size() <= kKindsMax &&
                        kindsSel.size() <= kKindsMax;
+      if (kindsSupported && !kindsSel.empty())
+         kindsSelVec = static_cast<const pos_t*>(fusedAggrs[kindsSel.front()].sel);
    }
    if (!kindsSupported) return false;
    const int64_t* dcols[kKindsMax];
    size_t doffs[kKindsMax];
    const int64_t* scols[kKindsMax];
    size_t soffs[kKindsMax];
-   const pos_t* sel = nullptr;
+   // per vector only the arguments are read (Column pointers move per
+   // morsel); nothing is decided here
    for (size_t d = 0; d < kindsDense.size(); ++d) {
       auto& fa = fusedAggrs[kindsDense[d]];
       dcols[d] = static_cast<const int64_t*>(static_cast<FAggrOp*>(fa.op)->get<1>());
@@ -2039,18 +2051,15 @@ bool HashGroup::updateGroupsKinds(pos_t n) {
    }
    for (size_t d = 0; d < kindsSel.size(); ++d) {
       auto& fa = fusedAggrs[kindsSel[d]];
-      auto op = static_cast<FAggrSelOp*>(fa.op);
-      // one shared selection vector; aggregates over different selections
-      // keep the generic kernel
-      if (d == 0) sel = op->get<1>();
-      else if (op->get<1>() != sel) return false;
-      scols[d] = static_cast<const int64_t*>(op->get<2>());
+      assert(static_cast<FAggrSelOp*>(fa.op)->get<1>() == kindsSelVec);
+      scols[d] = static_cast<const int64_t*>(
+          static_cast<FAggrSelOp*>(fa.op)->get<2>());
       soffs[d] = fa.offset;
    }
    const size_t countOff = kindsCount >= 0 ? fusedAggrs[kindsCount].offset : 0;
    aggrKindsFns[(kindsDense.size() * (kKindsMax + 1) + kindsSel.size()) * 2 +
                 (kindsCount >= 0)](n, preAggregation.htMatches, dcols, doffs,
-                                   sel, scols, soffs, countOff);
+                                   kindsSelVec, scols, soffs, countOff);
    return true;
 }
 #endif

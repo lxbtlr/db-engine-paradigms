@@ -988,10 +988,16 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    sel.registerDS(&aggr_op->get<1>());
    col.registerDS(&aggr_op->get<2>());
 #ifdef VW_AGGR_FUSED
-   if (aggr == primitives::aggr_sel_plus_int64_t_col)
+   if (aggr == primitives::aggr_sel_plus_int64_t_col) {
       op.fusedAggrs.push_back(
           {HashGroup::FusedAggr::SelCol, aggr_op.get(), entryOffset});
-   else
+#ifdef VW_AGGR_FUSED_KINDS
+      // the selection vector's identity, fixed by the plan (a Buffer's
+      // address is set at build time; only Column pointers move per morsel)
+      op.fusedAggrs.back().sel =
+          sel.buf == DS::BufferSpec::Buffer ? sel.data : nullptr;
+#endif
+   } else
       op.fusable = false;
 #endif
    op.updateGroups += move(aggr_op);
