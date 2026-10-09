@@ -3,6 +3,7 @@
 #include "common/runtime/Database.hpp"
 #include "vectorwise/VectorAllocator.hpp"
 #include <memory>
+#include <optional>
 #include <stack>
 #include <unordered_set>
 #include <vector>
@@ -184,6 +185,20 @@ class QueryBuilder {
       ExpressionBuilder& addOp(primitives::F4 op, DS a, DS b, DS c, DS d);
       operator std::unique_ptr<vectorwise::Expression>();
       operator std::unique_ptr<vectorwise::Aggregates>();
+#ifdef VW_PROJ_COMPOUND
+      /// VW_PROJ_COMPOUND: an int64 projection is held back until the next
+      /// op shows whether it chains with it (an op cannot be replaced once
+      /// built: Scan keeps pointers to its Column arguments)
+      struct HeldProjection {
+         primitives::compound::Desc desc;
+         const void* prim;
+         DS sel, out, p1, p2; // sel: buf None for F3 primitives
+      };
+      std::optional<HeldProjection> held;
+      void holdOrFuse(const HeldProjection& next);
+      bool fuse(const HeldProjection& first, const HeldProjection& second);
+      void flushHeld();
+#endif
    };
 
    QueryBuilder(runtime::Database& db_, SharedStateManager& s,

@@ -123,6 +123,13 @@ pos_t F3_Op::run(pos_t n) {
 pos_t F4_Op::run(pos_t n) {
    return operation(n, inputSelectionV, outputSelectionV, param1, param2);
 }
+#ifdef VW_PROJ_COMPOUND
+pos_t CompoundOp::run(pos_t n) {
+   return kernel(n, static_cast<const pos_t*>(sel), static_cast<int64_t*>(mid),
+                 static_cast<int64_t*>(out), static_cast<const int64_t*>(a),
+                 static_cast<const int64_t*>(b), static_cast<const int64_t*>(c));
+}
+#endif
 
 pos_t ConcatOp::run(pos_t n) {
    auto* s = reinterpret_cast<pos_t*>(sel);

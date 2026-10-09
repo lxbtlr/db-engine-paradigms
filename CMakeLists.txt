@@ -262,6 +262,16 @@ if(VW_AGGR_FUSED_KINDS)
   message(STATUS "Building with VW_AGGR_FUSED_KINDS")
 endif()
 
+# VW_PROJ_COMPOUND: compound projection primitives (X100-style). Inside one
+# Project expression, an int64 +, -, * projection whose result feeds the
+# next one runs with it in one loop (CompoundPrimitives.hpp); chains are found
+# by ExpressionBuilder at build time, intermediate buffers are still written.
+OPTION(VW_PROJ_COMPOUND "Compound int64 projection primitives in VectorWise expressions" OFF)
+if(VW_PROJ_COMPOUND)
+  ADD_DEFINITIONS(-DVW_PROJ_COMPOUND=1)
+  message(STATUS "Building with VW_PROJ_COMPOUND")
+endif()
+
 OPTION(VW_GROUP_AGGR_SEL "Perform selection vector batching for VectorWise" OFF)
 if(VW_GROUP_AGGR_SEL)
   ADD_DEFINITIONS(-DVW_GROUP_AGGR_SEL=1)
@@ -1104,6 +1114,7 @@ add_executable(test_all
   src/test/vectorwise/simd_selection.cpp
   src/test/vectorwise/simd_hash.cpp
   src/test/vectorwise/simd_aggr.cpp
+  src/test/vectorwise/compound.cpp
   src/test/vectorwise/crc32_fast.cpp
   src/test/vectorwise/Operators.cpp
   src/test/common/Hashmap.cpp

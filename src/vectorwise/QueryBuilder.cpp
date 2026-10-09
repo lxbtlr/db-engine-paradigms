@@ -183,6 +183,9 @@ QueryBuilder::DataStorage::operator pos_t*() const {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F1 op, DS a) {
+#ifdef VW_PROJ_COMPOUND
+   flushHeld();
+#endif
    auto f1 = make_unique<F1_Op>(a, op);
    a.registerDS(&f1->input);
    expression->ops.push_back(move(f1));
@@ -191,6 +194,9 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F1 op, DS a) {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F2 op, DS a, DS b) {
+#ifdef VW_PROJ_COMPOUND
+   flushHeld();
+#endif
    auto f2 = make_unique<F2_Op>(a, b, op);
    a.registerDS(&f2->input);
    b.registerDS(&f2->param1);
@@ -200,6 +206,14 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F2 op, DS a, DS b) {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F3 op, DS a, DS b, DS c) {
+#ifdef VW_PROJ_COMPOUND
+   primitives::compound::Desc desc;
+   if (primitives::compound::describe((const void*)op, desc)) {
+      holdOrFuse({desc, (const void*)op, DS(), a, b, c});
+      return *this;
+   }
+   flushHeld();
+#endif
    auto f3 = make_unique<F3_Op>(a, b, c, op);
    a.registerDS(&f3->outputSelectionV);
    b.registerDS(&f3->param1);
@@ -210,6 +224,14 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F3 op, DS a, DS b, DS c) {
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
                                        DS d) {
+#ifdef VW_PROJ_COMPOUND
+   primitives::compound::Desc desc;
+   if (primitives::compound::describe((const void*)op, desc)) {
+      holdOrFuse({desc, (const void*)op, a, b, c, d});
+      return *this;
+   }
+   flushHeld();
+#endif
    auto f4 = make_unique<F4_Op>(a, b, c, d, op);
    a.registerDS(&f4->inputSelectionV);
    b.registerDS(&f4->outputSelectionV);
@@ -220,15 +242,109 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
 }
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Expression>() {
+#ifdef VW_PROJ_COMPOUND
+   flushHeld();
+#endif
    return move(expression);
 }
 
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Aggregates>() {
+#ifdef VW_PROJ_COMPOUND
+   flushHeld();
+#endif
    auto r = make_unique<vectorwise::Aggregates>();
    r->ops = move(expression->ops);
    return r;
 }
+
+#ifdef VW_PROJ_COMPOUND
+void QueryBuilder::ExpressionBuilder::flushHeld() {
+   if (!held) return;
+   auto& h = *held;
+   if (h.desc.selInput) {
+      auto f4 = make_unique<F4_Op>(h.sel, h.out, h.p1, h.p2,
+                                   (primitives::F4)h.prim);
+      h.sel.registerDS(&f4->inputSelectionV);
+      h.out.registerDS(&f4->outputSelectionV);
+      h.p1.registerDS(&f4->param1);
+      h.p2.registerDS(&f4->param2);
+      expression->ops.push_back(move(f4));
+   } else {
+      auto f3 = make_unique<F3_Op>(h.out, h.p1, h.p2, (primitives::F3)h.prim);
+      h.out.registerDS(&f3->outputSelectionV);
+      h.p1.registerDS(&f3->param1);
+      h.p2.registerDS(&f3->param2);
+      expression->ops.push_back(move(f3));
+   }
+   held.reset();
+}
+
+void QueryBuilder::ExpressionBuilder::holdOrFuse(const HeldProjection& next) {
+   if (held && fuse(*held, next)) {
+      held.reset(); // pairs: the compound is not chained again
+      return;
+   }
+   flushHeld();
+   held = next;
+}
+
+/// first's result feeds second: build one CompoundOp for both if second
+/// reads that result densely, their selections (if any) are the same
+/// Buffer, and no output aliases an input; decided from the plan only
+bool QueryBuilder::ExpressionBuilder::fuse(const HeldProjection& first,
+                                           const HeldProjection& second) {
+   using namespace primitives::compound;
+   auto same = [](const DS& x, const DS& y) {
+      return x.buf != DS::BufferSpec::None && x.buf == y.buf && x.data == y.data;
+   };
+   const DS& mid = first.out;
+   if (mid.buf != DS::BufferSpec::Buffer ||
+       second.out.buf != DS::BufferSpec::Buffer)
+      return false;
+   const bool p1Mid = second.desc.a == Col && same(second.p1, mid);
+   const bool p2Mid = second.desc.b == Col && same(second.p2, mid);
+   if (p1Mid == p2Mid) return false; // second does not chain, or reads it twice
+   DS c = p1Mid ? second.p2 : second.p1;
+   const Form cForm = p1Mid ? second.desc.b : second.desc.a;
+   bool cLeft = p2Mid;
+   if (first.desc.selInput && second.desc.selInput &&
+       !same(first.sel, second.sel))
+      return false;
+   const DS& sel = first.desc.selInput ? first.sel : second.sel;
+   if ((first.desc.selInput || second.desc.selInput) &&
+       sel.buf != DS::BufferSpec::Buffer)
+      return false;
+   using Ins = std::initializer_list<const DS*>;
+   for (const DS* in : Ins{&first.p1, &first.p2, &c, &mid})
+      if (same(*in, second.out)) return false;
+   for (const DS* in : Ins{&first.p1, &first.p2, &c})
+      if (same(*in, mid)) return false;
+   // canonical operand order (the kernel table holds only these)
+   Form a = first.desc.a, b = first.desc.b;
+   DS pa = first.p1, pb = first.p2;
+   if (commutative(first.desc.op) && a > b) {
+      std::swap(a, b);
+      std::swap(pa, pb);
+   }
+   if (commutative(second.desc.op)) cLeft = false;
+   auto k = kernel(first.desc.op, a, b, second.desc.op, cForm, cLeft);
+   if (!k) return false;
+   auto op = make_unique<CompoundOp>();
+   op->kernel = k;
+   op->sel = sel.data;
+   op->mid = mid.data;
+   op->out = second.out.data;
+   op->a = pa.data;
+   op->b = pb.data;
+   op->c = c.data;
+   pa.registerDS(&op->a);
+   pb.registerDS(&op->b);
+   c.registerDS(&op->c);
+   expression->ops.push_back(move(op));
+   return true;
+}
+#endif
 
 QueryBuilder::HashJoinBuilder::HashJoinBuilder(QueryBuilder& b) : base(b) {}
 bool QueryBuilder::uniqueBuild(

@@ -1,5 +1,8 @@
 #pragma once
 #include "Primitives.hpp"
+#ifdef VW_PROJ_COMPOUND
+#include "CompoundPrimitives.hpp"
+#endif
 #include <experimental/tuple>
 #include <functional>
 #include <memory>
@@ -200,6 +203,21 @@ struct F4_Op : public Op
          operation(o) {}
    virtual pos_t run(pos_t n) override;
 };
+
+#ifdef VW_PROJ_COMPOUND
+/// VW_PROJ_COMPOUND: two chained projections in one loop
+/// (CompoundPrimitives.hpp); the arguments are registered like F3/F4_Op's
+struct CompoundOp : public Op {
+   void* sel = nullptr;
+   void* mid;
+   void* out;
+   void* a;
+   void* b;
+   void* c;
+   primitives::compound::Fn kernel;
+   virtual pos_t run(pos_t n) override;
+};
+#endif
 
 /// Concatenate a single source column into an output buffer at a fixed offset.
 /// Called once per source column to build up a packed key buffer.
