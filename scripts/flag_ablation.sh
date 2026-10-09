@@ -158,6 +158,12 @@
 #   SUMMARIZE_ONLY <dir> recompute matrix/effects/best from <dir>/timing.csv and exit
 #   RESULTS_PREFIX flag_ablation  results directory name before _<host>_<timestamp>
 #   MICROBENCH 1         0 = skip run_joindispatchbench for join_dispatch
+#   REGISTER   1         register each build in the results database right after
+#                        it builds (register-build; build_event_id.txt in
+#                        <compiler>_<config>/), so its runs can be ingested
+#                        later; 0 = off. Skipped with a warning where the tool
+#                        or python3 is missing (e.g. off the cluster)
+#   CORPUS_BIN /tank/alexb/vldb-db/bin  where register-build lives
 #   PRINT_CONFIGS 0      1 = print the expanded CONFIGS and exit
 set -u -o pipefail
 
@@ -414,6 +420,36 @@ fail() { log "FAIL: $*"; FAILS=$((FAILS + 1)); }
 # excerpt FILE [N]: the last N lines of a failed step's log into driver.log
 # and stdout, so the cause survives when only the job's stdout is kept
 excerpt() { [ -s "$1" ] && tail -n "${2:-10}" "$1" | sed 's/^/    | /' | tee -a "$OUT/driver.log"; }
+# register_build tag dir build_dir config cmake_args...: record the binary
+# in the results database (spec + binary + build_event) before it runs, while
+# the binary still exists; the ingest only needs the id it leaves behind
+register_build() {
+  local tag=$1 d=$2 b=$3 name=$4; shift 4
+  [ "${REGISTER:-1}" = 1 ] || return 0
+  local reg=${CORPUS_BIN:-/tank/alexb/vldb-db/bin}/register-build cxx shim be
+  if [ ! -f "$reg" ] || ! command -v python3 > /dev/null; then
+    log "WARNING: $tag not registered (no $reg or python3)"; return 0
+  fi
+  [ -x "$b/$RUNNER" ] || return 0
+  # register-build names the compiler from `c++ --version`: point c++ at the
+  # compiler this build used, or clang builds are recorded as gcc
+  cxx=$(sed -n 's/^set(CMAKE_CXX_COMPILER "\(.*\)")$/\1/p' "$b"/CMakeFiles/*/CMakeCXXCompiler.cmake 2> /dev/null | head -1)
+  [ -n "$cxx" ] || { log "WARNING: $tag not registered (compiler of $b unknown)"; return 0; }
+  shim=$(mktemp -d)
+  ln -s "$(command -v "$cxx" || echo "$cxx")" "$shim/c++"
+  { echo "cmake $*"
+    echo "commit: $(git -C "$ROOT" rev-parse HEAD)"
+    echo "built: $(date -Is) on $(hostname -s)"; } > "$d/buildcmds.txt"
+  if be=$(PATH="$shim:$PATH" CORPUS_SCRATCH=${SLURM_TMPDIR:-/tmp} python3 "$reg" \
+        --binary "$b/$RUNNER" --buildcmds "$d/buildcmds.txt" --config "$name" \
+        --repo "$ROOT" 2> "$d/register.err") && [[ $be =~ ^[0-9]+$ ]]; then
+    echo "$be" > "$d/build_event_id.txt"
+    log "$tag registered: build_event $be ($name, $(basename "$cxx"))"
+  else
+    log "WARNING: $tag registration failed (see $d/register.err)"; excerpt "$d/register.err" 5
+  fi
+  rm -rf "$shim"
+}
 tlimit() { if [ "$TIMEOUT" -gt 0 ]; then timeout --kill-after=30 "$TIMEOUT" "$@"; else "$@"; fi; }
 
 # flags <group_aggr> <group_aggr_sel> <pos16> <crc32> <huge2mb>
@@ -524,11 +560,12 @@ for comp in $COMPILERS; do
   for cfg in $CONFIGS; do
     tag="${comp}_${cfg}$RUN_SUFFIX"; B=$(bdir "$comp" "$cfg"); D="$OUT/$tag"; mkdir -p "$D"
     log "===== $tag ====="
+    # shellcheck disable=SC2207
+    cmake_args=(-S "$ROOT" -B "$B" -DCMAKE_BUILD_TYPE=Release -DCOMPILER="$comp"
+      -DTARGET_MACHINE="$MACHINE" -DTARGET_ARCH= -DDATADIR="$DATADIR"
+      $(config_flags "$cfg") $VW_FLAGS_D)
     if [ "$SKIP_BUILD" != 1 ]; then
-      # shellcheck disable=SC2046
-      if ! cmake -S "$ROOT" -B "$B" -DCMAKE_BUILD_TYPE=Release -DCOMPILER="$comp" \
-            -DTARGET_MACHINE="$MACHINE" -DTARGET_ARCH= -DDATADIR="$DATADIR" \
-            $(config_flags "$cfg") $VW_FLAGS_D > "$D/cmake.log" 2>&1; then
+      if ! cmake "${cmake_args[@]}" > "$D/cmake.log" 2>&1; then
         fail "$tag cmake (see $D/cmake.log)"; excerpt "$D/cmake.log"; continue
       fi
       : > "$D/build.log"
@@ -540,6 +577,7 @@ for comp in $COMPILERS; do
     # the effective defines, to confirm each config is what it claims
     cat "$B/build.ninja" "$B/CMakeFiles/vectorwise.dir/flags.make" 2>/dev/null | grep -o -E -- '-D(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE)(=[^ ]*)?' | sort -u | tr '\n' ' ' > "$D/defines.txt"
     log "$tag defines: $(cat "$D/defines.txt")"
+    register_build "$tag" "$D" "$B" "$cfg$AV_SUFFIX" "${cmake_args[@]}"
     if [ -z "$TEST_FILTER" ]; then log "$tag: $BENCH_NAME tests skipped (TESTS=none)"
     elif [ -x "$B/test_all" ] && [ -d "$DATADIR/$BENCH/sf1" ]; then
       if threads=$TEST_THREADS tlimit "$B/test_all" --gtest_filter="$TEST_FILTER" > "$D/${BENCH}_test.log" 2>&1; then
