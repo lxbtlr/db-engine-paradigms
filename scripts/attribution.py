@@ -225,6 +225,8 @@ def main():
     ap.add_argument("--out", default=".")
     ap.add_argument("--br-penalty", type=float, default=15.0, help="cycles per mispredict (default 15)")
     ap.add_argument("--min-effect", type=float, default=0.02, help="|dlog| below which a cell is ~ (default 0.02)")
+    ap.add_argument("--safe", metavar="BASE", help="also write safe_report.md: every config against BASE (e.g. join_base)")
+    ap.add_argument("--safe-limit", type=float, default=0.03, help="largest allowed slowdown for SAFE (default 0.03)")
     args = ap.parse_args()
     implies = implied_defines()
     builds = load(args.results)
@@ -308,7 +310,73 @@ def main():
                            ("c" if "clock" in r["flags"] else "")
                     txt.append("{} {}{}".format(r["bin"], chg(r["t"]), mark))
                 f.write("| {} | {} | {} | {} |\n".format(m, cc, pr, " | ".join(txt)))
+    if args.safe:
+        safe_report(builds, args)
     print("{} builds, {} cells -> {}".format(len(builds), len(rows), args.out))
+
+
+def safe_report(builds, args):
+    """Every config against args.safe in the same result directory: a config
+    is SAFE if no cell is more than --safe-limit slower, except dubliner cells
+    whose clock moved (frequency license) or that are dubliner-only."""
+    limit = args.safe_limit
+    cells = defaultdict(list)  # (config, run) -> [dict]
+    for d in {b["dir"] for b in builds}:
+        here = [b for b in builds if b["dir"] == d and not b["hyper"]]
+        for base in [b for b in here if b["base"] == args.safe]:
+            for b in here:
+                if b is base or b["compiler"] != base["compiler"] or b["run"] != base["run"]:
+                    continue
+                for q in set(b["metrics"]) & set(base["metrics"]):
+                    tb, ta = b["metrics"][q].get("median"), base["metrics"][q].get("median")
+                    if not tb or not ta:
+                        continue
+                    g = dl(base["metrics"][q].get("GHz"), b["metrics"][q].get("GHz"))
+                    cells[(b["base"], b["run"])].append(dict(
+                        machine=b["machine"], compiler=b["compiler"], query=q, r=tb / ta,
+                        clock=g is not None and abs(g) >= CLOCK,
+                        noisy=q in b["noisy"] or q in base["noisy"]))
+    out = []
+    for (cfg, run), cs in sorted(cells.items()):
+        for c in cs:  # dubliner-only against the other machines, same compiler and query
+            if c["machine"] != "dubliner":
+                continue
+            others = [math.log(o["r"]) for o in cs if o["machine"] != "dubliner"
+                      and o["compiler"] == c["compiler"] and o["query"] == c["query"]]
+            t = math.log(c["r"])
+            c["dub_only"] = len(others) >= 2 and ((all(o * t < 0 for o in others) and abs(t) > 0.03)
+                                                   or abs(t - statistics.median(others)) > DUBLINER_OFF)
+        bad = [c for c in cs if c["r"] > 1 + limit and not (c["machine"] == "dubliner" and (c["clock"] or c.get("dub_only")))]
+        exempt = [c for c in cs if c["r"] > 1 + limit and c not in bad]
+        per = defaultdict(list)
+        for c in cs:
+            per[c["machine"]].append(math.log(c["r"]))
+        geo = math.exp(statistics.mean(math.log(c["r"]) for c in cs))
+        out.append((not bad, geo, cfg, run, per, bad, exempt, len(cs)))
+    with open(os.path.join(args.out, "safe_report.md"), "w") as f:
+        f.write("# Safe configurations vs `{}`\n\nSAFE: no cell more than {:.0f}% slower than `{}` in the same run, "
+                "except dubliner cells whose clock moved ≥3% or that are dubliner-only (listed as exempt).\n\n".format(
+                    args.safe, 100 * limit, args.safe))
+        f.write("| verdict | config | geomean | " + " | ".join("{} geomean / worst".format(m) for m in
+                sorted({m for o in out for m in o[4]})) + " | slower cells |\n")
+        machines = sorted({m for o in out for m in o[4]})
+        f.write("|" + "---|" * (4 + len(machines)) + "\n")
+        for ok, geo, cfg, run, per, bad, exempt, n in sorted(out, key=lambda o: (not o[0], o[1])):
+            cols = []
+            for m in machines:
+                v = per.get(m)
+                cols.append("{:.3f} / {:.3f}".format(math.exp(statistics.mean(v)), math.exp(max(v))) if v else "")
+            f.write("| {} | `{}{}` | {:.3f} | {} | {} bad, {} exempt / {} |\n".format(
+                "**SAFE**" if ok else "not safe", cfg, run, geo, " | ".join(cols), len(bad), len(exempt), n))
+        for ok, geo, cfg, run, per, bad, exempt, n in sorted(out, key=lambda o: (not o[0], o[1])):
+            if bad or exempt:
+                f.write("\n**`{}{}`**\n".format(cfg, run))
+                for c in sorted(bad, key=lambda c: -c["r"]):
+                    f.write("- {} {} {}: {:+.1f}%{}\n".format(c["machine"], c["compiler"], c["query"], 100 * (c["r"] - 1),
+                                                           " (noisy)" if c["noisy"] else ""))
+                for c in sorted(exempt, key=lambda c: -c["r"]):
+                    f.write("- exempt: {} {} {}: {:+.1f}% ({})\n".format(c["machine"], c["compiler"], c["query"], 100 * (c["r"] - 1),
+                                                                        "clock" if c["clock"] else "dubliner-only"))
 
 
 if __name__ == "__main__":
