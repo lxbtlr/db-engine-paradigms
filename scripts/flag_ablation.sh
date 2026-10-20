@@ -56,7 +56,8 @@
 # asserted by the plans:
 #   join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom
 #   join_fused join_semi join_all join_dispatch jd_all join_all_valid
-#   grp_base grp_dispatch grp_kinds proj_compound grp_runheads grp_having
+#   grp_base grp_dispatch grp_kinds proj_compound pc_runheads pc_having
+#   grp_runheads grp_having jd_all_pc
 #
 # Group-by configs (study/VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
 #   grp_base             today's HashGroup
@@ -71,6 +72,9 @@
 #                        pass specialized by aggregate kind)
 #   proj_compound        grp_kinds + VW_PROJ_COMPOUND (compound int64
 #                        projection primitives inside one expression)
+#   pc_runheads          proj_compound + VW_GROUP_RUN_HEADS
+#   pc_having            pc_runheads + VW_GROUP_HAVING (jd_all's group-by
+#                        options plus the two above, no join options)
 #   grp_runheads         grp_dispatch + VW_GROUP_RUN_HEADS (branch-free run-head
 #                        lookup; AVX-512BW/VL run pass, scalar elsewhere)
 #   grp_having           grp_runheads + VW_GROUP_HAVING (TPC-H Q18: HAVING in
@@ -175,11 +179,11 @@ COMPILERS=${COMPILERS:-"gcc clang"}
 FLAG_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
-JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_semi join_all_valid"
-GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds proj_compound grp_runheads grp_having"
+JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc jd_semi join_all_valid"
+GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 # config group: the TPC-valid join and group-by configs (see header)
-JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all join_all_valid grp_base grp_dispatch grp_kinds proj_compound grp_runheads grp_having"
+JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc join_all_valid grp_base grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
 CONFIGS=$(for c in $CONFIGS; do if [ "$c" = join_valid ]; then printf "%s\n" $JOIN_VALID_CONFIGS; else echo "$c"; fi; done | awk '!seen[$0]++' | tr '\n' ' ')
 # PRINT_CONFIGS=1: print the expanded config list and exit (single_build.sh)
 if [ "${PRINT_CONFIGS:-0}" = 1 ]; then echo $CONFIGS; exit 0; fi
@@ -391,9 +395,9 @@ summarize() {
       family(out "/hash.csv", "compiler,query,hash_config,median_ms,speedup_vs_murmur",
              "hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul", "hash_murmur")
       family(out "/join.csv", "compiler,query,join_config,median_ms,speedup_vs_base",
-             "join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_semi join_all_valid", "join_base")
+             "join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc jd_semi join_all_valid", "join_base")
       family(out "/group.csv", "compiler,query,group_config,median_ms,speedup_vs_base",
-             "grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds proj_compound grp_runheads grp_having", "grp_base")
+             "grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having", "grp_base")
     }' $([ -f "$OUT/counters.csv" ] && echo "$OUT/counters.csv") "$OUT/timing.csv"
   { echo "compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned"
     sort -t, -k1,1 -k2,2V -k3,3 "$OUT/matrix.body"; } > "$OUT/matrix.csv"
@@ -502,6 +506,7 @@ config_flags() {
     join_all_valid)      echo "$(config_flags join_fused) -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
     join_dispatch)       echo "$(config_flags join_base) -DVW_JOIN_DISPATCH=ON" ;;
     jd_all)              echo "$(config_flags join_dispatch) -DVW_GROUP_HAVING=ON -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
+    jd_all_pc)           echo "$(config_flags jd_all) -DVW_AGGR_FUSED_KINDS=ON -DVW_PROJ_COMPOUND=ON" ;;
     jd_semi)             echo "$(config_flags jd_all) -DVW_JOIN_SEMI_MAX_BYTES=8388608" ;;
     # group-by configs: HASH_BASE + CRC32 + FAST, then the HashGroup options
     grp_base)            echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
@@ -513,6 +518,8 @@ config_flags() {
     grp_dispatch)        echo "$(config_flags grp_base) -DVW_GROUP_DISPATCH=ON" ;;
     grp_kinds)           echo "$(config_flags grp_dispatch) -DVW_AGGR_FUSED_KINDS=ON" ;;
     proj_compound)       echo "$(config_flags grp_kinds) -DVW_PROJ_COMPOUND=ON" ;;
+    pc_runheads)         echo "$(config_flags proj_compound) -DVW_GROUP_RUN_HEADS=ON" ;;
+    pc_having)           echo "$(config_flags pc_runheads) -DVW_GROUP_HAVING=ON" ;;
     grp_runheads)        echo "$(config_flags grp_dispatch) -DVW_GROUP_RUN_HEADS=ON" ;;
     grp_having)          echo "$(config_flags grp_runheads) -DVW_GROUP_HAVING=ON" ;;
     *) echo "unknown config $1" >&2; exit 2 ;;
