@@ -1078,6 +1078,16 @@ void Hashjoin::bloomFilter(size_t n) {
 // with primitives::seed, through the same SIMD kernel when VW_CRC32_VPCLMUL /
 // VW_SIMD_HASH apply); join_sel's keys are gathered through the selection.
 namespace {
+// Fused hashing pays only where the probe hashes 8 keys in AVX-512 registers
+// (fusedHash8). Without AVX-512 it hashes them one at a time, which is slower
+// than the plan's hash pass followed by the filter (AVX2: roquefort, clang Q3
+// +12% vs join_base; N1: no difference). A fact about the instruction set,
+// fixed at build time; used by dispatch and by the standalone option.
+#if defined(__AVX512F__) && !defined(VW_POS_16)
+constexpr bool kFusedWide = true;
+#else
+constexpr bool kFusedWide = false;
+#endif
 #ifdef VW_USE_CRC32
 using FusedHash = runtime::CRC32Hash;
 #else
@@ -1562,17 +1572,8 @@ void Hashjoin::resolvePaths() {
    bloomOn = false;
    fusedCompute = false;
    const bool bloom = shared.bloom != nullptr;
-   // Fused hashing pays only where the probe hashes 8 keys in AVX-512
-   // registers (fusedHash8). Without AVX-512 it hashes them one at a time,
-   // which is slower than the plan's hash pass followed by the filter (AVX2:
-   // roquefort, clang Q3 +12% vs join_base; N1: no difference), so dispatch
-   // takes the hash pass there. A fact about the instruction set, fixed at
-   // build time.
-#if defined(__AVX512F__) && !defined(VW_POS_16)
-   const bool fused = fusedReady();
-#else
-   const bool fused = false;
-#endif
+   // fused hashing only where it hashes 8 keys in registers (kFusedWide)
+   const bool fused = kFusedWide && fusedReady();
 #ifdef VW_NEW_JOIN
    const bool newJoin = join == &Hashjoin::joinAllNew || join == &Hashjoin::joinSelNew;
 #else
@@ -1744,7 +1745,7 @@ size_t Hashjoin::next() {
 #else
 #ifdef VW_JOIN_FUSED_PROBE
          fusedCompute = false;
-         if (fusedReady()) {
+         if (kFusedWide && fusedReady()) { // see kFusedWide
 #ifdef VW_JOIN_BLOOM
             bloomOn = false;
             if (shared.bloom) {
