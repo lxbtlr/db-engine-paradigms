@@ -227,6 +227,8 @@ def main():
     ap.add_argument("--min-effect", type=float, default=0.02, help="|dlog| below which a cell is ~ (default 0.02)")
     ap.add_argument("--safe", metavar="BASE", help="also write safe_report.md: every config against BASE (e.g. join_base)")
     ap.add_argument("--safe-limit", type=float, default=0.03, help="largest allowed slowdown for SAFE (default 0.03)")
+    ap.add_argument("--safe-noisy", choices=("fail", "ignore"), default="fail",
+                    help="noisy slow cells: fail the config (default) or list them without counting")
     args = ap.parse_args()
     implies = implied_defines()
     builds = load(args.results)
@@ -346,34 +348,41 @@ def safe_report(builds, args):
             t = math.log(c["r"])
             c["dub_only"] = len(others) >= 2 and ((all(o * t < 0 for o in others) and abs(t) > 0.03)
                                                    or abs(t - statistics.median(others)) > DUBLINER_OFF)
-        bad = [c for c in cs if c["r"] > 1 + limit and not (c["machine"] == "dubliner" and (c["clock"] or c.get("dub_only")))]
-        exempt = [c for c in cs if c["r"] > 1 + limit and c not in bad]
+        slow = [c for c in cs if c["r"] > 1 + limit]
+        exempt = [c for c in slow if c["machine"] == "dubliner" and (c["clock"] or c.get("dub_only"))]
+        # --safe-noisy ignore: noisy cells (rounds spread or cv > 5%) are listed
+        # for a recheck but do not fail the config
+        noisy = [c for c in slow if c not in exempt and c["noisy"] and args.safe_noisy == "ignore"]
+        bad = [c for c in slow if c not in exempt and c not in noisy]
         per = defaultdict(list)
         for c in cs:
             per[c["machine"]].append(math.log(c["r"]))
         geo = math.exp(statistics.mean(math.log(c["r"]) for c in cs))
-        out.append((not bad, geo, cfg, run, per, bad, exempt, len(cs)))
+        out.append((not bad, geo, cfg, run, per, bad, exempt, len(cs), noisy))
     with open(os.path.join(args.out, "safe_report.md"), "w") as f:
         f.write("# Safe configurations vs `{}`\n\nSAFE: no cell more than {:.0f}% slower than `{}` in the same run, "
-                "except dubliner cells whose clock moved ≥3% or that are dubliner-only (listed as exempt).\n\n".format(
-                    args.safe, 100 * limit, args.safe))
+                "except dubliner cells whose clock moved ≥3% or that are dubliner-only (listed as exempt){}.\n\n".format(
+                    args.safe, 100 * limit, args.safe,
+                    "; noisy cells are not counted (listed as noisy, to recheck)" if args.safe_noisy == "ignore" else ""))
         f.write("| verdict | config | geomean | " + " | ".join("{} geomean / worst".format(m) for m in
                 sorted({m for o in out for m in o[4]})) + " | slower cells |\n")
         machines = sorted({m for o in out for m in o[4]})
         f.write("|" + "---|" * (4 + len(machines)) + "\n")
-        for ok, geo, cfg, run, per, bad, exempt, n in sorted(out, key=lambda o: (not o[0], o[1])):
+        for ok, geo, cfg, run, per, bad, exempt, n, noisy in sorted(out, key=lambda o: (not o[0], o[1])):
             cols = []
             for m in machines:
                 v = per.get(m)
                 cols.append("{:.3f} / {:.3f}".format(math.exp(statistics.mean(v)), math.exp(max(v))) if v else "")
-            f.write("| {} | `{}{}` | {:.3f} | {} | {} bad, {} exempt / {} |\n".format(
-                "**SAFE**" if ok else "not safe", cfg, run, geo, " | ".join(cols), len(bad), len(exempt), n))
-        for ok, geo, cfg, run, per, bad, exempt, n in sorted(out, key=lambda o: (not o[0], o[1])):
-            if bad or exempt:
+            f.write("| {} | `{}{}` | {:.3f} | {} | {} bad, {} exempt, {} noisy / {} |\n".format(
+                "**SAFE**" if ok else "not safe", cfg, run, geo, " | ".join(cols), len(bad), len(exempt), len(noisy), n))
+        for ok, geo, cfg, run, per, bad, exempt, n, noisy in sorted(out, key=lambda o: (not o[0], o[1])):
+            if bad or exempt or noisy:
                 f.write("\n**`{}{}`**\n".format(cfg, run))
                 for c in sorted(bad, key=lambda c: -c["r"]):
                     f.write("- {} {} {}: {:+.1f}%{}\n".format(c["machine"], c["compiler"], c["query"], 100 * (c["r"] - 1),
                                                            " (noisy)" if c["noisy"] else ""))
+                for c in sorted(noisy, key=lambda c: -c["r"]):
+                    f.write("- noisy, not counted: {} {} {}: {:+.1f}%\n".format(c["machine"], c["compiler"], c["query"], 100 * (c["r"] - 1)))
                 for c in sorted(exempt, key=lambda c: -c["r"]):
                     f.write("- exempt: {} {} {}: {:+.1f}% ({})\n".format(c["machine"], c["compiler"], c["query"], 100 * (c["r"] - 1),
                                                                         "clock" if c["clock"] else "dubliner-only"))
