@@ -433,6 +433,17 @@ endif()
 # only when the cache size cannot be read.
 # Works with the default join and VW_NEW_JOIN; 64-bit hashes only.
 OPTION(VW_JOIN_BLOOM "VectorWise-owned Bloom filter in front of hash join probes" OFF)
+# VW_JOIN_BLOOM_GATHER: how the AVX2 filter test (machines without AVX-512,
+# include/vectorwise/BloomKernels.hpp) fetches its 4 filter words: scalar
+# loads assembled in a register, or hw (vpgatherqq). AVX-512 and scalar
+# builds are unaffected.
+set(VW_JOIN_BLOOM_GATHER "scalar" CACHE STRING "VW_JOIN_BLOOM AVX2 word fetch: scalar, hw")
+set_property(CACHE VW_JOIN_BLOOM_GATHER PROPERTY STRINGS scalar hw)
+if(VW_JOIN_BLOOM_GATHER STREQUAL "hw")
+  ADD_DEFINITIONS(-DVW_JOIN_BLOOM_GATHER_HW=1)
+elseif(NOT VW_JOIN_BLOOM_GATHER STREQUAL "scalar")
+  message(FATAL_ERROR "VW_JOIN_BLOOM_GATHER must be scalar or hw (got '${VW_JOIN_BLOOM_GATHER}')")
+endif()
 set(VW_JOIN_BLOOM_BITS 16 CACHE STRING "VW_JOIN_BLOOM: filter bits per build key")
 set(VW_JOIN_BLOOM_MIN_KEYS 4096 CACHE STRING "VW_JOIN_BLOOM: smallest filtered build when the L1 size is unknown")
 if(VW_JOIN_BLOOM)
@@ -1115,6 +1126,7 @@ add_executable(test_all
   src/test/vectorwise/simd_hash.cpp
   src/test/vectorwise/simd_aggr.cpp
   src/test/vectorwise/compound.cpp
+  src/test/vectorwise/bloom_avx2.cpp
   src/test/vectorwise/crc32_fast.cpp
   src/test/vectorwise/Operators.cpp
   src/test/common/Hashmap.cpp

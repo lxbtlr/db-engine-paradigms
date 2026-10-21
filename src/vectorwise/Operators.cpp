@@ -7,6 +7,9 @@
 #include "common/runtime/SIMD.hpp"
 #include "vectorwise/SimdCrc.hpp"
 #include "vectorwise/SimdHash.hpp"
+#ifdef VW_JOIN_BLOOM
+#include "vectorwise/BloomKernels.hpp"
+#endif
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -1011,9 +1014,9 @@ void Hashjoin::bloomInsert() {
 }
 
 void Hashjoin::bloomFilter(size_t n) {
-   if (bloomSel.size() < n) {
-      bloomSel.resize(n);
-      bloomHashes.resize(n);
+   if (bloomSel.size() < n + 1) { // + 1: the AVX2 path stores before it counts
+      bloomSel.resize(n + 1);
+      bloomHashes.resize(n + 1);
    }
    const uint64_t* bloom = shared.bloom.get();
    const uint64_t mask = shared.bloomMask;
@@ -1045,6 +1048,10 @@ void Hashjoin::bloomFilter(size_t n) {
       compressStore64(hs + m, pass, h);
       m += __builtin_popcount(pass);
    }
+#elif defined(__AVX2__) && !defined(VW_POS_16) && !(defined(HASH_SIZE) && HASH_SIZE == 32)
+   // no AVX-512 (Zen 3): 4 hashes per test, survivors stored branch-free
+   m = vectorwise::bloom::filter4(bloom, mask, probeHashes, n, sel, hs);
+   i = n;
 #endif
    for (; i < n; ++i) {
       const auto h = probeHashes[i];
@@ -1116,9 +1123,9 @@ fusedHash8(const int32_t* keys, const pos_t* sel, size_t i) {
 
 #ifdef VW_JOIN_BLOOM
 void Hashjoin::fusedHashFilter(size_t n) {
-   if (bloomSel.size() < n) {
-      bloomSel.resize(n);
-      bloomHashes.resize(n);
+   if (bloomSel.size() < n + 1) { // + 1: the AVX2 path stores before it counts
+      bloomSel.resize(n + 1);
+      bloomHashes.resize(n + 1);
    }
    const bool sel = fusedSel != nullptr;
    const int32_t* keys = static_cast<const int32_t*>(
@@ -1156,6 +1163,22 @@ void Hashjoin::fusedHashFilter(size_t n) {
                       _mm512_add_epi32(_mm512_set1_epi32((int)i), lane));
       compressStore64(hs + m, pass, h);
       m += __builtin_popcount(pass);
+   }
+#elif defined(__AVX2__) && !defined(VW_POS_16) && !(defined(HASH_SIZE) && HASH_SIZE == 32)
+   // no AVX-512 (Zen 3): hash 4 keys, assemble them in a register (no store
+   // + reload), test, store the survivors branch-free
+   for (; i + 4 <= n; i += 4) {
+      uint64_t h4[4];
+      for (unsigned l = 0; l < 4; ++l)
+         h4[l] = fusedHash1(sel ? keys[ksel[i + l]] : keys[i + l]);
+      const unsigned pass = vectorwise::bloom::test4(
+          bloom, mask, _mm256_set_epi64x((long long)h4[3], (long long)h4[2],
+                                         (long long)h4[1], (long long)h4[0]));
+      for (unsigned l = 0; l < 4; ++l) {
+         out[m] = pos_t(i + l);
+         hs[m] = h4[l];
+         m += (pass >> l) & 1;
+      }
    }
 #endif
    for (; i < n; ++i) {
