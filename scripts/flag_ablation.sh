@@ -3,6 +3,7 @@
 # each query? The tuned set was chosen for Q1 and costs Q18 ~20%, so this
 # measures every flag on its own in both directions:
 #
+#   cmake_defaults           no option flags at all (CMakeLists.txt defaults)
 #   default                  none of the tuned flags
 #   add_<flag>               default + that flag
 #   tuned                    all tuned flags
@@ -176,7 +177,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # over NFS, and must never write the same build tree
 BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 COMPILERS=${COMPILERS:-"gcc clang"}
-FLAG_CONFIGS="default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
+FLAG_CONFIGS="cmake_defaults default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
              tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
 JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc jd_semi join_all_valid"
@@ -473,6 +474,9 @@ flags() {
 }
 config_flags() {
   case "$1" in
+    # no option flags at all: every VW option at its CMakeLists.txt default
+    # (all OFF: MurMur hash, no SIMD selection, no autovectorization)
+    cmake_defaults)      ;;
     #                         aggr aggr_sel pos16 crc32 huge2mb
     default)             flags OFF  OFF      OFF   OFF   OFF ;;
     add_group_aggr)      flags ON   OFF      OFF   OFF   OFF ;;
