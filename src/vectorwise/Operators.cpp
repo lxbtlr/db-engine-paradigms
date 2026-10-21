@@ -1562,7 +1562,17 @@ void Hashjoin::resolvePaths() {
    bloomOn = false;
    fusedCompute = false;
    const bool bloom = shared.bloom != nullptr;
+   // Fused hashing pays only where the probe hashes 8 keys in AVX-512
+   // registers (fusedHash8). Without AVX-512 it hashes them one at a time,
+   // which is slower than the plan's hash pass followed by the filter (AVX2:
+   // roquefort, clang Q3 +12% vs join_base; N1: no difference), so dispatch
+   // takes the hash pass there. A fact about the instruction set, fixed at
+   // build time.
+#if defined(__AVX512F__) && !defined(VW_POS_16)
    const bool fused = fusedReady();
+#else
+   const bool fused = false;
+#endif
 #ifdef VW_NEW_JOIN
    const bool newJoin = join == &Hashjoin::joinAllNew || join == &Hashjoin::joinSelNew;
 #else
