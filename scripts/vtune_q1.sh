@@ -21,7 +21,7 @@
 # spreading worker threads round-robin over all of them.
 #
 # Per run, results/vtune_q1_<host>_<stamp>/<build>_e<engine>_t<threads>/:
-#   timing.csv            untraced run_tpch output (median ms + its own counters)
+#   timing.csv            untraced run_tpch output (median ms; EXTERNALPROFILE=1, no counters)
 #   ua.summary.txt/.csv   uarch-exploration summary: clockticks, instructions,
 #                         the top-down (TMA) tree
 #   ua.functions.csv      uarch-exploration per function (TMA columns)
@@ -327,9 +327,10 @@ for b in "${BUILDS[@]}"; do
       label=${b}_e${e}_t$T; D=$OUT/$label; mkdir -p "$D"
       run=(-p "$TPCH_PATH/" -e "$e" -q 1 -t "$T" -v "$VECTOR_SIZE" -s "$SETTLE")
       log "===== $label ($PIN)"
-      # untraced timing, with run_tpch's own counters
+      # untraced timing; EXTERNALPROFILE: run_tpch opens no counters of its own,
+      # so the timing runs with the PMU as idle as the VTune runs leave it
       # shellcheck disable=SC2086
-      if ! $PIN "$bin" "${run[@]}" -r "$TIMING_REPS" > "$D/timing.csv" 2> "$D/timing.err"; then
+      if ! EXTERNALPROFILE=1 $PIN "$bin" "${run[@]}" -r "$TIMING_REPS" > "$D/timing.csv" 2> "$D/timing.err"; then
         fail "$label timing (see $D/timing.err)"; excerpt "$D/timing.err" 5; continue
       fi
       ms=$(median_of "$D/timing.csv")
