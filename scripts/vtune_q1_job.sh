@@ -24,6 +24,18 @@ esac
 VTUNE_VARS=${VTUNE_VARS:-$DEF_VARS}
 REPO=${REPO:-${SLURM_SUBMIT_DIR:-$PWD}}
 
+# Slurm takes the job's groups from the controller, which does not know the
+# node-local vtune group that owns the sampling driver (/dev/sep5, /dev/pax).
+# Without it VTune silently falls back to driverless perf sampling. sg gets
+# the group back from this node's /etc/group; the environment carries over.
+if [ -e /dev/pax ] && [ ! -r /dev/pax ] && [ -z "${VTUNE_SG:-}" ] &&
+   getent group vtune | cut -d: -f4 | tr ',' '\n' | grep -qx "$(id -un)"; then
+  export VTUNE_SG=1
+  exec sg vtune -c "$(printf '%q ' bash "$0" "$@")"
+fi
+[ -e /dev/pax ] && [ ! -r /dev/pax ] &&
+  echo "WARNING: no access to the VTune sampling driver (/dev/pax); VTune will use driverless perf" >&2
+
 [ -f "$VTUNE_VARS" ] || { echo "no VTune environment at $VTUNE_VARS (set VTUNE_VARS)" >&2; exit 2; }
 [ -f "$REPO/scripts/vtune_q1.sh" ] ||
   { echo "no scripts/vtune_q1.sh under $REPO (submit from the repo root, or set REPO)" >&2; exit 2; }
