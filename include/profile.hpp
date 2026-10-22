@@ -1,4 +1,5 @@
 #include "common/Compat.hpp"
+#include "profile_scope.hpp"
 #ifdef CANARY_IN_BENCH
 #include "canary.hpp"
 #endif
@@ -811,6 +812,9 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
 
    uint64_t memStart = 0;
    if (mem) memStart = getCurrentRSS();
+   // external profilers (VTune via ITT, perf via --control) see only the
+   // measured reps; no-op unless enabled (profile_scope.hpp)
+   profscope::begin(s.c_str());
    startAll();
    double totalStart = gettime();
    size_t performedRep = 0;
@@ -822,6 +826,7 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    }
    double totalEnd = gettime();
    readAll();
+   profscope::end();
 
 #ifdef CANARY_IN_BENCH
    if (canary::g_enabled) canary::after(s.c_str());

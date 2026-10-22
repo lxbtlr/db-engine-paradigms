@@ -66,6 +66,7 @@ build_ablation/
 build_flags/
 build_width/
 build_q1ab_head/
+build_vtune/
 results/
 
 # ad-hoc analysis scripts

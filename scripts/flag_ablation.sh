@@ -170,6 +170,7 @@
 #                        or python3 is missing (e.g. off the cluster)
 #   CORPUS_BIN /tank/alexb/vldb-db/bin  where register-build lives
 #   PRINT_CONFIGS 0      1 = print the expanded CONFIGS and exit
+#   PRINT_FLAGS   ""     <config> = print that config's CMake options and exit
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -529,6 +530,10 @@ config_flags() {
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
+# PRINT_FLAGS=<config>: print that config's CMake options as this host would
+# build them (SEL resolved for this CPU) and exit; scripts/vtune_q1.sh builds
+# its configs from these so both scripts share one definition
+if [ -n "${PRINT_FLAGS:-}" ]; then config_flags "$PRINT_FLAGS"; exit $?; fi
 bdir() { echo "$ROOT/build_flags/$BENCH_HOST/$1_$2$AV_SUFFIX"; }
 # reject unknown config names before building (exit inside $(config_flags)
 # only leaves the subshell)
