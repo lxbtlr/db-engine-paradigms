@@ -40,6 +40,8 @@
 #   CONFIGS     "cmake_defaults default grp_base grp_dispatch grp_kinds
 #               proj_compound pc_runheads"   any flag_ablation.sh config names;
 #               the order is the ladder the analysis steps through
+#   HASH_BASE   default           flag_ablation.sh base for its hash, join and group
+#               configs (e.g. add_huge2mb: HUGE_2MB_MALLOC_HUGE=ON); not cmake_defaults
 #   BASE_REF    origin/baseline   commit for Typer / Tectorwise; "" = skip
 #   BASE_CXX    "-include cstdint -Wno-changes-meaning"  front-end-only flags
 #               the old commit needs to compile with current GCC
@@ -282,8 +284,9 @@ if [ -n "$BASE_REF" ]; then
 fi
 for cfg in $CONFIGS; do
   # a clean environment: flag_ablation.sh validates its own THREADS, PIN, ...
-  # even when it only prints; SEL and AUTOVEC are the settings that change flags
-  flags=$(env -i PATH="$PATH" HOME="${HOME:-/tmp}" PRINT_FLAGS="$cfg" ${SEL:+SEL="$SEL"} ${AUTOVEC:+AUTOVEC="$AUTOVEC"} \
+  # even when it only prints; SEL, AUTOVEC and HASH_BASE (the base the
+  # hash, join and group configs build on, e.g. add_huge2mb) change flags
+  flags=$(env -i PATH="$PATH" HOME="${HOME:-/tmp}" PRINT_FLAGS="$cfg" ${SEL:+SEL="$SEL"} ${AUTOVEC:+AUTOVEC="$AUTOVEC"} ${HASH_BASE:+HASH_BASE="$HASH_BASE"} \
             bash "$ROOT/scripts/flag_ablation.sh") || { fail "unknown config $cfg"; continue; }
   # shellcheck disable=SC2086
   build "$cfg" "$ROOT" $flags && BUILDS+=("$cfg")
