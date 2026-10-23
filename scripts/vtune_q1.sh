@@ -20,14 +20,14 @@
 # multi-threaded runs fill one socket (cpuOfThread, Concurrency.hpp) instead of
 # spreading worker threads round-robin over all of them.
 #
-# Per run, results/vtune_q1_<host>_<stamp>/<build>_e<engine>_t<threads>/:
+# Per run, results/vtune_q1_<host>_<stamp>/<build>_q<query>_e<engine>_t<threads>/:
 #   timing.csv            untraced run_tpch output (median ms; EXTERNALPROFILE=1, no counters)
 #   ua.summary.txt/.csv   uarch-exploration summary: clockticks, instructions,
 #                         the top-down (TMA) tree
 #   ua.functions.csv      uarch-exploration per function (TMA columns)
 #   ua.hwevents.csv       raw event counts per function
 #   mem.summary.txt/.csv  memory-access summary (DRAM bandwidth), MEM_THREADS runs
-#   meta.env              build, engine, threads, reps, SF, tuples, defines, ...
+#   meta.env              build, query, engine, threads, reps, SF, tuples, defines, ...
 #   r_ua/ r_mem/          VTune result directories (open them in the GUI)
 # then scripts/vtune_breakdown.py writes <out>/analysis/ from all of them.
 #
@@ -54,6 +54,8 @@
 #                                 see TYPER_Q1_TUNING.md)
 #   TPCH_PATH   /tank/alexb/swole/tpch/sf$SF
 #   TUPLES      lineitem rows; known for SF 1, 10, 30, 100
+#   QUERIES     1                 TPC-H queries to profile (run_tpch -q), e.g. "1 3 5 6 9 18";
+#                                 every one is normalised per lineitem row (TUPLES)
 #   THREADS     "1 all"           all = the physical cores of CPU's NUMA node
 #   CPU         0                 the 1-thread run's CPU; its node is "the socket"
 #   MIN_SECONDS 20                VTune reps are chosen so the measured window
@@ -99,6 +101,7 @@ esac
 TARGET_ARCH=${TARGET_ARCH:-$DEF_ARCH}
 SF=${SF:-10}
 TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf$SF}
+QUERIES=${QUERIES:-1}
 THREADS=${THREADS:-"1 all"}
 CPU=${CPU:-0}
 MIN_SECONDS=${MIN_SECONDS:-20}
@@ -302,12 +305,16 @@ else log "all builds: ${archs:-ARCH_FLAGS unknown}"; fi
 for t in $THREADS; do
   case "$t" in all) ;; *[!0-9]*|0) die "THREADS entries must be counts or all" ;; esac
 done
+for q in $QUERIES; do
+  case "$q" in *[!0-9]*|0) die "QUERIES entries must be query numbers" ;; esac
+done
 nthreads() { [ "$1" = all ] && echo "$NCORES" || echo "$1"; }
 pin_for() { # 1 thread: that CPU and its memory; more: the node's cores and memory
   if [ "$1" = 1 ]; then echo "numactl --physcpubind=$CPU --membind=$NODE"
   else echo "numactl --physcpubind=$NODE_CORES --membind=$NODE"; fi
 }
-median_of() { awk -F, '{ n = $1; gsub(/^ +| +$/, "", n) } n ~ /^q1 / { v = $2; gsub(/ /, "", v); print v; exit }' "$1"; }
+# median_of <timing.csv> <query>: the median ms of run_tpch's q<query> row
+median_of() { awk -F, -v q="q$2 " '{ n = $1; gsub(/^ +| +$/, "", n) } index(n, q) == 1 { v = $2; gsub(/ /, "", v); print v; exit }' "$1"; }
 has() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
 
 if [ "$BUILD_ONLY" = 1 ]; then
@@ -317,18 +324,26 @@ if [ "$BUILD_ONLY" = 1 ]; then
   log "BUILD_ONLY=1: built ${BUILDS[*]}; no runs"; exit $(( FAILS > 0 ))
 fi
 
+# the first untraced run of a job has come out 15-50% slow (right after the
+# builds); run one and discard it so it does not set any run's VTune reps
+q0=${QUERIES%% *}
+# shellcheck disable=SC2046
+EXTERNALPROFILE=1 $(pin_for 1) "$BUILDS_DIR/${BUILDS[0]}/run_tpch" -p "$TPCH_PATH/" -e v -q "$q0" -t 1 \
+  -v "$VECTOR_SIZE" -s "$SETTLE" -r "$TIMING_REPS" > /dev/null 2>&1 || log "WARNING: warm-up run failed"
+
 idx=0
 for b in "${BUILDS[@]}"; do
   bin=$BUILDS_DIR/$b/run_tpch
   engines=v
   { [ "$b" = baseline ] || [ "$b" = cmake_defaults ]; } && engines="h v"
   for e in $engines; do
+   for q in $QUERIES; do
     for t in $THREADS; do
       T=$(nthreads "$t")
       [ "$T" -gt 1 ] && ! placement_ok "$b" "$T" && continue
       PIN=$(pin_for "$T")
-      label=${b}_e${e}_t$T; D=$OUT/$label; mkdir -p "$D"
-      run=(-p "$TPCH_PATH/" -e "$e" -q 1 -t "$T" -v "$VECTOR_SIZE" -s "$SETTLE")
+      label=${b}_q${q}_e${e}_t$T; D=$OUT/$label; mkdir -p "$D"
+      run=(-p "$TPCH_PATH/" -e "$e" -q "$q" -t "$T" -v "$VECTOR_SIZE" -s "$SETTLE")
       log "===== $label ($PIN)"
       # untraced timing; EXTERNALPROFILE: run_tpch opens no counters of its own,
       # so the timing runs with the PMU as idle as the VTune runs leave it
@@ -336,12 +351,12 @@ for b in "${BUILDS[@]}"; do
       if ! EXTERNALPROFILE=1 $PIN "$bin" "${run[@]}" -r "$TIMING_REPS" > "$D/timing.csv" 2> "$D/timing.err"; then
         fail "$label timing (see $D/timing.err)"; excerpt "$D/timing.err" 5; continue
       fi
-      ms=$(median_of "$D/timing.csv")
-      [ -n "$ms" ] || { fail "$label: no q1 row in timing.csv"; continue; }
+      ms=$(median_of "$D/timing.csv" "$q")
+      [ -n "$ms" ] || { fail "$label: no q$q row in timing.csv"; continue; }
       reps=$(awk -v ms="$ms" -v s="$MIN_SECONDS" 'BEGIN { r = int(s * 1000 / ms) + 1; if (r < 3) r = 3; if (r > 5000) r = 5000; print r }')
       log "$label: median $ms ms; VTune reps $reps (>= ${MIN_SECONDS}s measured)"
       {
-        echo "label=$label"; echo "build=$b"; echo "engine=$e"; echo "threads=$T"; echo "threads_req=$t"
+        echo "label=$label"; echo "build=$b"; echo "query=$q"; echo "engine=$e"; echo "threads=$T"; echo "threads_req=$t"
         echo "ladder_index=$idx"; echo "configs=$CONFIGS"; echo "reps=$reps"; echo "timing_reps=$TIMING_REPS"
         echo "timing_median_ms=$ms"; echo "sf=$SF"; echo "tuples=$TUPLES"; echo "vector_size=$VECTOR_SIZE"
         echo "machine=$MACHINE"; echo "host=$(hostname -s)"; echo "node=$NODE"; echo "pin=$PIN"
@@ -378,6 +393,7 @@ for b in "${BUILDS[@]}"; do
         log "$label $coll done"
       done
     done
+   done
   done
   idx=$((idx + 1))
 done

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Where does Q1's time go? Cycles per tuple, split top-down, from vtune_q1.sh.
+"""Where does each TPC-H query's time go? Cycles per lineitem tuple, split
+top-down, from vtune_q1.sh (one section per machine, thread setting and query).
 
     vtune_breakdown.py RESULTS... [--out DIR] [--top 25]
 
@@ -84,7 +85,7 @@ L2_KEYS = [k for k, _, _ in L2]
 # functions called through pointers, so they show up one by one; Typer's
 # pipeline is one fused loop and lands in "typer pipeline".
 OPERATOR_RULES = [
-    ("typer pipeline", r"q1_hyper|^hyper::|tpch::q1|morsel"),
+    ("typer pipeline", r"q\d+_hyper|^hyper::|tpch::q\d+|morsel"),
     ("selection", r"(^|::)sel(sel)?_|select::|simd_sel|selection"),
     ("hashing", r"(^|::)(re)?hash_|hashgroup::hash|crc32|murmur|::hash_t\b|hash<"),
     ("group lookup", r"keys_equal|hashgroup::(lookup|find|keystep|concat|globalfind|run|resolve)|findorcreate|packedkey|concat_"),
@@ -364,6 +365,7 @@ def load_runs(results):
             r = dict(dir=d, meta=meta, name=display(meta), machine=meta.get("machine") or meta.get("host", "?"),
                      host=meta.get("host", "?"), cpu=meta.get("cpu_model", ""), engine=meta.get("engine", "?"),
                      build=meta.get("build", "?"), threads=int(meta.get("threads", "0") or 0),
+                     query=int(meta.get("query", "1") or 1),
                      idx=int(meta.get("ladder_index", "0") or 0), notes=[])
             tuples, reps = float(meta.get("tuples") or 0), float(meta.get("reps") or 0)
             r["ms"] = float(meta["timing_median_ms"]) if meta.get("timing_median_ms") else None
@@ -448,7 +450,7 @@ def signed(v, nd=2):
 def group_key(r):
     # one ladder per CONFIGS list, so a second ladder (e.g. the older tuned
     # path) run into another result directory keeps its own "previous step"
-    return (r["machine"], r["threads"], r["ladder"])
+    return (r["machine"], r["threads"], r["query"], r["ladder"])
 
 
 def ordered(rs):
@@ -475,11 +477,11 @@ def main():
     # runs.csv
     with open(os.path.join(args.out, "runs.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["machine", "threads", "run", "build", "engine", "median_ms", "cycles_per_tuple", "instr_per_tuple",
+        w.writerow(["machine", "threads", "query", "run", "build", "engine", "median_ms", "cycles_per_tuple", "instr_per_tuple",
                     "ipc", "ghz", "mux_reliability", "runtpch_cycles_per_tuple", "runtpch_instr_per_tuple"] + ["cyc_" + k for k in l1k] + ["cyc_" + k for k in l2k] +
                    ["pct_clk_" + k for k in memk] + ["notes", "dir"])
-        for r in sorted(runs, key=lambda r: (r["machine"], r["threads"], r["idx"], r["engine"])):
-            w.writerow([r["machine"], r["threads"], r["name"], r["build"], r["engine"], fmt(r["ms"], 3), fmt(r["cpt"], 3),
+        for r in sorted(runs, key=lambda r: (r["machine"], r["threads"], r["query"], r["idx"], r["engine"])):
+            w.writerow([r["machine"], r["threads"], r["query"], r["name"], r["build"], r["engine"], fmt(r["ms"], 3), fmt(r["cpt"], 3),
                         fmt(r["ipt"], 3), fmt(r["ipc"], 3), fmt(r["ghz"], 3), fmt(r["mux"], 3),
                         fmt(r["rt"].get("cycles"), 3), fmt(r["rt"].get("instr."), 3)] +
                        [fmt(r["cyc"].get(k), 3) for k in l1k] + [fmt(r["cyc2"].get(k), 3) for k in l2k] +
@@ -489,44 +491,44 @@ def main():
     # tma_tree.csv
     with open(os.path.join(args.out, "tma_tree.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["machine", "threads", "run", "metric_path", "value", "unit"])
+        w.writerow(["machine", "threads", "query", "run", "metric_path", "value", "unit"])
         for r in runs:
             for path, v, u in r["tree"]:
-                w.writerow([r["machine"], r["threads"], r["name"], " / ".join(path), v, u])
+                w.writerow([r["machine"], r["threads"], r["query"], r["name"], " / ".join(path), v, u])
 
     # bandwidth.csv
     with open(os.path.join(args.out, "bandwidth.csv"), "w", newline="") as f:
         w = csv.writer(f)
         cols = sorted({k for r in runs for row in r["bw"] for k in row})
-        w.writerow(["machine", "threads", "run"] + cols)
+        w.writerow(["machine", "threads", "query", "run"] + cols)
         for r in runs:
             for row in r["bw"]:
-                w.writerow([r["machine"], r["threads"], r["name"]] + [row.get(c, "") for c in cols])
+                w.writerow([r["machine"], r["threads"], r["query"], r["name"]] + [row.get(c, "") for c in cols])
 
     # operators.csv / functions.csv
     opnames = sorted({o for r in runs for o in r["ops"]})
     with open(os.path.join(args.out, "operators.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["machine", "threads", "run", "operator", "functions", "share_of_cycles", "cycles_per_tuple"] +
+        w.writerow(["machine", "threads", "query", "run", "operator", "functions", "share_of_cycles", "cycles_per_tuple"] +
                    ["share_" + k for k in l1k] + ["share_" + k for k in l2k])
         for r in runs:
             n = (r["cpt"] or 0) / r["fn_cycles"] if r["fn_cycles"] else None  # cycles/tuple per sampled cycle
             for op, o in sorted(r["ops"].items(), key=lambda kv: -kv[1]["cycles"]):
                 c = o["cycles"]
-                w.writerow([r["machine"], r["threads"], r["name"], op, o["funcs"],
+                w.writerow([r["machine"], r["threads"], r["query"], r["name"], op, o["funcs"],
                             fmt(c / r["fn_cycles"], 4) if r["fn_cycles"] else "", fmt(c * n, 3) if n else ""] +
                            [fmt(o["l1"][k] / c, 3) if c and k in o["l1"] else "" for k in l1k] +
                            [fmt(o["l2"][k] / c, 3) if c and k in o["l2"] else "" for k in l2k])
     with open(os.path.join(args.out, "functions.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["machine", "threads", "run", "rank", "operator", "share_of_cycles", "cycles_per_tuple", "ipc",
+        w.writerow(["machine", "threads", "query", "run", "rank", "operator", "share_of_cycles", "cycles_per_tuple", "ipc",
                     "function", "module"] + ["share_" + k for k in l1k])
         for r in runs:
             n = (r["cpt"] or 0) / r["fn_cycles"] if r["fn_cycles"] else None
             fs = sorted(r["functions"], key=lambda x: -(x["cycles"] or 0))[:args.top]
             for i, fn in enumerate(fs, 1):
                 c = fn["cycles"] or 0
-                w.writerow([r["machine"], r["threads"], r["name"], i, classify(fn["func"], fn["module"]),
+                w.writerow([r["machine"], r["threads"], r["query"], r["name"], i, classify(fn["func"], fn["module"]),
                             fmt(c / r["fn_cycles"], 4) if r["fn_cycles"] else "", fmt(c * n, 3) if n else "",
                             fmt(fn["instr"] / c, 2) if fn["instr"] and c else "", fn["func"], fn["module"]] +
                            [fmt(fn["l1"].get(k), 3) for k in l1k])
@@ -536,15 +538,15 @@ def main():
     for r in runs:
         groups[group_key(r)].append(r)
     steps = []
-    md = ["# Q1 micro-architectural breakdown", "",
+    md = ["# TPC-H micro-architectural breakdown", "",
           "Cycles per lineitem tuple (all threads), split by VTune's top-down tree. Level-1 shares are renormalised "
           "to 100% so the columns add up to the total; level-2 columns split their level-1 parent. ms is the "
           "untraced median per query. See the header of scripts/vtune_breakdown.py for the method.", ""]
     many_ladders = len({r["ladder"] for r in runs}) > 1
-    for (mach, thr, ladder), rs in sorted(groups.items()):
+    for (mach, thr, qry, ladder), rs in sorted(groups.items()):
         rs = ordered(rs)
         cpu = next((r["cpu"] for r in rs if r["cpu"]), "")
-        md += ["## {} ({}), {} thread{}{}".format(mach, cpu, thr, "" if thr == 1 else "s",
+        md += ["## Q{}: {} ({}), {} thread{}{}".format(qry, mach, cpu, thr, "" if thr == 1 else "s",
                                                ", ladder: " + ladder if many_ladders else ""), ""]
         # where the time goes
         md += ["### Where the time goes (cycles / tuple)", "",
@@ -575,7 +577,7 @@ def main():
                     if base is None or base is r or (tag == "Tectorwise" and base is ladder[i - 1]):
                         continue
                     row = delta(r, base)
-                    steps.append(dict(machine=mach, threads=thr, run=r["name"], vs=base["name"], **row))
+                    steps.append(dict(machine=mach, threads=thr, query=qry, run=r["name"], vs=base["name"], **row))
                     md.append("| {} | {} | {} | {} | {} | {} |".format(
                         r["name"], tag, signed(row["d_ms"], 1), signed(row["d_cpt"], 1),
                         " | ".join(signed(row["d_" + k], 1) for k in l1k), " | ".join(signed(row["d_" + k], 1) for k in l2k)))
@@ -586,7 +588,7 @@ def main():
                    " | ".join(LABELS[k] for k in l2k) + " |", "|" + "---|" * (3 + len(l1k) + len(l2k))]
             for r in ladder:
                 row = delta(r, typer)
-                steps.append(dict(machine=mach, threads=thr, run=r["name"], vs=typer["name"], **row))
+                steps.append(dict(machine=mach, threads=thr, query=qry, run=r["name"], vs=typer["name"], **row))
                 md.append("| {} | {} | {} | {} | {} |".format(
                     r["name"], signed(row["d_ms"], 1), signed(row["d_cpt"], 1),
                     " | ".join(signed(row["d_" + k], 1) for k in l1k), " | ".join(signed(row["d_" + k], 1) for k in l2k)))
@@ -637,9 +639,9 @@ def main():
         by = defaultdict(dict)
         for r in runs:
             setting = "1 thread" if r["threads"] == 1 else "socket"
-            by[(setting, r["name"], r["idx"], r["engine"], r["ladder"])][r["machine"]] = r
-        md += ["| threads | run | " + " | ".join(machines) + " |", "|" + "---|" * (2 + len(machines))]
-        for (setting, name, _, _, _), per in sorted(by.items(), key=lambda kv: (kv[0][4], kv[0][0], kv[0][2], kv[0][3])):
+            by[(r["query"], setting, r["name"], r["idx"], r["engine"], r["ladder"])][r["machine"]] = r
+        md += ["| query | threads | run | " + " | ".join(machines) + " |", "|" + "---|" * (3 + len(machines))]
+        for (qry, setting, name, _, _, _), per in sorted(by.items(), key=lambda kv: (kv[0][5], kv[0][0], kv[0][1], kv[0][3], kv[0][4])):
             cells = []
             for m in machines:
                 r = per.get(m)
@@ -648,15 +650,15 @@ def main():
                     continue
                 split = "/".join(fmt(100 * r["l1"].get(k, 0), 0) for k in l1k) if r["l1"] else ""
                 cells.append("{} ({})".format(fmt(r["cpt"], 1), split))
-            md.append("| {} | {} | {} |".format(setting, name, " | ".join(cells)))
+            md.append("| Q{} | {} | {} | {} |".format(qry, setting, name, " | ".join(cells)))
         md += ["", "Split order: " + "/".join(LABELS[k] for k in l1k) + ".", ""]
 
     with open(os.path.join(args.out, "steps.csv"), "w", newline="") as f:
         w = csv.writer(f)
         keys = ["d_ms", "d_cpt", "d_ipt"] + ["d_" + k for k in l1k] + ["d_" + k for k in l2k]
-        w.writerow(["machine", "threads", "run", "vs"] + keys)
+        w.writerow(["machine", "threads", "query", "run", "vs"] + keys)
         for s in steps:
-            w.writerow([s["machine"], s["threads"], s["run"], s["vs"]] + [fmt(s.get(k), 3) for k in keys])
+            w.writerow([s["machine"], s["threads"], s["query"], s["run"], s["vs"]] + [fmt(s.get(k), 3) for k in keys])
     with open(os.path.join(args.out, "breakdown.md"), "w") as f:
         f.write("\n".join(md))
     print("{} runs ({} machines) -> {}".format(len(runs), len(machines), args.out))
