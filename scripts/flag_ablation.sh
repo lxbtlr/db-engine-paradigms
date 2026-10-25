@@ -478,6 +478,11 @@ config_flags() {
     # no option flags at all: every VW option at its CMakeLists.txt default
     # (all OFF: MurMur hash, no SIMD selection, no autovectorization)
     cmake_defaults)      ;;
+    # parity ladder: cmake_defaults plus only the options that give VW what
+    # Hyper's plans already have (PAPER_NARRATIVE.md, thrust 1), one per step
+    par_crc32)           echo "-DVW_USE_CRC32=ON" ;;
+    par_semi)            echo "$(config_flags par_crc32) -DVW_JOIN_SEMI=ON" ;;
+    par_having)          echo "$(config_flags par_semi) -DVW_GROUP_HAVING=ON" ;;
     #                         aggr aggr_sel pos16 crc32 huge2mb
     default)             flags OFF  OFF      OFF   OFF   OFF ;;
     add_group_aggr)      flags ON   OFF      OFF   OFF   OFF ;;
