@@ -9,12 +9,14 @@
 //          collect with `vtune -start-paused`. Each measured window is also
 //          an ITT task named after the run label ("q1 v  t1"), so the GUI
 //          can filter by task when one process runs several queries.
-//   perf:  `perf stat --delay=-1 --control fifo:CTL,ACK -- run_tpch ...`
+//   perf:  build with -DPROF_PERF_CTL (or -DPROF_ITT), then
+//          `perf stat --delay=-1 --control fifo:CTL,ACK -- run_tpch ...`
 //          with PERF_CTL_FIFO=CTL and PERF_ACK_FIFO=ACK in the environment.
 //
-// Both are opt-in: without PROF_ITT no ITT call is compiled in, and without
-// PERF_CTL_FIFO no fifo is opened, so default builds and runs are unchanged.
-// The calls sit outside the per-rep timing loop.
+// profile.hpp includes this header and calls begin()/end() only when
+// PROF_ITT or PROF_PERF_CTL is defined, so default builds compile exactly
+// the timeAndProfile they had before. The calls sit outside the per-rep
+// timing loop.
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>

@@ -1,5 +1,10 @@
 #include "common/Compat.hpp"
+// external profiler scoping (profile_scope.hpp) is compiled in only for
+// profiling builds; without these macros timeAndProfile is unchanged
+#if defined(PROF_ITT) || defined(PROF_PERF_CTL)
+#define PROF_SCOPE 1
 #include "profile_scope.hpp"
+#endif
 #ifdef CANARY_IN_BENCH
 #include "canary.hpp"
 #endif
@@ -812,9 +817,11 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
 
    uint64_t memStart = 0;
    if (mem) memStart = getCurrentRSS();
+#ifdef PROF_SCOPE
    // external profilers (VTune via ITT, perf via --control) see only the
-   // measured reps; no-op unless enabled (profile_scope.hpp)
+   // measured reps (profile_scope.hpp)
    profscope::begin(s.c_str());
+#endif
    startAll();
    double totalStart = gettime();
    size_t performedRep = 0;
@@ -826,7 +833,9 @@ void PerfEvents::timeAndProfile(std::string s, uint64_t count,
    }
    double totalEnd = gettime();
    readAll();
+#ifdef PROF_SCOPE
    profscope::end();
+#endif
 
 #ifdef CANARY_IN_BENCH
    if (canary::g_enabled) canary::after(s.c_str());
