@@ -145,6 +145,14 @@
 #                        VW_* (and HUGE_2MB_MALLOC_HUGE) only; configs are
 #                        named _x<hash>, vw_flags.txt maps the hash back
 #   CPU        (above)   also part of the name when not 0 (_cpu<N>)
+#   DD_W       ""        Q1 data-dependency width test (docs/dd_test1.md): a W
+#                        or a comma list (4,8,16); each W is its own run_tpch
+#                        -q 1 -w <W> invocation on the same build, named
+#                        _w<W>, with the injected-work row as query q1dd next
+#                        to that invocation's base q1. Needs QUERIES=1, ENGINE
+#                        v (W 1..64) or h (W 2..32 even, 48, 64)
+#   DD_SHAPE   chained   dd kernel shape (run_tpch -k): chained or independent
+#                        (_w<W>i)
 #   TESTS      all       TPCH/SSB tests: all, none, or a query list (1,6 or 11,21)
 #   PERF       ""        stat or record: one perf run per config x query after
 #                        the timing; <compiler>_<config>/perf_q<N>.txt
@@ -156,7 +164,7 @@
 #                        counters; see PMU_EVENT_GROUPS.md
 #   Each of these that differs from its default is appended to the config
 #   name: <config>[_autovec][_x<hash>][_e<engine>][_t<threads>][_v<size>]
-#   [_sf<SF>][_cpu<N>][_simdhash<0|1>]...[_pg<group>], so results and database entries
+#   [_sf<SF>][_cpu<N>][_simdhash<0|1>]...[_pg<group>][_w<W>[i]], so results and database entries
 #   never collide; summaries compare configs with the same suffix.
 #   Build dirs carry _autovec and _x<hash>. clearCaches (needs root) and the
 #   canary (-c/-C, CANARY_IN_BENCH builds) are not exposed.
@@ -183,6 +191,9 @@ FLAG_CONFIGS="cmake_defaults default add_group_aggr add_group_aggr_sel add_pos16
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
 JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc jd_semi join_all_valid"
 GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
+# parity and safe ladders: not in the default CONFIGS, named here so
+# summaries recognise them (and their run-setting suffixes)
+SAFE_CONFIGS="par_crc32 par_semi par_having safe_fast safe_sel safe_jdisp safe_gdisp safe_kinds safe_compound"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 # config group: the TPC-valid join and group-by configs (see header)
 JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc join_all_valid grp_base grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
@@ -303,6 +314,30 @@ done
 # run_tpch reads PERF_GROUP from the environment (profile.hpp)
 case "${PERF_GROUP:-}" in ''|G[0-8]|G3a|G3b|G[124568]b) ;; *) echo "PERF_GROUP must be G0..G8, G3a, G3b or G1b, G2b, G4b, G5b, G6b, G8b" >&2; exit 2 ;; esac
 [ -n "${PERF_GROUP:-}" ] && export PERF_GROUP
+# DD_W: Q1 data-dependency widths, one run_tpch invocation each (run_tpch -w)
+DD_W=${DD_W:-}
+DD_SHAPE=${DD_SHAPE:-chained}
+case "$DD_SHAPE" in chained|independent) ;; *) echo "DD_SHAPE must be chained or independent" >&2; exit 2 ;; esac
+if [ -n "$DD_W" ]; then
+  case "$DD_W" in *[!0-9,]*|,*|*,|*,,*) echo "DD_W must be a width or a comma list of widths" >&2; exit 2 ;; esac
+  [ -n "$(tr , '\n' <<< "$DD_W" | sort | uniq -d)" ] && { echo "DD_W repeats a width" >&2; exit 2; }
+  [ "$BENCH" = tpch ] && [ "$QUERIES" = 1 ] || { echo "DD_W runs Q1 only: needs BENCH=tpch and QUERIES=1" >&2; exit 2; }
+  for w in ${DD_W//,/ }; do
+    case "$ENGINE" in
+      v) [ "$w" -ge 1 ] && [ "$w" -le 64 ] || { echo "DD_W: $w is not in 1..64" >&2; exit 2; } ;;
+      # Typer W is a template constant: only the instantiated widths (q1_dd.cpp DD_WIDTHS)
+      h) case "$w" in 2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|48|64) ;;
+           *) echo "DD_W: $w is not a Typer width (2..32 even, 48, 64)" >&2; exit 2 ;; esac ;;
+      *) echo "DD_W needs ENGINE v or h" >&2; exit 2 ;;
+    esac
+  done
+else
+  [ "$DD_SHAPE" = chained ] || { echo "DD_SHAPE needs DD_W" >&2; exit 2; }
+fi
+DD_LIST=${DD_W:+${DD_W//,/ }}
+# dd_args W / dd_suffix W: run_tpch options and name suffix of width W ("" without DD_W)
+dd_args() { [ -n "$1" ] && echo "-w $1 -k $DD_SHAPE"; }
+dd_suffix() { [ -n "$1" ] && echo "_w$1$([ "$DD_SHAPE" = independent ] && echo i)"; }
 # Every setting that differs from the default is part of the config name
 # (results, build dirs, database), so runs never collide:
 # <config>[_autovec][_x<VW_FLAGS hash>][_e<engine>][_t<threads>][_v<vector size>]
@@ -336,7 +371,7 @@ RUN_SUFFIX=$PRE_SUFFIX${TN:+_t${THREADS//,/-}}$POST_SUFFIX
 # variation (stddev / mean, from counters.csv); either above 0.05 means the
 # median is not trustworthy to a few percent.
 # The header is printed outside sort so it stays on line 1.
-KNOWN_CONFIGS="$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"
+KNOWN_CONFIGS="$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS $SAFE_CONFIGS"
 summarize() {
   : > "$OUT/matrix.body"; : > "$OUT/noise.body"; : > "$OUT/effects.body"
   awk -F, -v known="$(echo $KNOWN_CONFIGS)" -v out="$OUT" -v counters="$OUT/counters.csv" '
@@ -582,6 +617,7 @@ CONFIGS=$kept
   echo "BENCH: $BENCH ($RUNNER)  ENGINE: $ENGINE  THREADS: $THREADS  VECTOR_SIZE: $VECTOR_SIZE  SF: $SF ($DATA_PATH)  PIN: $PIN"
   echo "SIMDhash: ${SIMDhash:-}  SIMDjoin: ${SIMDjoin:-}  SIMDsel: ${SIMDsel:-}  SIMDproj: ${SIMDproj:-}  PERF_GROUP: ${PERF_GROUP:-none}  label suffix: ${RUN_SUFFIX:-none}"
   echo "VW_FLAGS: ${VW_FLAGS:-none}${VW_FLAGS_HASH:+ (x$VW_FLAGS_HASH)}  TESTS: $TESTS  PERF: ${PERF:-none}"
+  echo "DD_W: ${DD_W:-none}  DD_SHAPE: $DD_SHAPE"
 } | tee "$OUT/machine.txt"
 [ -n "$VW_FLAGS" ] && echo "x$VW_FLAGS_HASH $VW_FLAGS" > "$OUT/vw_flags.txt"
 [ "$MACHINE" = custom ] && log "WARNING: host $(hostname -s) is not a TARGET_MACHINE preset; building with MACHINE=custom (-march=native, default topology). Set MACHINE= to override."
@@ -640,26 +676,30 @@ else
       for comp in $COMPILERS; do
         for cfg in $CONFIGS; do
           B=$(bdir "$comp" "$cfg"); [ -x "$B/$RUNNER" ] || continue
-          f="$OUT/${comp}_${cfg}$RUN_SUFFIX/q${q}_r$r"
-          # shellcheck disable=SC2086
+          for w in ${DD_LIST:-""}; do
+          ws=$(dd_suffix "$w")
+          f="$OUT/${comp}_${cfg}$RUN_SUFFIX/q${q}${ws}_r$r"
+          # shellcheck disable=SC2086,SC2046
           if ! tlimit $NUMA "$B/$RUNNER" -p "$DATA_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE" \
-                > "$f.csv" 2> "$f.err"; then
-            fail "${comp}_${cfg}$RUN_SUFFIX q$q round $r (see $f.err)"
+                $(dd_args "$w") > "$f.csv" 2> "$f.err"; then
+            fail "${comp}_${cfg}$RUN_SUFFIX q$q${ws:+ $ws} round $r (see $f.err)"
             [ "$r" = 1 ] && excerpt "$f.err" 5
             continue
           fi
           # timing.csv gets median and min; counters.csv every run_tpch column
           # (IPC, LLC-misses, ...) in long form, named as in its header
-          awk -F, -v c="$comp" -v g="$cfg$PRE_SUFFIX" -v post="$POST_SUFFIX" -v tn="$TN" \
+          awk -F, -v c="$comp" -v g="$cfg$PRE_SUFFIX" -v post="$POST_SUFFIX$ws" -v tn="$TN" \
               -v r="$r" -v e="$ENGINE" -v tf="$OUT/timing.csv" -v cf="$OUT/counters.csv" '
             { l = $1; gsub(/^ +| +$/, "", l) }
             l == "name" { for (i = 2; i <= NF; i++) { h[i] = $i; gsub(/^ +| +$/, "", h[i]); gsub(/[ .]+/, "-", h[i]); sub(/-$/, "", h[i]) } }
-            # label "q6 v  t4": p[1] = query, p[3] = thread count
-            l ~ "^q[0-9]+ " e { m = $2; n = $4; gsub(/ /, "", m); gsub(/ /, "", n); split(l, p, " ")
-                              name = g (tn ? "_" p[3] : "") post
+            # label "q6 v  t4" or (DD_W) "q1dd v ch W8 V1024  t4": p[1] = query,
+            # the last word = thread count
+            l ~ "^q[0-9]+(dd)? " e { m = $2; n = $4; gsub(/ /, "", m); gsub(/ /, "", n); np = split(l, p, " ")
+                              name = g (tn ? "_" p[np] : "") post
                               print c "," name "," r "," p[1] "," m "," n >> tf
                               for (i = 2; i <= NF; i++) { v = $i; gsub(/ /, "", v)
                                 if (h[i] != "" && v != "") print c "," name "," r "," p[1] "," h[i] "," v >> cf } }' "$f.csv"
+          done
         done
       done
     done
@@ -678,23 +718,27 @@ if [ -n "$PERF" ] && [ -d "$DATA_PATH" ]; then
         B=$(bdir "$comp" "$cfg"); [ -x "$B/$RUNNER" ] || continue
         D="$OUT/${comp}_${cfg}$RUN_SUFFIX"
         for q in ${QUERIES//,/ }; do
-          run=("$B/$RUNNER" -p "$DATA_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE")
+        for w in ${DD_LIST:-""}; do
+          ws=$(dd_suffix "$w")
+          # shellcheck disable=SC2207
+          run=("$B/$RUNNER" -p "$DATA_PATH" -e "$ENGINE" -q "$q" -r "$REPS" -t "$THREADS" -v "$VECTOR_SIZE" -s "$SETTLE" $(dd_args "$w"))
           if [ "$PERF" = stat ]; then
             # shellcheck disable=SC2086
-            tlimit $NUMA perf stat -d -o "$D/perf_q$q.txt" -- "${run[@]}" > /dev/null 2> "$D/perf_q$q.err" ||
-              fail "${comp}_${cfg}$RUN_SUFFIX perf stat q$q (see $D/perf_q$q.err)"
+            tlimit $NUMA perf stat -d -o "$D/perf_q$q$ws.txt" -- "${run[@]}" > /dev/null 2> "$D/perf_q$q$ws.err" ||
+              fail "${comp}_${cfg}$RUN_SUFFIX perf stat q$q$ws (see $D/perf_q$q$ws.err)"
           else
             # shellcheck disable=SC2086
-            if tlimit $NUMA perf record -g -o "$D/perf_q$q.data" -- "${run[@]}" > /dev/null 2> "$D/perf_q$q.err"; then
-              perf report --stdio --no-children --percent-limit 0.5 -i "$D/perf_q$q.data" > "$D/perf_q$q.txt" 2>> "$D/perf_q$q.err" ||
-                fail "${comp}_${cfg}$RUN_SUFFIX perf report q$q (see $D/perf_q$q.err)"
-              [ "${PERF_KEEP:-0}" = 1 ] || rm -f "$D/perf_q$q.data"
-            else fail "${comp}_${cfg}$RUN_SUFFIX perf record q$q (see $D/perf_q$q.err)"; fi
+            if tlimit $NUMA perf record -g -o "$D/perf_q$q$ws.data" -- "${run[@]}" > /dev/null 2> "$D/perf_q$q$ws.err"; then
+              perf report --stdio --no-children --percent-limit 0.5 -i "$D/perf_q$q$ws.data" > "$D/perf_q$q$ws.txt" 2>> "$D/perf_q$q$ws.err" ||
+                fail "${comp}_${cfg}$RUN_SUFFIX perf report q$q$ws (see $D/perf_q$q$ws.err)"
+              [ "${PERF_KEEP:-0}" = 1 ] || rm -f "$D/perf_q$q$ws.data"
+            else fail "${comp}_${cfg}$RUN_SUFFIX perf record q$q$ws (see $D/perf_q$q$ws.err)"; fi
           fi
+        done
         done
       done
     done
-    log "perf $PERF: <compiler>_<config>/perf_q<N>.txt"
+    log "perf $PERF: <compiler>_<config>/perf_q<N>[_w<W>].txt"
   fi
 fi
 
