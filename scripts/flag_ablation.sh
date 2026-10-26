@@ -483,6 +483,16 @@ config_flags() {
     par_crc32)           echo "-DVW_USE_CRC32=ON" ;;
     par_semi)            echo "$(config_flags par_crc32) -DVW_JOIN_SEMI=ON" ;;
     par_having)          echo "$(config_flags par_semi) -DVW_GROUP_HAVING=ON" ;;
+    # safe ladder: par_having plus jd_all_pc's engine options, one group per
+    # step; jd_all_pc itself (+ VW_GROUP_RUN_HEADS) is the last step. Join
+    # dispatch replaces par_semi's bitmap (VW_JOIN_SEMI_MAX_BYTES=0 as in
+    # jd_all_pc)
+    safe_fast)           echo "$(config_flags par_having) -DVW_CRC32_FAST=ON" ;;
+    safe_sel)            echo "$(config_flags safe_fast) $SEL" ;;
+    safe_jdisp)          echo "$(config_flags safe_sel) -DVW_JOIN_SEMI=OFF -DVW_JOIN_DISPATCH=ON -DVW_JOIN_SEMI_MAX_BYTES=0" ;;
+    safe_gdisp)          echo "$(config_flags safe_jdisp) -DVW_GROUP_DISPATCH=ON" ;;
+    safe_kinds)          echo "$(config_flags safe_gdisp) -DVW_AGGR_FUSED_KINDS=ON" ;;
+    safe_compound)       echo "$(config_flags safe_kinds) -DVW_PROJ_COMPOUND=ON" ;;
     #                         aggr aggr_sel pos16 crc32 huge2mb
     default)             flags OFF  OFF      OFF   OFF   OFF ;;
     add_group_aggr)      flags ON   OFF      OFF   OFF   OFF ;;
