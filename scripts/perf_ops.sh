@@ -51,9 +51,17 @@
 #   PERIOD_SCALE 5                sampling periods x this; 1 = about 2K
 #                                 samples/s per event (manchego's kernel caps
 #                                 perf_event_max_sample_rate at 7000)
-#   CALL_GRAPH  fp                perf record --call-graph mode: fp (frame pointers;
-#                                 a leaf without one, e.g. in libc, hides its
-#                                 caller) or lbr (hardware call stack)
+#   CALL_GRAPH  auto              perf record --call-graph mode. fp (frame
+#                                 pointers): a sample in a function that keeps
+#                                 none (libc) or has not set one up yet hides its
+#                                 caller, so Tectorwise loses the operator it
+#                                 ran in (Q18: 5% of slots moved to the HAVING
+#                                 Select). lbr (hardware call stack): exact
+#                                 callers, but the leaf shows as its function's
+#                                 entry, so no source lines. auto: the event
+#                                 set's choice for -e v (spr: lbr), fp for -e h
+#                                 (Typer needs the leaf's line; its pipeline frame
+#                                 is never the hidden caller)
 #   KEEP_DATA   0                 1 = keep perf.data
 #   BUILD_ONLY  0 / SKIP_BUILD 0  as vtune_q1.sh
 #   BUILDS_DIR  build_perf/<host> (build_vtune/<host> builds also work: PROF_ITT
@@ -89,7 +97,7 @@ TIMING_REPS=${TIMING_REPS:-10}
 SETTLE=${SETTLE:-1}
 VECTOR_SIZE=${VECTOR_SIZE:-1024}
 PERIOD_SCALE=${PERIOD_SCALE:-5}
-CALL_GRAPH=${CALL_GRAPH:-fp}
+CALL_GRAPH=${CALL_GRAPH:-auto}
 KEEP_DATA=${KEEP_DATA:-0}
 BUILD_ONLY=${BUILD_ONLY:-0}
 SKIP_BUILD=${SKIP_BUILD:-0}
@@ -133,7 +141,8 @@ case "$EVENTSET" in
     EVDEFS="slots=0xa4/0x01//10000019 fe=0x9c/0x01//2000003 fe_lat_cyc=0x9c/0x01/6/200003
             ret=0xc2/0x02//5000011 heavy=0xc2/0x01//500009 be=0xa4/0x02//5000011
             mem=0xa4/0x10//5000011 brmisp=0xa4/0x08//2000003"
-    INST_PERIOD=5000011 ;;
+    INST_PERIOD=5000011
+    CG_V=lbr ;;
   "") die "no event set for this CPU (family/model $(cpu_key)); add one to perf_ops.sh or set EVENTSET" ;;
   *) die "unknown EVENTSET $EVENTSET" ;;
 esac
@@ -299,6 +308,8 @@ for b in "${BUILDS[@]}"; do
       PIN=$(pin_for "$T")
       label=${b}_q${q}_e${e}_t$T; D=$OUT/$label; mkdir -p "$D"
       run=(-p "$TPCH_PATH/" -e "$e" -q "$q" -t "$T" -v "$VECTOR_SIZE" -s "$SETTLE")
+      cg=$CALL_GRAPH
+      [ "$cg" = auto ] && { [ "$e" = v ] && cg=${CG_V:-fp} || cg=fp; }
       log "===== $label ($PIN)"
       # shellcheck disable=SC2086
       if ! EXTERNALPROFILE=1 $PIN "$bin" "${run[@]}" -r "$TIMING_REPS" > "$D/timing.csv" 2> "$D/timing.err"; then
@@ -315,7 +326,7 @@ for b in "${BUILDS[@]}"; do
         echo "vector_size=$VECTOR_SIZE"; echo "machine=$MACHINE"; echo "host=$(hostname -s)"; echo "node=$NODE"; echo "pin=$PIN"
         echo "cpu_model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)"
         echo "eventset=$EVENTSET"; echo "period_scale=$PERIOD_SCALE"; echo "slots_per_cycle=$SLOTS_PER_CYCLE"
-        echo "call_graph=$CALL_GRAPH"
+        echo "call_graph=$cg"
         echo "commit=$(git -C "$ROOT" rev-parse --short HEAD)"
         echo "build_commit=$(sed -n 's/^commit: //p' "$OUT/builds/$b/buildcmds.txt" 2> /dev/null | cut -c1-12)"
         echo "defines=$(cat "$OUT/builds/$b/defines.txt" 2> /dev/null)"
@@ -331,7 +342,7 @@ for b in "${BUILDS[@]}"; do
       [ -z "$mux" ] || log "WARNING: $label: events multiplexed: $mux"
 
       # shellcheck disable=SC2086
-      if ! perf_ctl "$D" record -e "$EV" --call-graph "$CALL_GRAPH" -o "$D/perf.data" -- $PIN "$bin" "${run[@]}" -r "$reps" \
+      if ! perf_ctl "$D" record -e "$EV" --call-graph "$cg" -o "$D/perf.data" -- $PIN "$bin" "${run[@]}" -r "$reps" \
             > "$D/record_run.out" 2> "$D/record.log"; then
         fail "$label perf record (see $D/record.log)"; excerpt "$D/record.log" 5; continue
       fi

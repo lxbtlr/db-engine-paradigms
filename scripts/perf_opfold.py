@@ -4,7 +4,7 @@
 usage: perf_opfold.py <run_tpch> <engine v|h> <query> <out dir> [perf script output, default stdin]
 
 Input: `perf script -F event,period,ip,sym,symoff` of a perf_ops.sh record,
-call stacks included (--call-graph fp). Every sample adds its period to the
+call stacks included (--call-graph fp or lbr). Every sample adds its period to the
 event's sum in each of the tables below; perf_ops_report.py turns the sums
 into top-down shares and cycles per tuple.
 
@@ -47,7 +47,17 @@ KERNEL = 0xffff000000000000
 text = [(int(f[0], 16), f[2]) for f in
         (l.split(None, 2) for l in subprocess.run(["nm", binary], capture_output=True, text=True).stdout.splitlines())
         if len(f) == 3 and f[1] in ("T", "t")]
-main_static = next(a for a, n in text if n == "main")
+# the PIE load base comes from the first frame in one of these functions:
+# main is on every fp stack; LBR stacks start at the call made after perf
+# was enabled, so they reach timeAndProfile but not main
+ANCHORS = {}
+for l in subprocess.run(["nm", "-C", binary], capture_output=True, text=True).stdout.splitlines():
+    f = l.split(None, 2)
+    if len(f) == 3 and f[1] in ("T", "t", "W", "w"):  # header functions are weak
+        for name in ("main", "PerfEvents::timeAndProfile", "runtime::WorkerGroup::run"):
+            if (f[2] == name or f[2].startswith(name + "(")) and "[clone" not in f[2] and "{lambda" not in f[2]:
+                ANCHORS.setdefault(name, set()).add(int(f[0], 16))
+ANCHORS = {n: a.pop() for n, a in ANCHORS.items() if len(a) == 1}
 text_lo, text_hi = min(a for a, _ in text), max(a for a, _ in text) + 4096
 base = None
 
@@ -70,8 +80,8 @@ def add(ev, period, fr):
     global base
     if base is None:
         for ip, s, off in fr:
-            if s == "main":
-                base = ip - off - main_static
+            if s in ANCHORS:
+                base = ip - off - ANCHORS[s]
                 break
     leaf = fr[0][1] if fr else "?"
     if engine == "v":
@@ -87,12 +97,12 @@ def add(ev, period, fr):
         events.append(ev)
 
 
-pending = []  # samples before the first main frame fixed the load base
+pending = []  # samples before the first anchor frame fixed the load base
 cur = None
 for line in src:
     if not line.strip():
         if cur:
-            (add(*cur) if base is not None or any(s == "main" for _, s, _ in cur[2]) else pending.append(cur))
+            (add(*cur) if base is not None or any(s in ANCHORS for _, s, _ in cur[2]) else pending.append(cur))
         cur = None
         continue
     if cur is None:
@@ -105,7 +115,7 @@ for line in src:
 if cur:
     pending.append(cur)
 if base is None:
-    sys.exit("perf_opfold: no main() frame on any stack; was the record made with --call-graph fp?")
+    sys.exit(f"perf_opfold: no stack has a frame in {sorted(ANCHORS)}; was the record made with --call-graph?")
 for s in pending:
     add(*s)
 
