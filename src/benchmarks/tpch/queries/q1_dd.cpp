@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <deque>
 #include <iostream>
+#include <mutex>
 
 using namespace runtime;
 using namespace std;
@@ -222,6 +223,34 @@ std::unique_ptr<runtime::Query> q1_dd_hyper(runtime::Database& db,
 // aggregates and result columns are unchanged; the sink is emitted as an extra
 // result column so the harness escape keeps it live.
 // ---------------------------------------------------------------------------
+/// One stderr line per process: how many of the dd projection's ops run as
+/// compound primitives (VW_PROJ_COMPOUND), next to base Q1's own expressions.
+static void reportDdCoverage(const vectorwise::Project& proj, int W,
+                             dd::Shape shape) {
+   static std::once_flag once;
+   std::call_once(once, [&] {
+      constexpr size_t baseExprs = 2; // base Q1's two projections come first
+      size_t ops[2] = {0, 0}, compound[2] = {0, 0};
+      for (size_t e = 0; e < proj.expressions.size(); ++e) {
+         const size_t part = e < baseExprs ? 0 : 1;
+         for (auto& op : proj.expressions[e]->ops) {
+            ++ops[part];
+#ifdef VW_PROJ_COMPOUND
+            if (dynamic_cast<const vectorwise::CompoundOp*>(op.get()))
+               ++compound[part];
+#else
+            (void)op;
+#endif
+         }
+      }
+      fprintf(stderr,
+              "[dd] W=%d shape=%s dd ops=%zu compound=%zu | base Q1 ops=%zu "
+              "compound=%zu\n",
+              W, shape == dd::Shape::Chained ? "chained" : "independent",
+              ops[1], compound[1], ops[0], compound[0]);
+   });
+}
+
 std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
    using namespace vectorwise;
    if (W < 1 || W > DD_WIDTHS_MAX) {
@@ -268,6 +297,10 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
                       Buffer(result_proj_plus, sizeof(int64_t))));
 
    // --- W synthetic intermediates, each into its own buffer ---
+   // Operand forms: columns are read through sel_date (they are not
+   // compacted), the dd buffers are dense (one value per selected row), so
+   // each read uses the primitive form that matches its operand. With
+   // VW_PROJ_COMPOUND the multiply + add of one expression then fuse.
    // Shape is a runtime count here (each intermediate materializes to memory,
    // so on this engine the two shapes are ~cost-neutral by design).
    if (shape == dd::Shape::Independent) {
@@ -280,7 +313,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
                  .addOp(primitives::proj_sel_multiplies_int64_t_col_int64_t_val,
                         Buffer(sel_date), Buffer(dd_scratch, sizeof(int64_t)),
                         Column(lineitem, "l_extendedprice"), Value(&r->ddC[k]))
-                 .addOp(primitives::proj_plus_sel_int64_t_col_int64_t_col,
+                 .addOp(primitives::proj_plus_int64_t_col_sel_int64_t_col,
                         Buffer(sel_date),
                         Buffer(dd_buf_base + k, sizeof(int64_t)),
                         Buffer(dd_scratch, sizeof(int64_t)),
@@ -298,11 +331,11 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
       for (int k = 1; k < W; ++k) {
          proj.addExpression(
              Expression()
-                 .addOp(primitives::proj_sel_multiplies_int64_t_col_int64_t_val,
-                        Buffer(sel_date), Buffer(dd_scratch, sizeof(int64_t)),
+                 .addOp(primitives::proj_multiplies_int64_t_col_int64_t_val,
+                        Buffer(dd_scratch, sizeof(int64_t)),
                         Buffer(dd_buf_base + k - 1, sizeof(int64_t)),
                         Value(&r->ddC[k]))
-                 .addOp(primitives::proj_plus_sel_int64_t_col_int64_t_col,
+                 .addOp(primitives::proj_plus_int64_t_col_sel_int64_t_col,
                         Buffer(sel_date),
                         Buffer(dd_buf_base + k, sizeof(int64_t)),
                         Buffer(dd_scratch, sizeof(int64_t)),
@@ -312,17 +345,18 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
    // --- final: sink = sum of all W intermediates ---
    proj.addExpression(
        Expression()
-           .addOp(primitives::proj_sel_plus_int64_t_col_int64_t_val,
-                  Buffer(sel_date), Buffer(dd_sink, sizeof(int64_t)),
+           .addOp(primitives::proj_plus_int64_t_col_int64_t_val,
+                  Buffer(dd_sink, sizeof(int64_t)),
                   Buffer(dd_buf_base + 0, sizeof(int64_t)), Value(&r->ddZero)));
    for (int k = 1; k < W; ++k) {
       proj.addExpression(
           Expression()
-              .addOp(primitives::proj_plus_sel_int64_t_col_int64_t_col,
-                     Buffer(sel_date), Buffer(dd_sink, sizeof(int64_t)),
+              .addOp(primitives::proj_plus_int64_t_col_int64_t_col,
+                     Buffer(dd_sink, sizeof(int64_t)),
                      Buffer(dd_sink, sizeof(int64_t)),
                      Buffer(dd_buf_base + k, sizeof(int64_t))));
    }
+   reportDdCoverage(proj.project, W, shape);
 
    HashGroup()
        .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
