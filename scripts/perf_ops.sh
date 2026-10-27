@@ -31,7 +31,7 @@
 #   record.log    perf record's stderr; perf.data with KEEP_DATA=1
 #   meta.env      build, query, engine, threads, reps, SF, tuples, events, ...
 #
-#   sbatch --partition=cheese --nodelist=manchego --exclusive \
+#   cd <checkout> && sbatch --partition=cheese --nodelist=manchego --exclusive \
 #          --output=/tank/alexb/slurm-tpch/manchego/perf_ops_%j.out scripts/perf_ops.sh
 #
 # Environment (all optional):
@@ -71,6 +71,11 @@
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# sbatch runs a copy of this file from Slurm's spool directory: the checkout
+# is then the directory the job was submitted from
+if [ ! -f "$ROOT/scripts/flag_ablation.sh" ] && [ -f "${SLURM_SUBMIT_DIR:-}/scripts/flag_ablation.sh" ]; then
+  ROOT=$SLURM_SUBMIT_DIR
+fi
 BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 CONFIGS=${CONFIGS:-"cmake_defaults jd_all_pc"}
 BASE_REF=${BASE_REF-origin/baseline}
