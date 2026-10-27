@@ -23,6 +23,7 @@ into top-down shares and cycles per tuple.
                  qN.cpp line with the function inlined directly under it
                  (approximate: -O3 line tables). Both carry the source text,
                  so labels can match code instead of line numbers.
+  operator_functions.csv  by operator and leaf function
   totals.csv     the whole run
 
 Lines come from addr2line -i on the binary's debug info (-g).
@@ -213,6 +214,7 @@ def short(fn):
 # ------------------------------------------------------------------ tables
 functions = collections.defaultdict(collections.Counter)
 operators = collections.defaultdict(collections.Counter)
+op_functions = collections.defaultdict(collections.Counter)
 total = collections.Counter()
 if engine == "v":
     resolve(a for (_, ops, _) in acc for _, a in ops)
@@ -232,9 +234,11 @@ for key, c in acc.items():
                 if ph == "?":
                     unresolved[op] += c["slots"]
                 path.append(op + (f"[{ph}]" if ph else ""))
-            operators[(" > ".join(path),)].update(c)
+            okey = " > ".join(path)
         else:
-            operators[("plan build" if plan else "other: " + leaf,)].update(c)
+            okey = "plan build" if plan else "other: " + leaf
+        operators[(okey,)].update(c)
+        op_functions[(okey, leaf)].update(c)
     else:
         leaf, addrs = key
         entries = [e for a in addrs for e in chains.get(a, [])]  # inner -> outer
@@ -243,9 +247,11 @@ for key, c in acc.items():
         inner = next(((ln, source_line(p, ln), short(entries[k - 1][0]) if k else "")
                       for k, (fn, p, ln) in enumerate(entries) if p.endswith("/" + QFILE)), None)
         if pipe is None:
-            operators[("", "", "", "", "", "other: " + leaf)].update(c)
+            okey = ("", "", "", "", "", "other: " + leaf)
         else:
-            operators[(pipe[0], pipe[1]) + (inner if inner else ("", "", "")) + ("",)].update(c)
+            okey = (pipe[0], pipe[1]) + (inner if inner else ("", "", "")) + ("",)
+        operators[okey].update(c)
+        op_functions[(f"{okey[0]}|{okey[2]}" if pipe else okey[5], leaf)].update(c)
 
 os.makedirs(outdir, exist_ok=True)
 ev_cols = sorted(events, key=lambda e: (e != "slots", e))
@@ -261,6 +267,10 @@ def write(name, cols, table):
 
 write("functions.csv", ["function"], functions)
 write("totals.csv", ["scope"], {("run",): total})
+# which leaf functions each operator's samples landed in (Typer: by
+# "<pipeline line>|<line>"); a leaf that keeps no frame pointer (libc) hides
+# its caller from fp stacks, so its samples go to the caller's caller
+write("operator_functions.csv", ["operator", "function"], op_functions)
 if engine == "v":
     write("operators.csv", ["operator"], operators)
 else:

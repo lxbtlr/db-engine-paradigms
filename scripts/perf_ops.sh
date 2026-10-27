@@ -51,6 +51,9 @@
 #   PERIOD_SCALE 5                sampling periods x this; 1 = about 2K
 #                                 samples/s per event (manchego's kernel caps
 #                                 perf_event_max_sample_rate at 7000)
+#   CALL_GRAPH  fp                perf record --call-graph mode: fp (frame pointers;
+#                                 a leaf without one, e.g. in libc, hides its
+#                                 caller) or lbr (hardware call stack)
 #   KEEP_DATA   0                 1 = keep perf.data
 #   BUILD_ONLY  0 / SKIP_BUILD 0  as vtune_q1.sh
 #   BUILDS_DIR  build_perf/<host> (build_vtune/<host> builds also work: PROF_ITT
@@ -86,6 +89,7 @@ TIMING_REPS=${TIMING_REPS:-10}
 SETTLE=${SETTLE:-1}
 VECTOR_SIZE=${VECTOR_SIZE:-1024}
 PERIOD_SCALE=${PERIOD_SCALE:-5}
+CALL_GRAPH=${CALL_GRAPH:-fp}
 KEEP_DATA=${KEEP_DATA:-0}
 BUILD_ONLY=${BUILD_ONLY:-0}
 SKIP_BUILD=${SKIP_BUILD:-0}
@@ -171,7 +175,7 @@ NCORES=$(tr ',' '\n' <<< "$NODE_CORES" | grep -c .)
   echo -n "perf_event_max_sample_rate: "; cat /proc/sys/kernel/perf_event_max_sample_rate 2> /dev/null || echo n/a
   echo -n "nmi_watchdog: "; cat /proc/sys/kernel/nmi_watchdog 2> /dev/null || echo n/a
   echo "kernel: $(uname -r)  perf: $("$PERF" --version 2> /dev/null)"
-  echo "EVENTSET: $EVENTSET ($(cpu_key))  PERIOD_SCALE: $PERIOD_SCALE  SLOTS_PER_CYCLE: $SLOTS_PER_CYCLE"
+  echo "EVENTSET: $EVENTSET ($(cpu_key))  PERIOD_SCALE: $PERIOD_SCALE  SLOTS_PER_CYCLE: $SLOTS_PER_CYCLE  CALL_GRAPH: $CALL_GRAPH"
   echo "events: $EV"
   echo "COMPILER: $COMPILER $COMPILER_VERSION  TARGET_ARCH: $TARGET_ARCH  SF: $SF ($TPCH_PATH, $TUPLES lineitem rows)  VECTOR_SIZE: $VECTOR_SIZE"
   echo "CONFIGS: $CONFIGS  QUERIES: $QUERIES  THREADS: $THREADS  MIN_SECONDS: $MIN_SECONDS  STAT_SECONDS: $STAT_SECONDS"
@@ -311,6 +315,7 @@ for b in "${BUILDS[@]}"; do
         echo "vector_size=$VECTOR_SIZE"; echo "machine=$MACHINE"; echo "host=$(hostname -s)"; echo "node=$NODE"; echo "pin=$PIN"
         echo "cpu_model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)"
         echo "eventset=$EVENTSET"; echo "period_scale=$PERIOD_SCALE"; echo "slots_per_cycle=$SLOTS_PER_CYCLE"
+        echo "call_graph=$CALL_GRAPH"
         echo "commit=$(git -C "$ROOT" rev-parse --short HEAD)"
         echo "build_commit=$(sed -n 's/^commit: //p' "$OUT/builds/$b/buildcmds.txt" 2> /dev/null | cut -c1-12)"
         echo "defines=$(cat "$OUT/builds/$b/defines.txt" 2> /dev/null)"
@@ -326,7 +331,7 @@ for b in "${BUILDS[@]}"; do
       [ -z "$mux" ] || log "WARNING: $label: events multiplexed: $mux"
 
       # shellcheck disable=SC2086
-      if ! perf_ctl "$D" record -e "$EV" --call-graph fp -o "$D/perf.data" -- $PIN "$bin" "${run[@]}" -r "$reps" \
+      if ! perf_ctl "$D" record -e "$EV" --call-graph "$CALL_GRAPH" -o "$D/perf.data" -- $PIN "$bin" "${run[@]}" -r "$reps" \
             > "$D/record_run.out" 2> "$D/record.log"; then
         fail "$label perf record (see $D/record.log)"; excerpt "$D/record.log" 5; continue
       fi
