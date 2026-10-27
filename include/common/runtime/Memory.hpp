@@ -1,4 +1,6 @@
 #pragma once
+#include <atomic>
+#include <cstdio>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <linux/mman.h>  // MAP_HUGE_2MB / MAP_HUGE_1GB (not pulled in by sys/mman.h)
@@ -11,6 +13,10 @@ inline void* malloc_huge(size_t size) {
    void* p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
    if (p == MAP_FAILED) {
+      static std::atomic_flag warned = ATOMIC_FLAG_INIT;
+      if (!warned.test_and_set())
+         fprintf(stderr, "malloc_huge: MAP_HUGETLB failed for %zu bytes, "
+                         "falling back to normal pages\n", allocSize);
       p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
       if (p == MAP_FAILED)
