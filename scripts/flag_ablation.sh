@@ -142,7 +142,8 @@
 #   SIMDhash SIMDjoin SIMDsel SIMDproj  0|1, unset = built-in default:
 #              run-time SIMD primitive switches read by run_tpch and test_all
 #   VW_FLAGS   ""        extra CMake options on every config, "VW_X=ON VW_Y=8":
-#                        VW_* (and HUGE_2MB_MALLOC_HUGE) only; configs are
+#                        VW_* (and HUGE_2MB_MALLOC_HUGE, THREAD_PIN_PACKED)
+#                        only; configs are
 #                        named _x<hash>, vw_flags.txt maps the hash back
 #   CPU        (above)   also part of the name when not 0 (_cpu<N>)
 #   TESTS      all       TPCH/SSB tests: all, none, or a query list (1,6 or 11,21)
@@ -286,7 +287,7 @@ VW_FLAGS=${VW_FLAGS:-}
 VW_FLAGS_D= VW_FLAGS_HASH=
 if [ -n "$VW_FLAGS" ]; then
   for kv in $VW_FLAGS; do
-    [[ $kv =~ ^(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE)=[A-Za-z0-9_.]+$ ]] ||
+    [[ $kv =~ ^(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE|THREAD_PIN_PACKED)=[A-Za-z0-9_.]+$ ]] ||
       { echo "VW_FLAGS: $kv is not OPTION=VALUE with a VW_ option" >&2; exit 2; }
   done
   [ -n "$(tr ' ' '\n' <<< "$VW_FLAGS" | grep . | cut -d= -f1 | sort | uniq -d)" ] &&

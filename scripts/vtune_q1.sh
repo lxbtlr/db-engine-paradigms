@@ -236,9 +236,10 @@ pinned_cpus() {
   S=$(sed -E 's/.*=> *([0-9]+)S.*/\1/' <<< "$topo"); C=$(sed -E 's/.* ([0-9]+)C .*/\1/' <<< "$topo")
   M=$(sed -E 's/.* ([0-9]+)T .*/\1/' <<< "$topo"); contig=$(sed -E 's/.*contiguous=([A-Za-z]+).*/\1/' <<< "$topo")
   awk -v T="$T" -v S="$S" -v C="$C" -v M="$M" -v contig="$contig" 'BEGIN {
-    tps = C * M
+    P = S * C  # physical cores; interleaved: their SMT siblings are P..2P-1
     for (i = 0; i < T - 1; i++) {
-      c = (contig == "ON") ? i : (i % tps) * S + int(i / tps)
+      t = i % P
+      c = (contig == "ON") ? i : int(i / P) * P + (t % C) * S + int(t / C)
       printf "%s%d", (i ? "," : ""), c } }'
 }
 

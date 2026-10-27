@@ -37,8 +37,11 @@ constexpr size_t THREADS_PER_SOCKET = CORES_PER_SOCKET * SMT_PER_CORE;
 
 /// Map a thread id to the CPU id it should be pinned to.
 /// Two layouts:
-///   Interleaved (default): CPU c -> node (c % SOCKETS_COUNT)
-///     thread i in packed mode: cpu = (i % TPS) * SOCKETS_COUNT + (i / TPS)
+///   Interleaved (default): CPU c -> node (c % SOCKETS_COUNT); the SMT
+///   siblings of CPUs 0..P-1 (P = SOCKETS_COUNT * CORES_PER_SOCKET physical
+///   cores) are P..2P-1, as on dubliner and manchego
+///     thread i in packed mode: the physical cores of socket 0, then of
+///       socket 1, ...; SMT siblings only from thread P on, in the same order
 ///     thread i in spread mode: cpu = i  (sequential IDs round-robin across nodes)
 ///   Contiguous (CPU_LAYOUT_CONTIGUOUS): CPU c -> node (c / THREADS_PER_SOCKET)
 ///     thread i in packed mode: cpu = i  (contiguous blocks already match)
@@ -55,9 +58,10 @@ inline size_t cpuOfThread(size_t tid) {
 #endif
 #else // Interleaved (default)
 #ifdef THREAD_PIN_PACKED
-   size_t socket = tid / THREADS_PER_SOCKET;
-   size_t j = tid % THREADS_PER_SOCKET;
-   return j * SOCKETS_COUNT + socket;
+   constexpr size_t physical = SOCKETS_COUNT * CORES_PER_SOCKET;
+   size_t smt = tid / physical, t = tid % physical;
+   size_t socket = t / CORES_PER_SOCKET, core = t % CORES_PER_SOCKET;
+   return smt * physical + core * SOCKETS_COUNT + socket;
 #else
    return tid;
 #endif
@@ -75,8 +79,10 @@ inline size_t nodeOfCpu(size_t cpu) {
 
 /// Map a thread id to its NUMA region (convenience: nodeOfCpu(cpuOfThread(tid))).
 inline size_t regionOf(size_t tid) {
-#ifdef THREAD_PIN_PACKED
+#if defined(THREAD_PIN_PACKED) && defined(CPU_LAYOUT_CONTIGUOUS)
    return tid / THREADS_PER_SOCKET;
+#elif defined(THREAD_PIN_PACKED)
+   return tid % (SOCKETS_COUNT * CORES_PER_SOCKET) / CORES_PER_SOCKET;
 #else
    return tid % SOCKETS_COUNT;
 #endif
@@ -85,9 +91,15 @@ inline size_t regionOf(size_t tid) {
 /// Count how many distinct NUMA regions are occupied by nrThreads threads.
 inline size_t activeRegions(size_t nrThreads) {
 #ifdef THREAD_PIN_PACKED
-   // Packed: fill one socket before moving to next
-   size_t full = nrThreads / THREADS_PER_SOCKET;
-   size_t partial = (nrThreads % THREADS_PER_SOCKET) > 0 ? 1 : 0;
+   // Packed: fill one socket before moving to next (interleaved layout: its
+   // physical cores; contiguous: all its hardware threads)
+#ifdef CPU_LAYOUT_CONTIGUOUS
+   constexpr size_t perSocket = THREADS_PER_SOCKET;
+#else
+   constexpr size_t perSocket = CORES_PER_SOCKET;
+#endif
+   size_t full = nrThreads / perSocket;
+   size_t partial = (nrThreads % perSocket) > 0 ? 1 : 0;
    size_t n = full + partial;
    return n < NUM_NUMA_REGIONS ? n : NUM_NUMA_REGIONS;
 #else
