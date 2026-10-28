@@ -43,7 +43,8 @@ using vectorwise::primitives::hash_t;
 // below has an explicit instantiation in the switch in q1_dd_hyper).
 [[maybe_unused]] constexpr int DD_WIDTHS[] = {2, 4, 6, 8,  10, 12, 14, 16,
                                              18, 20, 22, 24, 26, 28, 30, 32,
-                                             48, 64};
+                                             34, 36, 38, 40, 42, 44, 46, 48,
+                                             64};
 constexpr int DD_WIDTHS_MAX = 64;
 
 // Escape helper so a value must be considered live (prevents DCE of the
@@ -191,6 +192,13 @@ std::unique_ptr<runtime::Query> dispatchW(runtime::Database& db,
       case 28: return q1_dd_hyper_impl<28, S>(db, nrThreads);
       case 30: return q1_dd_hyper_impl<30, S>(db, nrThreads);
       case 32: return q1_dd_hyper_impl<32, S>(db, nrThreads);
+      case 34: return q1_dd_hyper_impl<34, S>(db, nrThreads);
+      case 36: return q1_dd_hyper_impl<36, S>(db, nrThreads);
+      case 38: return q1_dd_hyper_impl<38, S>(db, nrThreads);
+      case 40: return q1_dd_hyper_impl<40, S>(db, nrThreads);
+      case 42: return q1_dd_hyper_impl<42, S>(db, nrThreads);
+      case 44: return q1_dd_hyper_impl<44, S>(db, nrThreads);
+      case 46: return q1_dd_hyper_impl<46, S>(db, nrThreads);
       case 48: return q1_dd_hyper_impl<48, S>(db, nrThreads);
       case 64: return q1_dd_hyper_impl<64, S>(db, nrThreads);
       default:

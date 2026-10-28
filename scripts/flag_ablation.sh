@@ -150,7 +150,7 @@
 #                        -q 1 -w <W> invocation on the same build, named
 #                        _w<W>, with the injected-work row as query q1dd next
 #                        to that invocation's base q1. Needs QUERIES=1, ENGINE
-#                        v (W 1..64) or h (W 2..32 even, 48, 64)
+#                        v (W 1..64) or h (W 2..48 even, 64)
 #   DD_SHAPE   chained   dd kernel shape (run_tpch -k): chained or independent
 #                        (_w<W>i)
 #   TESTS      all       TPCH/SSB tests: all, none, or a query list (1,6 or 11,21)
@@ -327,8 +327,8 @@ if [ -n "$DD_W" ]; then
     case "$ENGINE" in
       v) [ "$w" -ge 1 ] && [ "$w" -le 64 ] || { echo "DD_W: $w is not in 1..64" >&2; exit 2; } ;;
       # Typer W is a template constant: only the instantiated widths (q1_dd.cpp DD_WIDTHS)
-      h) case "$w" in 2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|48|64) ;;
-           *) echo "DD_W: $w is not a Typer width (2..32 even, 48, 64)" >&2; exit 2 ;; esac ;;
+      h) case "$w" in 2|4|6|8|10|12|14|16|18|20|22|24|26|28|30|32|34|36|38|40|42|44|46|48|64) ;;
+           *) echo "DD_W: $w is not a Typer width (2..48 even, 64)" >&2; exit 2 ;; esac ;;
       *) echo "DD_W needs ENGINE v or h" >&2; exit 2 ;;
     esac
   done
