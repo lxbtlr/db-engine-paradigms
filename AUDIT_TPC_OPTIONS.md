@@ -1,5 +1,78 @@
 # Audit: VectorWise build options, over-tuning and TPC-H compliance
 
+## Revision 3 (2026-10-28, branch `query1`, uncommitted working tree)
+
+Scope: the semi-join split only. Everything else stands as in Revision 2.
+
+| item | Revision 2 verdict | now |
+|---|---|---|
+| `VW_JOIN_SEMI` | compliant (the mechanism); it was the range bitmap | **redefined**: the existence-only hash probe (`Hashjoin::joinSemi`, Typer's `Hashset::contains`): same hash table, stop at the first key match, no key-equality pass, no gather. No threshold, no data-dependent choice. **Compliant**; it is the parity form of the derived semi join |
+| `VW_JOIN_SEMI_MAX_BYTES` | machine-fitted constant (8 MiB, one Zen 4 sweep) | **removed**. The bitmap is `VW_JOIN_SEMI_BITMAP` and is used when it fits in L2 (`runtime::cacheBytes(2)`, sysfs): a hardware fact. The machines' semi sweeps (`joindispatchbench.csv`, `join_dispatch` runs) put every crossover between 2× L2 and L3/2, so L2 is below all four. CMake rejects a non-zero `VW_JOIN_SEMI_MAX_BYTES` |
+| `VW_JOIN_SEMI` without dispatch: 2^27-bit cap | arbitrary cap, note | **removed**: `VW_JOIN_SEMI_BITMAP` requires `VW_JOIN_DISPATCH` (CMake error otherwise) |
+
+Notes:
+- **The bitmap is not like-for-like with Typer.** It is compliant by the plan-facts rule, but `jd_all` leaves it off; `jd_semi` and the ladder rung `beyond_bitmap` turn it on.
+- **Primary keys are still declared, not enforced** (Revision 2 note). The existence probe, like the bitmap, emits a probe row once, so duplicate build keys would drop rows from Q3/Q5/Q9's inner joins.
+- **Compliant list (Revision 2, "Join probe"):** read `VW_JOIN_SEMI` as the existence probe, and add `VW_JOIN_SEMI_BITMAP` (hardware fact; outside the like-for-like comparison).
+
+---
+
+## Revision 2 (2026-10-04, HEAD `23e4dcd`)
+
+Scope: every CMake option that changes which code a query or operator runs, at `23e4dcd`. That excludes build-only options: `COMPILER*`, `DATADIR`, `CANARY_IN_BENCH`, `HARDWARE_BENCHMARKS`, `AVX512EXPERIMENTS`, `GTEST_SOURCE_DIR`, `PGO`.
+
+Judged by the rule now in force, plan facts only:
+- a code path may be chosen from static plan structure, a build summary measured by the engine itself (row count, key range, structure sizes), or a hardware fact read from the machine;
+- it may not be chosen from per-vector data, from constants fitted to one query, or from knowledge of the data or of query parameters.
+
+The spec basis is unchanged from Revision 1 (below): general knowledge, not the spec text.
+
+### What changed since Revision 1
+
+| item | Revision 1 verdict | now |
+|---|---|---|
+| `semi()` markers, Q3/Q5/Q9 | TPC-invalid (asserted, undeclared uniqueness) | **fixed**: TPC-H primary keys declared on `Relation` (`Import.cpp`); `QueryBuilder::uniqueBuild` derives uniqueness through selections and group-by keys; `semi()` throws if not derivable (`src/test/tpch.cpp` tests both ways) |
+| `VW_PROJ_DENSE`, `VW_PROJ_DENSE_WIDTH` | TPC-invalid (Q1-only, needs selectivity) | **removed** (`2d913ac`) |
+| `HYPER_Q1_DIRECT_AGG`, `HYPER_Q1_SIMD` | TPC-invalid (hard-coded `l_returnflag` domain) | **removed** (`6eacad2`) |
+| dispatch Bloom threshold | `VW_JOIN_BLOOM_MIN_KEYS` (4096, chosen around Q18) | hardware fact: directory ≥ L1 data cache (sysfs) (`23e4dcd`); `MIN_KEYS` only if the cache size is unknown |
+
+### Still not compliant with the rule
+
+| option | what it keys on | verdict | fix |
+|---|---|---|---|
+| `VW_Q9_FIELD_ORDER` | names Q9; reorders one join's payload in `q9.cpp:292-306` | **query-specific, TPC-invalid as is**; no config enables it | delete it, or let the builder order payload fields by alignment for every join (`VW_JOIN_ALIGN_FIELDS` already exists) |
+| `VW_JOIN_BLOOM` **without** `VW_JOIN_DISPATCH` | per-vector pass rate: > 50% pass skips the filter for 31 vectors (`Operators.cpp:1054`, `:1169`); `MIN_KEYS` = 4096 | **breaks the plan-facts rule** (data-driven per vector; constants fitted). TPC-wise acceptable (general run-time adaptation), so: over-tuned, not invalid | use `VW_JOIN_DISPATCH` (which replaces both), or retire the standalone filter configs (`join_bloom`, `nj_bloom`, `join_fused`, `join_all`) once the dispatch configs are confirmed |
+| `VW_JOIN_SEMI_MAX_BYTES` (now default 0: bitmap off; opt-in via `jd_semi` at 8 MiB) | 8 MiB, the crossover of one Zen 4 sweep (`Operators.cpp:1666`) | **machine-fitted constant**; changes no SF1 decision (all marked bitmaps ≤ 0.7 MiB) | derive from cache size like the Bloom rule, once the machines' `semi` sweep rows (run `2026-10-04-joinvalid-2`, `joindispatchbench.csv`) show which level the crossover tracks |
+| `VW_JOIN_SEMI` without dispatch: 2^27-bit cap | arbitrary cap (`Operators.cpp:1668`) | note: not fitted, but its largest bitmaps sit where the bench shows the bitmap losing | same as above |
+| `VW_JOIN_TWOPHASE_MIN_SLOTS` | 4096 slots, justified by Q18's 57-key build (`Operators.cpp:206-214`) | note: query-motivated constant, not tightly fitted (TPC-H builds jump from 57 to ~10K) | express as directory ≥ L1, as the dispatch's Bloom rule does |
+| dispatch Bloom rule: L1 | hardware fact | OK by the rule; **evidence gap**: the competing-stream sweep crosses over near L2/4, not L1, so the filter is on for 32–256 KiB directories where the bench shows it 13–21% slower (on TPC-H: only Q9's supplier join, 128 KiB, 100% hits) | confirm with the machines' `bloom_size` rows |
+
+### Notes (compliant, with conditions)
+
+- **Declared primary keys are not enforced at load** (`Import.cpp`). If the spec requires declared constraints to be enforced (my recollection, Clause 1.4.x (?), unverified), the import should reject duplicates: one hash-set pass per keyed relation.
+- **`VW_GROUP_RUN_HEADS`.** Correct for any row order, no threshold. Its gain depends on lineitem's `l_orderkey` load order, so report results with the load order.
+- **`VW_GROUP_HAVING`.** `q18.cpp` branches on it, but both branches are the SQL's HAVING, written as a group-by output filter or as a `Select`. That is a plan-form choice, not query-specific engine code.
+- **`VW_JOIN_DISPATCH`'s `buildKeysSelected`.** A plan-structure proxy for "probes may miss". Its one TPC-H misfire (Q9 supplier, 100% hits) is now decided by the L1 rule too: still filtered.
+- **Environment switches** in `config.cpp` (`SIMDsel`, `SIMDhash`, `SIMDjoin`, `JoinBoncz`). Kernel choices by machine, not by query. OK.
+
+### Compliant (no change from Revision 1)
+
+Plan facts or hardware choices:
+- **Hashing:** `VW_USE_CRC32`, `VW_CRC32_FAST`, `VW_CRC32_VPCLMUL`, `VW_SIMD_HASH`, `VW_SIMD_HASH_GATHER`, `HASH_SIZE_32`.
+- **Group-by:** `VW_GROUP_DISPATCH`, `VW_GROUP_BATCH_CREATE`, `VW_GROUP_GLOBAL_DIRECT`, `VW_GROUP_NO_CONCAT`, `VW_SPILL_WORD_COPY`, `VW_AGGR_FUSED`, `VW_FUSE_HASH`, `VW_GROUP_AGGR`, `VW_GROUP_AGGR_SEL`.
+- **Selection:** `VW_SIMD_SEL` with `_GATHER`/`_COMPRESS`/`_UNROLL`/`_WIDTH`, `VW_SIMD_SEL_CHAR`, `VW_POS_16`.
+- **Join probe:** `VW_JOIN_PREFETCH` (+ `_DIST`), `VW_JOIN_SIMD`, `VW_NEW_JOIN` (+ `_FULL`), `VW_JOIN_FUSED_PROBE`, `VW_JOIN_SEMI` (the mechanism), `VW_JOIN_DISPATCH` (the structure).
+- **Join layout:** `VW_JOIN_ALIGN_FIELDS`, `VW_JOIN_ENTRY_PAD`, `VW_JOIN_SLIM_HEADER`.
+- **Execution:** `VECTORWISE_BRANCHING`, `AUTOVECTORIZE`, `INTERPRET_SEPARATE`, `MORSEL_SIZE`, `THREAD_PIN_PACKED`, `HUGE_2MB_MALLOC_HUGE`/`NO_HUGE_PAGES`, topology presets.
+
+### Ablation impact
+
+`join_valid` (`scripts/flag_ablation.sh`) contains no config with `VW_Q9_FIELD_ORDER`. It does contain standalone-Bloom configs (`join_bloom`, `nj_bloom`, `join_fused`, `join_all`): those are TPC-valid but use the per-vector switch the plan-facts rule excludes. For results under the strict rule, read `join_dispatch` / `jd_all` instead of `join_fused` / `join_all`.
+
+---
+
+## Revision 1 (superseded where Revision 2 differs)
+
 Date: 2026-10-04. Branch `query1`, HEAD `2b1cbdf` plus the uncommitted working tree (`VW_JOIN_DISPATCH`, `VW_JOIN_SEMI_MAX_BYTES`, `VW_GROUP_HAVING`). Follows `VW_OPTIONS.md` (2026-10-03, HEAD `6198f40`). That document describes what each option does; this one only judges the options.
 
 Scope:
@@ -19,7 +92,7 @@ Line numbers refer to the working tree as of this audit.
   - **`VW_PROJ_DENSE`.** It is opted into only by Q1's plan (`q1.cpp:386-411`, `:459-472`). It pays off only because Q1's date predicate keeps about 95–98% of rows. That is knowledge of the data and of the parameter range, used to pick a plan.
   - **`VW_Q9_FIELD_ORDER`.** Query-specific code: a macro that reorders one join's payload in Q9 only (`q9.cpp:292-308`). It is harmless because no recommended configuration enables it.
 - **Over-tuned to one machine (1):**
-  - **`VW_JOIN_SEMI_MAX_BYTES`** (8 MiB). It is the crossover point from one Zen 4 microbenchmark sweep (`JOIN_DISPATCH_STUDY.md:23-25,164`). At SF1 it changes no TPC-H decision, so it is not fitted to a query, but it is a constant taken from one machine.
+  - **`VW_JOIN_SEMI_MAX_BYTES`** (8 MiB). It is the crossover point from one Zen 4 microbenchmark sweep (`study/JOIN_DISPATCH_STUDY.md:23-25,164`). At SF1 it changes no TPC-H decision, so it is not fitted to a query, but it is a constant taken from one machine.
 - **Note (thresholds with reasonable motivation that should become hardware facts):**
   - `VW_JOIN_BLOOM_MIN_KEYS` and `VW_JOIN_TWOPHASE_MIN_SLOTS` (both 4096, both justified in comments by Q18's 57-key build);
   - the Bloom filter's adaptive skip (more than 50% of probes pass, then skip 31 vectors);
@@ -114,7 +187,7 @@ Option 1 matches the spec's model (declared constraints). Option 2 makes the mar
 
 **Evidence.**
 - `CMakeLists.txt:505` (default 8388608) and its use at `Operators.cpp:1651`.
-- Source of the value: `JOIN_DISPATCH_STUDY.md:23-25,152-164`. On Zen 4 the bitmap is 2–4× faster up to 8 MiB and 2× slower at 16 MiB. "The crossover moves with the cache sizes, so this default is to be checked per machine" (`:164`, `:112`).
+- Source of the value: `study/JOIN_DISPATCH_STUDY.md:23-25,152-164`. On Zen 4 the bitmap is 2–4× faster up to 8 MiB and 2× slower at 16 MiB. "The crossover moves with the cache sizes, so this default is to be checked per machine" (`:164`, `:112`).
 
 **Over-tuning: over-tuned (machine).** The constant is the crossover from one machine's microbenchmark. It is not fitted to a query: at SF1 every marked join's bitmap is at most about 0.7 MiB, so any cap above 1 MiB gives identical TPC-H decisions. It would start to matter around SF ≥ 12 for Q18, whose `o_orderkey` range grows with SF. That is the scaling regime where a machine-fitted number becomes a hidden scale-factor knob.
 
@@ -133,7 +206,7 @@ Option 1 matches the spec's model (declared constraints). Option 2 makes the mar
 **Over-tuning.**
 - The structure is good. It removes the per-vector adaptive switch and decides from plan facts plus a build summary. This is the "decision from general plan facts" category.
 - Two inherited constants: `VW_JOIN_BLOOM_MIN_KEYS` and `VW_JOIN_SEMI_MAX_BYTES` (see their sections).
-- The proxy "build keys read through a selection means probes may miss" (`JOIN_DISPATCH_STUDY.md:110,310`) is a *plan* fact, so it is general. It reflects what is typical of FK→PK joins with a filtered PK side, not any one query. Its known misfire is Q9 J3 (a filter it does not need, about 43K × ~1 ns), and the study documents it.
+- The proxy "build keys read through a selection means probes may miss" (`study/JOIN_DISPATCH_STUDY.md:110,310`) is a *plan* fact, so it is general. It reflects what is typical of FK→PK joins with a filtered PK side, not any one query. Its known misfire is Q9 J3 (a filter it does not need, about 43K × ~1 ns), and the study documents it.
 - In a hand-built plan, whether the author wrote the `sel` overload is itself a hand decision. In a real optimizer it would follow from "a filter under the build side", which is equivalent.
 
 **TPC verdict:** **OK**. Note: the per-vector adaptive version it replaces was also acceptable. This one is more deterministic.
@@ -149,7 +222,7 @@ Option 1 matches the spec's model (declared constraints). Option 2 makes the mar
 
 **Over-tuning: note.**
 - MIN_KEYS = 4096 was motivated by Q18, but the TPC-H build sizes at SF1 are either tiny (1 region, 5 nations, 57 orders) or at least about 10K. Any value from about 60 to about 10K gives the same decisions, so 4096 is not fitted to a measured edge. Conceptually it is "the build's directory is L1/L2-resident, so a filter cannot save a miss": a hardware fact stated as a key count.
-- The 50% pass rate and the 31-vector skip are an untuned cost-model guess. They react to observed run-time data, which is the normal adaptive-execution design (Vectorwise, Umbra and others do similar), and are not tied to a query's measured hit rate. The study shows the always-on filter loses at 90–100% hits (`JOIN_DISPATCH_STUDY.md:27,182`), so 50% is conservative rather than fitted.
+- The 50% pass rate and the 31-vector skip are an untuned cost-model guess. They react to observed run-time data, which is the normal adaptive-execution design (Vectorwise, Umbra and others do similar), and are not tied to a query's measured hit rate. The study shows the always-on filter loses at 90–100% hits (`study/JOIN_DISPATCH_STUDY.md:27,182`), so 50% is conservative rather than fitted.
 
 **TPC verdict:** OK.
 
@@ -184,7 +257,7 @@ Option 1 matches the spec's model (declared constraints). Option 2 makes the mar
 
 **Over-tuning: note.**
 - No threshold and no data-dependent branch. It replaces `VW_GROUP_LAST_MATCH`, whose ≥70% switch was a constant fitted between Q1 (64%) and Q18 (75%). The removal fixed a real over-tuning issue.
-- The *size* of the gain depends on a data property: dbgen emits lineitem in `l_orderkey` order, so Q18's group-by sees about 75% repeats (`VW_OPPORTUNITY_STUDY.md:139,216`). On a shuffled lineitem the run pass is pure overhead, unmeasured but at most one compare plus a flag per row.
+- The *size* of the gain depends on a data property: dbgen emits lineitem in `l_orderkey` order, so Q18's group-by sees about 75% repeats (`study/VW_OPPORTUNITY_STUDY.md:139,216`). On a shuffled lineitem the run pass is pure overhead, unmeasured but at most one compare plus a flag per row.
 
 **TPC verdict: OK.** Being faster on clustered input, without depending on it for correctness, is standard: run-length aware aggregation, and Vectorwise and others exploit clustering. TPC-H also permits some physical clustering (Clause 1.5.x (?); exact limits not recalled). The benchmark report should state that the measured gain assumes the dbgen load order.
 
