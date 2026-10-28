@@ -62,6 +62,10 @@ OPTION(CPU_LAYOUT_CONTIGUOUS "Contiguous CPU numbering per node (vs interleaved)
 set(SOCKETS_COUNT 4 CACHE STRING "Number of sockets/chiplets/memory domains")
 set(CORES_PER_SOCKET 22 CACHE STRING "Physical cores per socket/chiplet")
 set(SMT_PER_CORE 2 CACHE STRING "Hardware threads per physical core")
+# NUM_REGIONS: regions NUMA_SHARD / NUMA_ALLOC place data by (0 = one per
+# socket). More regions than sockets splits sockets into L3 domains (CCDs,
+# e.g. roquefort: -DNUM_REGIONS=4 -DCPU_LAYOUT_CONTIGUOUS=ON).
+set(NUM_REGIONS 0 CACHE STRING "Data placement regions (0 = SOCKETS_COUNT)")
 
 if(TARGET_MACHINE STREQUAL "dubliner")
   # 4-socket Xeon, 22 cores/socket, 2-way SMT, interleaved CPU numbering
@@ -112,7 +116,14 @@ ENDIF()
 ADD_DEFINITIONS(-DCFG_SOCKETS_COUNT=${SOCKETS_COUNT})
 ADD_DEFINITIONS(-DCFG_CORES_PER_SOCKET=${CORES_PER_SOCKET})
 ADD_DEFINITIONS(-DCFG_SMT_PER_CORE=${SMT_PER_CORE})
-message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T  contiguous=${CPU_LAYOUT_CONTIGUOUS}")
+if(NUM_REGIONS EQUAL 0)
+  set(EFFECTIVE_NUM_REGIONS ${SOCKETS_COUNT})
+else()
+  set(EFFECTIVE_NUM_REGIONS ${NUM_REGIONS})
+  # Concurrency.hpp defaults CFG_NUM_REGIONS to the socket count
+  ADD_DEFINITIONS(-DCFG_NUM_REGIONS=${NUM_REGIONS})
+endif()
+message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T  regions=${EFFECTIVE_NUM_REGIONS}  contiguous=${CPU_LAYOUT_CONTIGUOUS}")
 OPTION(NO_HUGE_PAGES "Disable huge pages for malloc_huge" OFF)
 OPTION(HUGE_2MB_MALLOC_HUGE "Use 2MB hugetlb pages for malloc_huge" OFF)
 set(MORSEL_SIZE 10000 CACHE STRING "Morsel size for parallel scan loops")

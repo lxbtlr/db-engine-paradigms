@@ -29,11 +29,28 @@ namespace runtime {
 #define CFG_SMT_PER_CORE 2
 #endif
 
+#ifndef CFG_NUM_REGIONS
+#define CFG_NUM_REGIONS CFG_SOCKETS_COUNT
+#endif
+
 constexpr size_t SOCKETS_COUNT = CFG_SOCKETS_COUNT;
 constexpr size_t CORES_PER_SOCKET = CFG_CORES_PER_SOCKET;
 constexpr size_t SMT_PER_CORE = CFG_SMT_PER_CORE;
-constexpr size_t NUM_NUMA_REGIONS = SOCKETS_COUNT;
+/// Regions are what NUMA_SHARD / NUMA_ALLOC place data and schedule by: the
+/// sockets by default, or sub-socket L3 domains (CCDs) with NUM_REGIONS >
+/// SOCKETS_COUNT, which needs CPU_LAYOUT_CONTIGUOUS.
+constexpr size_t NUM_NUMA_REGIONS = CFG_NUM_REGIONS;
 constexpr size_t THREADS_PER_SOCKET = CORES_PER_SOCKET * SMT_PER_CORE;
+constexpr size_t PHYSICAL_CORES = SOCKETS_COUNT * CORES_PER_SOCKET;
+constexpr size_t CORES_PER_REGION = PHYSICAL_CORES / NUM_NUMA_REGIONS;
+constexpr bool SUB_SOCKET_REGIONS = NUM_NUMA_REGIONS > SOCKETS_COUNT;
+static_assert(NUM_NUMA_REGIONS % SOCKETS_COUNT == 0 &&
+                  CORES_PER_SOCKET % (NUM_NUMA_REGIONS / SOCKETS_COUNT) == 0,
+              "regions must split each socket's cores evenly");
+#ifndef CPU_LAYOUT_CONTIGUOUS
+static_assert(!SUB_SOCKET_REGIONS,
+              "sub-socket regions need CPU_LAYOUT_CONTIGUOUS");
+#endif
 
 /// Map a thread id to the CPU id it should be pinned to.
 /// Two layouts:
@@ -46,8 +63,25 @@ constexpr size_t THREADS_PER_SOCKET = CORES_PER_SOCKET * SMT_PER_CORE;
 ///   Contiguous (CPU_LAYOUT_CONTIGUOUS): CPU c -> node (c / THREADS_PER_SOCKET)
 ///     thread i in packed mode: cpu = i  (contiguous blocks already match)
 ///     thread i in spread mode: cpu = (i % SOCKETS_COUNT) * TPS + (i / SOCKETS_COUNT)
+///   Contiguous with sub-socket regions (NUM_REGIONS > SOCKETS_COUNT): a
+///   region is a block of CORES_PER_REGION cores, and a socket's SMT siblings
+///   follow its primaries (CPU s*TPS + smt*C + core), as on roquefort's CCDs
+///     packed: the physical cores of region 0, then of region 1, ...; SMT
+///       siblings only from thread P on, in the same order
+///     spread: round-robin across regions, physical cores before siblings
 inline size_t cpuOfThread(size_t tid) {
 #if defined(CPU_LAYOUT_CONTIGUOUS)
+   if constexpr (SUB_SOCKET_REGIONS) {
+#ifdef THREAD_PIN_PACKED
+      size_t smt = tid / PHYSICAL_CORES, core = tid % PHYSICAL_CORES;
+#else
+      size_t region = tid % NUM_NUMA_REGIONS, j = tid / NUM_NUMA_REGIONS;
+      size_t smt = j / CORES_PER_REGION;
+      size_t core = region * CORES_PER_REGION + j % CORES_PER_REGION;
+#endif
+      return core / CORES_PER_SOCKET * THREADS_PER_SOCKET +
+             smt * CORES_PER_SOCKET + core % CORES_PER_SOCKET;
+   }
 #ifdef THREAD_PIN_PACKED
    return tid;
 #else
@@ -58,10 +92,9 @@ inline size_t cpuOfThread(size_t tid) {
 #endif
 #else // Interleaved (default)
 #ifdef THREAD_PIN_PACKED
-   constexpr size_t physical = SOCKETS_COUNT * CORES_PER_SOCKET;
-   size_t smt = tid / physical, t = tid % physical;
+   size_t smt = tid / PHYSICAL_CORES, t = tid % PHYSICAL_CORES;
    size_t socket = t / CORES_PER_SOCKET, core = t % CORES_PER_SOCKET;
-   return smt * physical + core * SOCKETS_COUNT + socket;
+   return smt * PHYSICAL_CORES + core * SOCKETS_COUNT + socket;
 #else
    return tid;
 #endif
@@ -77,35 +110,68 @@ inline size_t nodeOfCpu(size_t cpu) {
 #endif
 }
 
-/// Map a thread id to its NUMA region (convenience: nodeOfCpu(cpuOfThread(tid))).
+/// Map a CPU id to its region (its node, or its CCD with sub-socket regions).
+inline size_t regionOfCpu(size_t cpu) {
+   if constexpr (SUB_SOCKET_REGIONS) {
+      size_t socket = cpu / THREADS_PER_SOCKET;
+      size_t core = cpu % THREADS_PER_SOCKET % CORES_PER_SOCKET;
+      return (socket * CORES_PER_SOCKET + core) / CORES_PER_REGION;
+   }
+   return nodeOfCpu(cpu);
+}
+
+/// The NUMA node that holds a region's memory.
+inline size_t nodeOfRegion(size_t region) {
+   return region / (NUM_NUMA_REGIONS / SOCKETS_COUNT);
+}
+
+/// Map a thread id to its region (convenience: regionOfCpu(cpuOfThread(tid))).
 inline size_t regionOf(size_t tid) {
+   if constexpr (SUB_SOCKET_REGIONS) {
+#ifdef THREAD_PIN_PACKED
+      return tid % PHYSICAL_CORES / CORES_PER_REGION;
+#else
+      return tid % NUM_NUMA_REGIONS;
+#endif
+   }
 #if defined(THREAD_PIN_PACKED) && defined(CPU_LAYOUT_CONTIGUOUS)
    return tid / THREADS_PER_SOCKET;
 #elif defined(THREAD_PIN_PACKED)
-   return tid % (SOCKETS_COUNT * CORES_PER_SOCKET) / CORES_PER_SOCKET;
+   return tid % PHYSICAL_CORES / CORES_PER_SOCKET;
 #else
    return tid % SOCKETS_COUNT;
 #endif
 }
 
-/// Count how many distinct NUMA regions are occupied by nrThreads threads.
-inline size_t activeRegions(size_t nrThreads) {
+/// Rank of a thread among the threads of its region, in thread id order:
+/// the number of lower thread ids with the same regionOf. Work stealing
+/// (NUMA_SHARD) uses it to stagger the steal order of a region's threads.
+inline size_t rankInRegion(size_t tid) {
+   if constexpr (SUB_SOCKET_REGIONS) {
 #ifdef THREAD_PIN_PACKED
-   // Packed: fill one socket before moving to next (interleaved layout: its
-   // physical cores; contiguous: all its hardware threads)
-#ifdef CPU_LAYOUT_CONTIGUOUS
-   constexpr size_t perSocket = THREADS_PER_SOCKET;
+      return tid / PHYSICAL_CORES * CORES_PER_REGION +
+             tid % PHYSICAL_CORES % CORES_PER_REGION;
 #else
-   constexpr size_t perSocket = CORES_PER_SOCKET;
+      return tid / NUM_NUMA_REGIONS;
 #endif
-   size_t full = nrThreads / perSocket;
-   size_t partial = (nrThreads % perSocket) > 0 ? 1 : 0;
-   size_t n = full + partial;
-   return n < NUM_NUMA_REGIONS ? n : NUM_NUMA_REGIONS;
+   }
+#if defined(THREAD_PIN_PACKED) && defined(CPU_LAYOUT_CONTIGUOUS)
+   return tid % THREADS_PER_SOCKET;
+#elif defined(THREAD_PIN_PACKED)
+   return tid / PHYSICAL_CORES * CORES_PER_SOCKET +
+          tid % PHYSICAL_CORES % CORES_PER_SOCKET;
 #else
-   // Spread: round-robin across sockets
-   return nrThreads < NUM_NUMA_REGIONS ? nrThreads : NUM_NUMA_REGIONS;
+   return tid / SOCKETS_COUNT;
 #endif
+}
+
+/// Count how many distinct regions are occupied by nrThreads threads.
+inline size_t activeRegions(size_t nrThreads) {
+   bool used[NUM_NUMA_REGIONS] = {};
+   size_t n = 0;
+   for (size_t t = 0; t < nrThreads && n < NUM_NUMA_REGIONS; ++t)
+      if (!used[regionOf(t)]) used[regionOf(t)] = true, ++n;
+   return n;
 }
 
 class Worker;
