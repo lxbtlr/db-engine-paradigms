@@ -11,14 +11,15 @@
 # vtune_q1.sh settings (SF, THREADS, CONFIGS, OUT, ...) pass through --export.
 #
 # Environment:
-#   VTUNE_VARS  VTune's env/vars.sh. Default per host: dubliner uses 2025.3
-#               (2025.8 does not recognise its Cascade Lake CPU), elsewhere
+#   VTUNE_VARS  VTune's env/vars.sh. Default per host: dubliner and manchego
+#               use 2025.3 in ~/intel (2025.8 does not recognise dubliner's
+#               Cascade Lake CPU; manchego has no /opt install), elsewhere
 #               /opt/intel/oneapi/vtune/latest
 #   REPO        ${SLURM_SUBMIT_DIR:-$PWD}   the checkout to run
 set -u -o pipefail
 
 case "$(hostname -s 2> /dev/null || hostname)" in
-  dubliner) DEF_VARS=/home/alexb/intel/oneapi/vtune/2025.3/env/vars.sh ;;
+  dubliner|manchego) DEF_VARS=/home/alexb/intel/oneapi/vtune/2025.3/env/vars.sh ;;
   *) DEF_VARS=/opt/intel/oneapi/vtune/latest/env/vars.sh ;;
 esac
 VTUNE_VARS=${VTUNE_VARS:-$DEF_VARS}
