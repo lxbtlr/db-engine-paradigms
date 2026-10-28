@@ -456,6 +456,9 @@ struct PerfEvents {
             named("stall-l3", "cycle_activity.stalls_l3_miss");
          } else if (g == "G2b") {
             named("stall-mem", "cycle_activity.stalls_mem_any");
+            // store buffer full: as SPR's G2b, and the allocation stalls on it
+            named("bound-stores", "exe_activity.bound_on_stores");
+            named("sb-full", "resource_stalls.sb");
          } else if (g == "G3a") {
             named("l1d-pend", "l1d_pend_miss.pending"); // counter-restricted
          } else if (g == "G3b") {
@@ -564,6 +567,9 @@ struct PerfEvents {
                   "de_dis_dispatch_token_stalls1.load_queue_rsrc_stall");
             named("retire-stall",
                   "de_dis_dispatch_token_stalls2.retire_token_stall");
+         } else if (g == "G2b") { // store queue full (cf. SPR/CLX bound-stores)
+            named("stq-stall",
+                  "de_dis_dispatch_token_stalls1.store_queue_rsrc_stall");
          } else if (g == "G4") {
             named("st-fwd", "ls_stlf");
             named("st-fwd-block", "ls_bad_status2.stli_other");
