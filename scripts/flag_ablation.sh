@@ -158,10 +158,11 @@
 #                        the timing; <compiler>_<config>/perf_q<N>.txt
 #                        (PERF_KEEP=1 keeps perf.data)
 #   PERF_GROUP ""        G0..G8, G3a, G3b (+ G1b G2b G4b G5b G6b G8b on
-#                        Cascade Lake / Zen 3): run_tpch counts that group
-#                        (cycles + instr. + the group, scheduled together,
-#                        with a <event>.run column) instead of the default
-#                        counters; see PMU_EVENT_GROUPS.md
+#                        Cascade Lake / Zen 3, G2b on Sapphire Rapids):
+#                        run_tpch counts that group (cycles + instr. + the
+#                        group, scheduled together, with a <event>.run
+#                        column) instead of the default counters; see
+#                        PMU_EVENT_GROUPS.md
 #   Each of these that differs from its default is appended to the config
 #   name: <config>[_autovec][_x<hash>][_e<engine>][_t<threads>][_v<size>]
 #   [_sf<SF>][_cpu<N>][_simdhash<0|1>]...[_pg<group>][_w<W>[i]], so results and database entries

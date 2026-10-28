@@ -504,6 +504,13 @@ struct PerfEvents {
             named("stall-l1d", "memory_activity.stalls_l1d_miss");
             named("stall-l2", "memory_activity.stalls_l2_miss");
             named("stall-l3", "memory_activity.stalls_l3_miss");
+         } else if (g == "G2b") {
+            // the memory-bound split: stalls with the store buffer full
+            // (TMA Store_Bound) or a load pending (L1 hits included)
+            named("stall-total", "cycle_activity.stalls_total");
+            named("bound-stores", "exe_activity.bound_on_stores");
+            named("bound-loads", "exe_activity.bound_on_loads");
+            named("stall-l1d", "memory_activity.stalls_l1d_miss");
          } else if (g == "G3a") {
             named("l1d-pend", "l1d_pend_miss.pending");
          } else if (g == "G3b") {
