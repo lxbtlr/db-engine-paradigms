@@ -477,16 +477,34 @@ if(VW_JOIN_FUSED_PROBE)
   message(STATUS "Building with VW_JOIN_FUSED_PROBE")
 endif()
 
-# VW_JOIN_SEMI: VectorWise Hashjoins the plan marks semi
-# (HashJoinBuilder::semi(): Q18's IN subquery, and the primary-key inner
-# joins Q3 customer, Q5 region, Q9 part, rewritten to semi joins as Hyper's
-# plans do) with one int32 key per side build an exact bitmap over the build
-# keys' range and filter probe vectors with it (AVX-512), skipping probe
-# hashing, the hash table probe, key equality and gather. Unmarked joins are
-# unchanged. Marked joins assume unique build keys (see semi()).
-OPTION(VW_JOIN_SEMI "Bitmap semi join for VectorWise hash joins the plan marks semi" OFF)
+# VW_JOIN_SEMI: VectorWise Hashjoins the plan derives as semi joins
+# (~HashJoinBuilder: unique build keys, no build column used; Q18's IN
+# subquery, and the primary-key inner joins Q3 customer, Q5 region, Q9 part,
+# which Hyper's plans run as Hashset::contains) with one int32 key per side
+# probe the hash table for existence only, as Hashset::contains does: walk
+# the chain, compare hash and key inline, stop at the first match, emit the
+# probe row once. No key equality pass, no gather. The same hash table,
+# hash and probe hashing as the inner join; other joins are unchanged.
+# Without it a marked join runs as an inner join (equal result, the chain is
+# walked to its end). Marked joins assume unique build keys (see semi()).
+OPTION(VW_JOIN_SEMI "Existence-only hash probe (Hashset::contains) for joins the plan derives as semi" OFF)
 if(VW_JOIN_SEMI)
   ADD_DEFINITIONS(-DVW_JOIN_SEMI=1)
+endif()
+
+# VW_JOIN_SEMI_BITMAP: a semi join (above) whose build key range fits in the
+# L2 cache as a bitmap (one bit per key in [min, max]; L2 of cpu0 from sysfs,
+# runtime::cacheBytes(2); unknown L2: no bitmap) is probed through that
+# bitmap instead of the hash table (AVX-512: range check and bit test, 16
+# keys per step): no probe hashing, directory, chain or key check. Typer's
+# plans have no such structure, so it is an engine option outside the
+# like-for-like comparison. L2 is the level below every machine's measured
+# crossover (run_joindispatchbench semi sweep: the bitmap still wins at L2 on
+# all four and loses from 2x L2 to L3/2). Needs VW_JOIN_DISPATCH, which owns
+# the decision. Replaces VW_JOIN_SEMI_MAX_BYTES (removed).
+OPTION(VW_JOIN_SEMI_BITMAP "Semi joins through a build-key bitmap when it fits in L2 (needs VW_JOIN_DISPATCH)" OFF)
+if(DEFINED VW_JOIN_SEMI_MAX_BYTES AND NOT "${VW_JOIN_SEMI_MAX_BYTES}" STREQUAL "0")
+  message(FATAL_ERROR "VW_JOIN_SEMI_MAX_BYTES was removed: use VW_JOIN_SEMI_BITMAP=ON (bitmap <= L2)")
 endif()
 
 # VW_JOIN_DISPATCH: Hashjoin resolves its probe path once per operator, at the
@@ -496,18 +514,16 @@ endif()
 # probe vector instead of today's per-vector checks. It compiles in and
 # chooses between the paths VW_JOIN_SEMI, VW_JOIN_BLOOM and
 # VW_JOIN_FUSED_PROBE add separately (see study/JOIN_DISPATCH_STUDY.md):
-#   semi bitmap  derived semi join, one int32 key per side, bitmap
-#                <= VW_JOIN_SEMI_MAX_BYTES. Default 0: OFF, no semi join is a
-#                bitmap candidate (no key-range scan); the bitmap is a data
-#                structure Typer's plans do not get, so it is opt-in
-#                (VW_JOIN_SEMI alone keeps its 16 MiB cap)
+#   semi         derived semi join, one int32 key per side: the existence
+#                probe on the hash path (VW_JOIN_SEMI), after the filter if
+#                one is chosen; with VW_JOIN_SEMI_BITMAP the bitmap instead
+#                when it fits in L2
 #   Bloom filter the directory is at least the L1 size (runtime::cacheBytes;
 #                VW_JOIN_BLOOM_MIN_KEYS rows if L1 is unknown) and the build
 #                keys are read through a selection (a filtered build side);
 #                fixed for the operator (no per-vector adaptive switch)
 #   fused hash   one int32 probe key, with the filter or VW_NEW_JOIN
 OPTION(VW_JOIN_DISPATCH "Plan-resolved probe path per VectorWise Hashjoin (compiles in VW_JOIN_SEMI, VW_JOIN_BLOOM, VW_JOIN_FUSED_PROBE)" OFF)
-set(VW_JOIN_SEMI_MAX_BYTES 0 CACHE STRING "VW_JOIN_DISPATCH: largest semi bitmap in bytes (0 = no bitmap)")
 if(VW_JOIN_DISPATCH)
   if(HASH_SIZE_32)
     message(FATAL_ERROR "VW_JOIN_DISPATCH needs 64-bit hashes (HASH_SIZE_32 is ON)")
@@ -518,9 +534,17 @@ if(VW_JOIN_DISPATCH)
   ADD_DEFINITIONS(-DVW_JOIN_DISPATCH=1 -DVW_JOIN_SEMI=1 -DVW_JOIN_BLOOM=1
                   -DVW_JOIN_BLOOM_BITS=${VW_JOIN_BLOOM_BITS}
                   -DVW_JOIN_BLOOM_MIN_KEYS=${VW_JOIN_BLOOM_MIN_KEYS}
-                  -DVW_JOIN_FUSED_PROBE=1
-                  -DVW_JOIN_SEMI_MAX_BYTES=${VW_JOIN_SEMI_MAX_BYTES})
-  message(STATUS "Building with VW_JOIN_DISPATCH (semi bitmap <= ${VW_JOIN_SEMI_MAX_BYTES} B)")
+                  -DVW_JOIN_FUSED_PROBE=1)
+  message(STATUS "Building with VW_JOIN_DISPATCH")
+endif()
+# VW_JOIN_SEMI_BITMAP (above): its own block, so the dispatch block's
+# defines stay what dispatch implies (scripts/attribution.py reads them)
+if(VW_JOIN_SEMI_BITMAP)
+  if(NOT VW_JOIN_DISPATCH)
+    message(FATAL_ERROR "VW_JOIN_SEMI_BITMAP needs VW_JOIN_DISPATCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_SEMI_BITMAP=1)
+  message(STATUS "Building with VW_JOIN_SEMI_BITMAP (semi bitmap when it fits in L2)")
 endif()
 
 # VW_GROUP_HAVING: HashGroupBuilder::having(input, condition, selection)

@@ -507,8 +507,8 @@ inline size_t bloom_filter(size_t n, const uint64_t* RES hashes,
    return m;
 }
 
-//--- Hashjoin semi bitmap probe (engine: Operators.cpp:918 semiProbe,
-// VW_JOIN_SEMI; guard __AVX512F__ && !VW_POS_16) -----------------------------
+//--- Hashjoin semi bitmap probe (engine: Operators.cpp:975 semiProbe,
+// VW_JOIN_SEMI_BITMAP; guard __AVX512F__ && !VW_POS_16) -----------------------------
 // Dense probe keys: probe positions i with keys[i] - lo in [0, span] and its
 // bit set -> out (store-overwrite). Word loads are scalar from a clamped
 // offset, the range check, bit test and compress are NEON.
@@ -654,7 +654,7 @@ inline pos_t sve_proj_dense_multiplies(pos_t n, pos_t* RES inSel,
 // Operators.cpp:1114 fusedHashFilter         VW_JOIN_FUSED_PROBE  REWORK scalar fused loop
 //                                                                 (crc32cx + filter, no hash
 //                                                                 vector written)
-// Operators.cpp:918 semiProbe (AVX512F)      VW_JOIN_SEMI         SCALAR (+ prefetch for
+// Operators.cpp:975 semiProbe (AVX512F)     VW_JOIN_SEMI_BITMAP  SCALAR (+ prefetch for
 //                                                                 bitmaps > L2)
 // Operators.cpp:1259 joinNewFirstPass        VW_NEW_JOIN          REWORK block-8 scalar loop +
 //                                                                 group prefetch

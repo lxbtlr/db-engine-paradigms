@@ -161,8 +161,9 @@ def pairs(builds, implies):
                     continue
                 added = b["atoms"] - a["atoms"]
                 out.append((a, b, label(added, set(), implies), sorted(added)))
-        # value changes: one define with another value (jd_all -> jd_semi:
-        # VW_JOIN_SEMI_MAX_BYTES=0 -> 8388608); A is the smaller value
+        # value changes: one define with another value (VW_JOIN_BLOOM_BITS=16
+        # -> 8; before 2026-10-28 also jd_all -> jd_semi, VW_JOIN_SEMI_MAX_BYTES
+        # 0 -> 8388608); A is the smaller value
         key = lambda atom: atom.split("=")[0]
         for a in g:
             for b in g:

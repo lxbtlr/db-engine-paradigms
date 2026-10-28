@@ -878,15 +878,64 @@ inline __attribute__((always_inline)) void compressStore64(void* dst, __mmask8 m
 // are inner joins on a primary key whose build side contributes no columns,
 // rewritten to semi joins as Hyper's plans do (Hashset::contains). Unmarked
 // joins always stay inner joins. Inner and semi join agree only because the
-// marked joins' build keys are unique, the assumption semi() documents: this
-// bitmap emits a probe row at most once, the hash path once per match.
-// For one int32 key per side,
-// the build keys' range [min, max] gets an exact bitmap (built after the
-// hash table, at most 2^27 keys = 16 MB; Q3's customer keys ~19 KB, Q18's 57
-// orders over ~6M order keys ~750 KB); a probe vector is then filtered with
-// a range check and one bit test per key (AVX-512: 16 keys per step) into
+// marked joins' build keys are unique, the assumption semi() documents.
+// For one int32 key per side, joinSemi is Hashset::contains per probe: walk
+// the chain of the probe hash, compare hash and key inline, stop at the
+// first match and emit the probe row once. The probe hashes (and a Bloom
+// filter's survivors) come from the probe step as for the inner join; key
+// equality and gather are not run (the key was compared, nothing to gather).
+// One output row per probe at most, so a probe vector always fits the
+// output (batchSize is the vector size) and needs no continuation.
+template <bool Sel> pos_t Hashjoin::joinSemiImpl() {
+   const int32_t* keys = static_cast<const int32_t*>(
+       Sel ? semiProbeSel->param2 : semiProbeDense->param1);
+   const pos_t* ksel =
+       Sel ? static_cast<const pos_t*>(semiProbeSel->outputSelectionV) : nullptr;
+   const size_t keyOffset = semiKeyOffset;
+   auto& ht = shared.ht;
+   size_t found = 0;
+#ifdef VW_JOIN_BLOOM
+   // only the probes that passed the Bloom filter (all, when it is off)
+   const pos_t* cand = bloomSel.data();
+   const bool bf = bloomOn;
+   for (size_t k = 0, end = bf ? bloomCount : cont.numProbes; k < end; ++k) {
+      const size_t i = bf ? cand[k] : k;
+#else
+   for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
+#endif
+      const auto hash = probeHashes[i];
+      const pos_t p = Sel ? ksel[i] : pos_t(i);
+      const int32_t key = keys[p];
+      for (auto entry = ht.find_chain_tagged(hash); entry != ht.end();
+           entry = entry->next) {
+         if (entry->hash != hash) continue;
+         int32_t k;
+         std::memcpy(&k, reinterpret_cast<const char*>(entry) + keyOffset,
+                     sizeof(k));
+         if (k == key) {
+            buildMatches[found] = entry;
+            probeMatches[found++] = p;
+            break;
+         }
+      }
+   }
+   cont.nextProbe = cont.numProbes;
+   return found;
+}
+
+pos_t Hashjoin::joinSemi() {
+   return semiProbeSel ? joinSemiImpl<true>() : joinSemiImpl<false>();
+}
+#endif // VW_JOIN_SEMI
+
+#ifdef VW_JOIN_SEMI_BITMAP
+// VW_JOIN_SEMI_BITMAP: for a semi join that qualifies for joinSemi, the
+// build keys' range [min, max] gets an exact bitmap when it fits in L2
+// (built after the hash table; Q3's customer keys ~19 KB, Q18's 57 orders
+// over ~6M order keys ~750 KB); a probe vector is then filtered with a range
+// check and one bit test per key (AVX-512: 16 keys per step) into
 // probeMatches. The probe hash pass, directory, chains, key equality and
-// gather are all skipped. Other joins keep the hash path.
+// gather are all skipped. Typer has no such structure: an engine option.
 void Hashjoin::semiRange() {
    int64_t lo = INT64_MAX, hi = INT64_MIN;
    for (auto& block : allocations) {
@@ -971,7 +1020,7 @@ pos_t Hashjoin::semiProbe(size_t n) {
    }
    return found;
 }
-#endif // VW_JOIN_SEMI
+#endif // VW_JOIN_SEMI_BITMAP
 
 #ifdef VW_JOIN_BLOOM
 // VW_JOIN_BLOOM: a Bloom filter owned by this VectorWise join, in front of
@@ -1555,7 +1604,7 @@ pos_t Hashjoin::joinBoncz() {
 // the probe hash is fused (fusedReady), whether the Bloom filter runs (its
 // adaptive skip counter) and whether the join is VW_NEW_JOIN (pointer
 // compares). Everything those depend on is fixed once the build is done:
-//   plan facts       semi marker, key count/types (semiCandidate,
+//   plan facts       semi marker, key count/types (semiKeysOk,
 //                    fusedReady), build keys through a selection
 //                    (buildKeysSelected), the join function
 //   build summary    directory size (filter allocated iff >= the L1 data
@@ -1567,7 +1616,8 @@ pos_t Hashjoin::joinBoncz() {
 //   filter           stepHashBloom   probe hash expression, then filter
 //   neither          stepHash        probe hash expression
 // The filter stays on for the whole operator: no data-dependent switch.
-// semiActive (the bitmap path) is decided by the build, as without dispatch.
+// semiActive (VW_JOIN_SEMI_BITMAP: the bitmap path) and semiHash (the
+// existence probe) are decided by the build, as without dispatch.
 void Hashjoin::resolvePaths() {
    bloomOn = false;
    fusedCompute = false;
@@ -1581,7 +1631,7 @@ void Hashjoin::resolvePaths() {
 #endif
    if (fused && bloom) {
       probeStep = &Hashjoin::stepFusedBloom;
-   } else if (fused && newJoin) {
+   } else if (fused && newJoin && !semiHash) { // joinSemi reads probeHashes
       probeStep = &Hashjoin::stepFusedNew;
       fusedCompute = true;
    } else if (bloom) {
@@ -1594,11 +1644,16 @@ void Hashjoin::resolvePaths() {
    if (trace && runtime::this_worker->worker_id == 0)
       std::fprintf(stderr,
                    "vw join %p: build=%zu dirKiB=%zu L1KiB=%zu keysSelected=%d "
-                   "semi=%d semiBitmap=%d bloom=%d fused=%d newJoin=%d step=%s\n",
+                   "semi=%d semiHash=%d semiBitmap=%d bloom=%d fused=%d newJoin=%d step=%s\n",
                    static_cast<void*>(this), size_t(shared.found.load()),
                    size_t(shared.ht.mask + 1) * sizeof(void*) / 1024,
                    runtime::cacheBytes(1) / 1024,
-                   int(buildKeysSelected), int(semiJoin), int(semiActive),
+                   int(buildKeysSelected), int(semiJoin), int(semiHash),
+#ifdef VW_JOIN_SEMI_BITMAP
+                   int(semiActive),
+#else
+                   0,
+#endif
                    int(bloom), int(fused), int(newJoin),
                    probeStep == &Hashjoin::stepFusedBloom  ? "fused+bloom"
                    : probeStep == &Hashjoin::stepFusedNew  ? "fused+newjoin"
@@ -1660,7 +1715,7 @@ size_t Hashjoin::next() {
          const size_t dirBytes = size_t(shared.ht.mask + 1) * sizeof(void*);
          return l1 ? dirBytes >= l1 : shared.found.load() >= VW_JOIN_BLOOM_MIN_KEYS;
       };
-#ifdef VW_JOIN_SEMI
+#ifdef VW_JOIN_SEMI_BITMAP
       const bool bloomDeferred = semiCandidate();
 #else
       const bool bloomDeferred = false;
@@ -1684,24 +1739,23 @@ size_t Hashjoin::next() {
 #ifdef VW_JOIN_BLOOM
       if (shared.bloom) bloomInsert();
 #endif
-#ifdef VW_JOIN_SEMI
+#ifdef VW_JOIN_SEMI_BITMAP
       const bool semiCand = semiCandidate();
       if (semiCand) semiRange();
 #endif
       consumed = true;
       barrier(); // wait for all threads to finish build phase
-#ifdef VW_JOIN_SEMI
+#ifdef VW_JOIN_SEMI_BITMAP
       if (semiCand) {
          barrier([&]() {
             shared.semiOn = false;
             const int64_t lo = shared.semiMin.load(), hi = shared.semiMax.load();
-#ifdef VW_JOIN_DISPATCH
-            // bitmap no larger than VW_JOIN_SEMI_MAX_BYTES (run_joindispatchbench
-            // semi sweep: past that the hash path probes faster)
-            if (hi >= lo && hi - lo < int64_t(VW_JOIN_SEMI_MAX_BYTES) * 8) {
-#else
-            if (hi >= lo && hi - lo < (int64_t(1) << 27)) {
-#endif
+            // hardware fact: the bitmap fits in L2 (run_joindispatchbench semi
+            // sweep: on all four machines the bitmap still wins at the L2
+            // size and loses from 2x L2 to L3/2). Unknown L2: no bitmap.
+            const size_t l2 = runtime::cacheBytes(2);
+            if (l2 && hi >= lo &&
+                ((uint64_t(hi - lo) >> 5) + 1) * sizeof(uint32_t) <= l2) {
                shared.semiBits.reset(new uint32_t[((hi - lo) >> 5) + 1]());
                shared.semiOn = true;
             }
@@ -1718,12 +1772,19 @@ size_t Hashjoin::next() {
          semiActive = shared.semiOn;
       }
 #endif
+#ifdef VW_JOIN_SEMI
+      // existence probe on the hash path unless the bitmap took the join
+      semiHash = semiKeysOk();
+#ifdef VW_JOIN_SEMI_BITMAP
+      semiHash = semiHash && !semiActive;
+#endif
+#endif
 #ifdef VW_JOIN_DISPATCH
       resolvePaths(); // once per operator; the build summary is known now
 #endif
    }
    // --- lookup
-#ifdef VW_JOIN_SEMI
+#ifdef VW_JOIN_SEMI_BITMAP
    if (semiActive) {
       // existence only: probe positions whose key is in the build bitmap
       while (true) {
@@ -1754,7 +1815,9 @@ size_t Hashjoin::next() {
             }
 #endif
 #ifdef VW_NEW_JOIN
-            if (join == &Hashjoin::joinAllNew || join == &Hashjoin::joinSelNew) {
+            // not for joinSemi, which reads probeHashes
+            if (!semiHash &&
+                (join == &Hashjoin::joinAllNew || join == &Hashjoin::joinSelNew)) {
                fusedCompute = true; // mode B: joinNewFirstPass hashes
                goto probe;
             }
@@ -1771,6 +1834,15 @@ size_t Hashjoin::next() {
 #endif
       }
 #endif // VW_JOIN_DISPATCH
+#ifdef VW_JOIN_SEMI
+      if (semiHash) {
+         // existence probe, key compared in the chain walk: no key equality
+         // pass, nothing to gather
+         const pos_t n = joinSemi();
+         if (n == 0) continue;
+         return n;
+      }
+#endif
       // create join pair vectors with matching hashes (Entry*, pos), where
       // Entry* is for the build side, pos a selection index to the right side
       auto n = (this->*join)();

@@ -23,7 +23,7 @@
 //   runheads  HashGroup run-head pass 1          Operators.cpp:2027,2115    Q1, Q18
 //             (VW_GROUP_RUN_HEADS)
 //   bloom     Hashjoin::bloomFilter (VW_JOIN_BLOOM)  Operators.cpp:1008     Q3, Q5, Q9
-//   semi      Hashjoin::semiProbe (VW_JOIN_SEMI)     Operators.cpp:918      Q3, Q9, Q18
+//   semi      Hashjoin::semiProbe (VW_JOIN_SEMI_BITMAP) Operators.cpp:975     Q3, Q9, Q18
 //   dirprobe  Hashjoin::joinNewFirstPass         Operators.cpp:1221,1274,1340  Q3/Q5/Q9
 //             (VW_NEW_JOIN): directory + tag + head hash, real/maybe lists
 //   roof      1-thread read bandwidth and dependent-load latency per working

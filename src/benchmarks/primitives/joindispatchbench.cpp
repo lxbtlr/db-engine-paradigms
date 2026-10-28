@@ -19,7 +19,7 @@
 //             mode cache: one partition's groups (24K entries, 768 KB) again
 //             and again; stream: all groups once (1.5M, 48 MB).
 //   semi      what a semi join (HashJoinBuilder::semi(), one int32 key)
-//             should probe: VW_JOIN_SEMI's exact bitmap over the build keys'
+//             should probe: VW_JOIN_SEMI_BITMAP's exact bitmap over the build keys'
 //             range or the runtime::Hashmap path (probe hash pass, tagged
 //             directory + chain, key-equality pass: Hashjoin's passes).
 //             *_setup variants include the per-query structure set-up
@@ -283,7 +283,7 @@ struct SEntry {
    int32_t key = 0;
 };
 
-/// VW_JOIN_SEMI's structure: bitmap over [lo, hi] of the build keys
+/// VW_JOIN_SEMI_BITMAP's structure: bitmap over [lo, hi] of the build keys
 struct Bitmap {
    std::unique_ptr<uint32_t[]> bits;
    int64_t lo = 0;

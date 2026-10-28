@@ -202,8 +202,8 @@ class Hashjoin : public BinaryOperator {
       std::unique_ptr<uint64_t[]> bloom;
       uint64_t bloomMask = 0; // words - 1
 #endif
-#ifdef VW_JOIN_SEMI
-      /// VW_JOIN_SEMI: build key range and the exact key bitmap over it
+#ifdef VW_JOIN_SEMI_BITMAP
+      /// VW_JOIN_SEMI_BITMAP: build key range and the exact key bitmap over it
       std::atomic<int64_t> semiMin{INT64_MAX}, semiMax{INT64_MIN};
       std::unique_ptr<uint32_t[]> semiBits;
       bool semiOn = false;
@@ -284,25 +284,36 @@ class Hashjoin : public BinaryOperator {
    /// existence of the probe key matters. Assumes unique build keys (see
    /// semi()); without VW_JOIN_SEMI it runs as an inner join, equal then.
    bool semiJoin = false;
+   /// VW_JOIN_SEMI: this join runs the existence probe joinSemi instead of
+   /// join, keyEquality and buildGather (set at the end of the build)
+   bool semiHash = false;
 #ifdef VW_JOIN_SEMI
    /// VW_JOIN_SEMI: a join the plan marked semi (semiJoin) only needs
    /// existence of the probe key. QueryBuilder records whether the keys
-   /// qualify (one int32 key per side); after the build, a bitmap over the
-   /// build keys' range replaces hash, probe, key equality and gather.
+   /// qualify (one int32 key per side, no build payload): then the probe
+   /// stops at the first entry whose hash and key match (joinSemi).
    bool semiOk = true;
    size_t semiBuildKeys = 0;
    size_t semiKeyOffset = 0;
    struct F2_Op* semiProbeDense = nullptr;
    struct F3_Op* semiProbeSel = nullptr;
-   bool semiActive = false;
-   bool semiCandidate() const {
-#if defined(VW_JOIN_DISPATCH) && VW_JOIN_SEMI_MAX_BYTES == 0
-      return false; // bitmap off (VW_JOIN_SEMI_MAX_BYTES=0): no range scan
-#endif
+   bool semiKeysOk() const {
       return semiJoin && semiOk && semiBuildKeys == 1 &&
              buildGather.ops.empty() &&
              (semiProbeDense || semiProbeSel) && probeHash.ops.size() == 1;
    }
+   pos_t joinSemi();
+
+ private:
+   template <bool Sel> pos_t joinSemiImpl();
+
+ public:
+#endif
+#ifdef VW_JOIN_SEMI_BITMAP
+   /// VW_JOIN_SEMI_BITMAP: after the build, a bitmap over the build keys'
+   /// range replaces hash, probe, key equality and gather when it fits in L2
+   bool semiActive = false;
+   bool semiCandidate() const { return semiKeysOk(); }
    pos_t semiProbe(size_t n);
    void semiRange();
    void semiSetBits();

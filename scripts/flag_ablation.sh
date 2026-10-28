@@ -35,7 +35,8 @@
 #   nj_bloom             VW_NEW_JOIN + VW_JOIN_BLOOM
 #   join_fused           VW_JOIN_BLOOM + VW_JOIN_FUSED_PROBE (probe hashing in the
 #                        filter pass)
-#   join_semi            VW_JOIN_SEMI (bitmap semi join on plan-marked joins)
+#   join_semi            VW_JOIN_SEMI (existence-only hash probe on joins the
+#                        plan derives as semi, as Hashset::contains)
 #   join_all             one config for every machine: join_fused + join_semi +
 #                        VW_GROUP_DISPATCH + VW_GROUP_RUN_HEADS
 #   join_dispatch        VW_JOIN_DISPATCH (study/JOIN_DISPATCH_STUDY.md): the semi /
@@ -44,9 +45,10 @@
 #                        run_joindispatchbench (joindispatchbench.csv)
 #   jd_all               join_dispatch + VW_GROUP_HAVING + VW_GROUP_DISPATCH +
 #                        VW_GROUP_RUN_HEADS (compare with join_all_valid).
-#                        join_dispatch and jd_all have no semi bitmap
-#                        (VW_JOIN_SEMI_MAX_BYTES=0, a structure Typer lacks)
-#   jd_semi              jd_all + the semi bitmap (VW_JOIN_SEMI_MAX_BYTES=8 MiB)
+#                        Dispatch compiles in VW_JOIN_SEMI; join_dispatch and
+#                        jd_all have no semi bitmap (a structure Typer lacks)
+#   jd_semi              jd_all + the semi bitmap (VW_JOIN_SEMI_BITMAP: when
+#                        the build key range fits in L2)
 #   join_all_valid       join_all without VW_JOIN_SEMI: join_fused +
 #                        VW_GROUP_DISPATCH + VW_GROUP_RUN_HEADS
 #
@@ -281,7 +283,7 @@ esac
 PERF=${PERF:-}
 case "$PERF" in ''|stat|record) ;; *) echo "PERF must be stat or record" >&2; exit 2 ;; esac
 # VW_FLAGS: extra CMake options applied on top of every config, last -D wins
-# ("VW_JOIN_BLOOM=ON VW_JOIN_SEMI_MAX_BYTES=4194304"). Configs are then named
+# ("VW_JOIN_BLOOM=ON VW_JOIN_SEMI_BITMAP=ON"). Configs are then named
 # <config>_x<hash> after the sorted option list (vw_flags.txt maps it back).
 VW_FLAGS=${VW_FLAGS:-}
 VW_FLAGS_D= VW_FLAGS_HASH=
@@ -471,7 +473,7 @@ flags() {
        "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_FUSE_HASH=OFF" \
        "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF -DVW_AGGR_FUSED_KINDS=OFF -DVW_PROJ_COMPOUND=OFF" \
        "-DVW_GROUP_DISPATCH=OFF -DVW_GROUP_RUN_HEADS=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
-       "-DVW_JOIN_DISPATCH=OFF -DVW_GROUP_HAVING=OFF -DVW_JOIN_SEMI_MAX_BYTES=0" \
+       "-DVW_JOIN_DISPATCH=OFF -DVW_GROUP_HAVING=OFF -DVW_JOIN_SEMI_BITMAP=OFF" \
        "-DAUTOVECTORIZE=$AUTOVEC" "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
 config_flags() {
@@ -485,15 +487,20 @@ config_flags() {
     par_semi)            echo "$(config_flags par_crc32) -DVW_JOIN_SEMI=ON" ;;
     par_having)          echo "$(config_flags par_semi) -DVW_GROUP_HAVING=ON" ;;
     # safe ladder: par_having plus jd_all_pc's engine options, one group per
-    # step; jd_all_pc itself (+ VW_GROUP_RUN_HEADS) is the last step. Join
-    # dispatch replaces par_semi's bitmap (VW_JOIN_SEMI_MAX_BYTES=0 as in
-    # jd_all_pc)
+    # step; safe_runheads is the last step and has jd_all_pc's defines.
+    # safe_jdisp is an enabling step (regression backstop, no speed claim);
+    # par_semi's existence probe stays (dispatch compiles in VW_JOIN_SEMI).
+    # safe_gdisp spans thrusts 2 and 3 (batch create: work; global direct,
+    # fused aggregates: latency). beyond_bitmap adds the semi bitmap, an
+    # engine structure outside the like-for-like ladder
     safe_fast)           echo "$(config_flags par_having) -DVW_CRC32_FAST=ON" ;;
     safe_sel)            echo "$(config_flags safe_fast) $SEL" ;;
-    safe_jdisp)          echo "$(config_flags safe_sel) -DVW_JOIN_SEMI=OFF -DVW_JOIN_DISPATCH=ON -DVW_JOIN_SEMI_MAX_BYTES=0" ;;
+    safe_jdisp)          echo "$(config_flags safe_sel) -DVW_JOIN_DISPATCH=ON" ;;
     safe_gdisp)          echo "$(config_flags safe_jdisp) -DVW_GROUP_DISPATCH=ON" ;;
     safe_kinds)          echo "$(config_flags safe_gdisp) -DVW_AGGR_FUSED_KINDS=ON" ;;
     safe_compound)       echo "$(config_flags safe_kinds) -DVW_PROJ_COMPOUND=ON" ;;
+    safe_runheads)       echo "$(config_flags safe_compound) -DVW_GROUP_RUN_HEADS=ON" ;;
+    beyond_bitmap)       echo "$(config_flags safe_runheads) -DVW_JOIN_SEMI_BITMAP=ON" ;;
     #                         aggr aggr_sel pos16 crc32 huge2mb
     default)             flags OFF  OFF      OFF   OFF   OFF ;;
     add_group_aggr)      flags ON   OFF      OFF   OFF   OFF ;;
@@ -528,7 +535,7 @@ config_flags() {
     join_dispatch)       echo "$(config_flags join_base) -DVW_JOIN_DISPATCH=ON" ;;
     jd_all)              echo "$(config_flags join_dispatch) -DVW_GROUP_HAVING=ON -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
     jd_all_pc)           echo "$(config_flags jd_all) -DVW_AGGR_FUSED_KINDS=ON -DVW_PROJ_COMPOUND=ON" ;;
-    jd_semi)             echo "$(config_flags jd_all) -DVW_JOIN_SEMI_MAX_BYTES=8388608" ;;
+    jd_semi)             echo "$(config_flags jd_all) -DVW_JOIN_SEMI_BITMAP=ON" ;;
     # group-by configs: HASH_BASE + CRC32 + FAST, then the HashGroup options
     grp_base)            echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     grp_batch)           echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON" ;;
