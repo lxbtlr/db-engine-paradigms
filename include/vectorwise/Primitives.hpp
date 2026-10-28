@@ -1,18 +1,22 @@
 #pragma once
 #include "common/defs.hpp"
+#include "common/runtime/Hashmap.hpp"
 #include "common/runtime/HashmapSmall.hpp"
 #include "common/runtime/SIMD.hpp"
 #include "common/runtime/Types.hpp"
 #include "common/runtime/Util.hpp"
 #include "vectorwise/VectorAllocator.hpp"
 #include "vectorwise/defs.hpp"
-#include <unordered_map>
 #include <vector>
 // #include "/home/kersten/tools/iaca-lin64/iacaMarks.h"
 
 namespace vectorwise {
 
-inline thread_local std::unordered_map<void*, std::vector<pos_t>> groups;
+#ifdef VW_GROUP_AGGR
+using EntryHeader = runtime::Hashmap::EntryHeader;
+using Group = runtime::Hashmap::Group;
+inline thread_local std::vector<EntryHeader*> groups;
+#endif
 
 namespace primitives {
 
@@ -324,16 +328,20 @@ pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
 /// aggregate into multiple aggregators given by result
 {
 #ifdef VW_GROUP_AGGR
-   for (auto& [entry, group] : groups) {
-      if (group.empty()) {
+   for (auto entry : groups) {
+      Group* RES group = entry->group;
+
+      pos_t size = group->size;
+      if (size == 0) {
          continue;
       }
 
-      T* aggregate = addBytes(static_cast<T*>(entry), offset);
+      pos_t* RES pos = group->pos;
+      T* RES aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
       T value = *aggregate;
 
-      for (auto i : group) {
-         value = Op<T>()(param1[i], value);
+      for (pos_t i = 0; i < size; i++) {
+         value = Op<T>()(param1[pos[i]], value);
       }
 
       *aggregate = value;
@@ -348,22 +356,33 @@ pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
 }
 
 template <typename T, template <typename> class Op>
-pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* selParam1, T* RES param1,
-                   size_t offset)
+pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* RES selParam1,
+                   T* RES param1, size_t offset)
 /// aggregate into multiple aggregators given by result, param1 has selection
 /// vector
 {
 #ifdef VW_GROUP_AGGR
-   for (auto& [entry, group] : groups) {
-      if (group.empty()) {
+   for (auto entry : groups) {
+      Group* RES group = entry->group;
+
+      pos_t size = group->size;
+      if (size == 0) {
          continue;
       }
 
-      T* aggregate = addBytes(static_cast<T*>(entry), offset);
+      pos_t* RES pos = group->pos;
+#ifdef VW_GROUP_AGGR_SEL
+      pos_t* RES sel = group->sel;
+#endif
+      T* RES aggregate = addBytes(reinterpret_cast<T*>(entry), offset);
       T value = *aggregate;
 
-      for (auto i : group) {
-         value = Op<T>()(param1[selParam1[i]], value);
+      for (pos_t i = 0; i < size; i++) {
+#ifdef VW_GROUP_AGGR_SEL
+         value = Op<T>()(param1[sel[i]], value);
+#else
+         value = Op<T>()(param1[selParam1[pos[i]]], value);
+#endif
       }
 
       *aggregate = value;
@@ -1354,30 +1373,12 @@ extern F3 proj8_multiplies_int64_t_col_int64_t_col;
 extern F4 proj8_multiplies_sel_int64_t_col_int64_t_col;
 
 extern F3 sel_less_int32_t_col_int32_t_val_avx512;
+extern F3 sel_less_equal_int32_t_col_int32_t_val_avx512;
 extern F4 selsel_greater_equal_int32_t_col_int32_t_val_avx512;
 extern F4 selsel_greater_equal_int64_t_col_int64_t_val_avx512;
 extern F4 selsel_less_int64_t_col_int64_t_val_avx512;
 extern F4 selsel_less_equal_int64_t_col_int64_t_val_avx512;
 #endif
-// ---------------------------------------------------------------------------
-// Packed-key primitives for Q1 (returnflag + linestatus -> uint16_t)
-// ---------------------------------------------------------------------------
-extern F4 pack_sel_void_1_1;
-extern F2 hash_uint16_t_col;
-extern F3 hash_sel_uint16_t_col;
-extern NEQCheck keys_not_equal_uint16_t_col;
-extern NEQCheckSel keys_not_equal_sel_uint16_t_col;
-extern NEQCheckRow keys_not_equal_row_uint16_t_col;
-extern FPartitionByKey partition_by_key_uint16_t_col;
-extern FPartitionByKeySel partition_by_key_sel_uint16_t_col;
-extern FPartitionByKeyRow partition_by_key_row_uint16_t_col;
-extern FScatter scatter_uint16_t_col;
-extern FScatterSel scatter_sel_uint16_t_col;
-extern FScatterSelRow scatter_sel_row_uint16_t_col;
-extern FGather gather_col_uint16_t_col;
-extern FGatherVal gather_val_uint16_t_col;
-extern FGatherVal unpack_q1key_returnflag;
-extern FGatherVal unpack_q1key_linestatus;
 
 } // namespace primitives
 } // namespace vectorwise

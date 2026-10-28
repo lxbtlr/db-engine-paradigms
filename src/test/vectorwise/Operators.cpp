@@ -7,6 +7,7 @@
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/Query.hpp"
 #include "vectorwise/QueryBuilder.hpp"
+#include <algorithm>
 #include <gtest/gtest.h>
 #include <map>
 #include <unordered_set>
@@ -607,5 +608,77 @@ TEST_F(HashGroupSmallBuf, groupWithSel) {
 
    ASSERT_EQ(found, size_t(5));
 }
+
+// A join the plan derives as semi (unique build key by declared primary key,
+// no build column): each probe row whose key is in the build side is emitted
+// once. With VW_JOIN_SEMI it runs joinSemi (or the bitmap under
+// VW_JOIN_SEMI_BITMAP), without it the inner join path; same rows.
+struct SemiJoinBuilder : public Query, public vectorwise::QueryBuilder {
+   enum { probe_matches };
+   runtime::GlobalPool pool;
+   SemiJoinBuilder(runtime::Database& db) : Query(), QueryBuilder(db, shared) {
+      previous = runtime::this_worker->allocator.setSource(&pool);
+   }
+   unique_ptr<vectorwise::Operator> getQuery() {
+      auto build = Scan("build");
+      auto probe = Scan("probe");
+      HashJoin(Buffer(probe_matches, sizeof(pos_t)))
+          .semi()
+          .addBuildKey(Column(build, "k"), primitives::hash_int32_t_col,
+                       primitives::scatter_int32_t_col)
+          .addProbeKey(Column(probe, "b"), primitives::hash_int32_t_col,
+                       primitives::keys_equal_int32_t_col);
+      return popOperator();
+   }
+};
+
+namespace {
+/// every key hashes to the same value: one chain, every entry a hash match
+pos_t hashConstant(pos_t n, void* result, void*) {
+   auto* h = static_cast<runtime::Hashmap::hash_t*>(result);
+   for (pos_t i = 0; i < n; ++i) h[i] = 0x5bd1e995ull << 20;
+   return n;
+}
+
+void semiJoinCheck(bool collide) {
+   runtime::Database db;
+   db["build"].insert("k", make_unique<algebra::Integer>()) =
+       std::vector<int32_t>{1, 3, 4, 8};
+   db["build"].primaryKey = {"k"};
+   db["probe"].insert("b", make_unique<algebra::Integer>()) =
+       std::vector<int32_t>{88, 1, 1, 17, 4, 3, 3, 8, 2};
+   db["build"].nrTuples = 4;
+   db["probe"].nrTuples = 9;
+
+   SemiJoinBuilder b(db);
+   auto root = b.getQuery();
+   auto join = dynamic_cast<Hashjoin*>(root.get());
+   ASSERT_NE(nullptr, join);
+   ASSERT_TRUE(join->semiJoin);
+   if (collide) {
+      // the probe must compare keys along a chain of equal hashes
+      static_cast<F2_Op*>(join->buildHash.ops[0].get())->operation = hashConstant;
+      static_cast<F2_Op*>(join->probeHash.ops[0].get())->operation = hashConstant;
+#ifdef VW_JOIN_FUSED_PROBE
+      join->fusedOk = false; // fused probes hash the keys themselves
+#endif
+   }
+   std::vector<pos_t> got;
+   for (auto n = root->next(); n != EndOfStream; n = root->next())
+      got.insert(got.end(), join->probeMatches, join->probeMatches + n);
+   std::sort(got.begin(), got.end());
+   EXPECT_EQ((std::vector<pos_t>{1, 2, 4, 5, 6, 7}), got);
+#ifdef VW_JOIN_SEMI
+#ifdef VW_JOIN_SEMI_BITMAP
+   EXPECT_NE(join->semiHash, join->semiActive);
+#else
+   EXPECT_TRUE(join->semiHash);
+#endif
+#endif
+}
+} // namespace
+
+TEST(Join, semiJoin) { semiJoinCheck(false); }
+TEST(Join, semiJoinHashCollisions) { semiJoinCheck(true); }
 
 } // namespace operatortest

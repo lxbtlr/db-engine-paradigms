@@ -41,7 +41,8 @@ namespace primitives {
    F4 proj_sel_##op##_##type##_val_##type##_col =                              \
        (F4)&proj_sel_val_col<type, op>;
 
-pos_t lookup_sel_(pos_t n, pos_t* target, pos_t* sel, pos_t* source) {
+pos_t lookup_sel_(pos_t n, pos_t* RES target, pos_t* RES sel,
+                  pos_t* RES source) {
    for (size_t i = 0; i < n; ++i) target[i] = source[sel[i]];
    return n;
 }
@@ -143,5 +144,6 @@ pos_t proj8_multiplies_sel_int64_t_col_int64_t_col_impl(pos_t n, pos_t* RES inSe
 F3 proj8_multiplies_int64_t_col_int64_t_col = (F3)&proj8_multiplies_int64_t_col_int64_t_col_impl;
 F4 proj8_multiplies_sel_int64_t_col_int64_t_col = (F4)&proj8_multiplies_sel_int64_t_col_int64_t_col_impl;
 #endif
+
 }
 }

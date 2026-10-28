@@ -1,6 +1,7 @@
 #pragma once
 #include "common/Compat.hpp"
 #include <cassert>
+#include <cstdint>
 #include <cstring>
 #if __has_include(<string_view>)
 #include <string_view>

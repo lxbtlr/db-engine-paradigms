@@ -16,7 +16,6 @@
 #include <tuple>
 #include <utility>
 #include <vector>
-#include <deque>
 
 namespace vectorwise {
 
@@ -141,55 +140,10 @@ template <typename PAYLOAD> class DebugOperator : public UnaryOperator {
 
 class Scan : public Operator {
  public:
-#ifdef NUMA_SHARD
-   struct Shared : public SharedState {
-      struct PaddedAtomic {
-         std::atomic<size_t> pos{0};
-         char pad_[64 - sizeof(std::atomic<size_t>)];
-      };
-      static_assert(sizeof(PaddedAtomic) == 64, "PaddedAtomic must be 64 bytes");
-      std::array<PaddedAtomic, runtime::NUM_NUMA_REGIONS> nodePos;
-      struct NodeRange {
-         size_t tupleBegin = 0;
-         size_t tupleEnd = 0;
-      };
-      std::array<NodeRange, runtime::NUM_NUMA_REGIONS> ranges;
-   };
-#elif defined(SCAN_STATIC_PARTITION)
-   struct Shared : public SharedState {
-      struct alignas(64) SliceState {
-         std::atomic<size_t> pos{0};
-         std::atomic<bool> exhausted{false};
-         size_t tupleBegin = 0;
-         size_t tupleEnd = 0;
-      };
-      std::unique_ptr<SliceState[]> slices;
-      std::once_flag initFlag;
-      size_t numThreads = 0;
-
-      void init(size_t nrTuples, size_t nThreads) {
-         std::call_once(initFlag, [&]() {
-            numThreads = nThreads;
-            slices = std::make_unique<SliceState[]>(nThreads);
-            size_t sliceSize = nrTuples / nThreads;
-            size_t remainder = nrTuples % nThreads;
-            size_t offset = 0;
-            for (size_t i = 0; i < nThreads; ++i) {
-               slices[i].tupleBegin = offset;
-               size_t thisSlice = sliceSize + (i < remainder ? 1 : 0);
-               offset += thisSlice;
-               slices[i].tupleEnd = offset;
-            }
-         });
-      }
-      Shared() = default;
-   };
-#else
    struct Shared : public SharedState {
       std::atomic<size_t> pos;
       Shared() : pos(0){};
    };
-#endif
 
  private:
    size_t scanChunkSize;
@@ -201,43 +155,13 @@ class Scan : public Operator {
    size_t nrTuples;
    size_t vecSize;
 
-#ifdef NUMA_SHARD
-   struct Consumer {
-      void** location;
-      size_t vecBytes;     // vecSize * typeSize
-      size_t elemSize;     // typeSize
-      std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases;
-   };
-   std::vector<Consumer> consumers;
-
-   // Per-worker steal order and state
-   size_t homeNode;
-   std::array<size_t, runtime::NUM_NUMA_REGIONS> stealOrder;
-   size_t currentStealIdx;  // index into stealOrder for current node
-#elif defined(SCAN_STATIC_PARTITION)
-   struct PartConsumer {
-      void** location;   // pointer-to-pointer updated each batch
-      size_t elemSize;   // bytes per tuple element
-      size_t vecBytes;   // vecSize * elemSize
-      void* base;        // column base pointer for absolute positioning
-   };
-   std::vector<PartConsumer> consumers;
-   size_t homeSlice;
-   size_t currentStealIdx;
-#else
    std::vector<std::pair<void**, size_t>> consumers;
-#endif
 
  public:
    Scan(Shared& sm, size_t nrTuples, size_t vecSize);
-#ifdef NUMA_SHARD
-   void addConsumer(void** colPtr, size_t typeSize,
-                    std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases);
-#else
    /// Add consumer to scan operator, typeSize is size of
    /// type pointed to by colPtr
    void addConsumer(void** colPtr, size_t typeSize);
-#endif
    virtual size_t next() override;
 };
 
@@ -271,6 +195,19 @@ class Hashjoin : public BinaryOperator {
       std::atomic<size_t> found;
       std::atomic<bool> sizeIsSet;
       runtime::Hashmap ht;
+#ifdef VW_JOIN_BLOOM
+      /// VW_JOIN_BLOOM: register-blocked Bloom filter over the build side
+      /// (one 64-bit word per key's block, 4 bits per key), owned by this
+      /// join; nullptr for builds under VW_JOIN_BLOOM_MIN_KEYS
+      std::unique_ptr<uint64_t[]> bloom;
+      uint64_t bloomMask = 0; // words - 1
+#endif
+#ifdef VW_JOIN_SEMI_BITMAP
+      /// VW_JOIN_SEMI_BITMAP: build key range and the exact key bitmap over it
+      std::atomic<int64_t> semiMin{INT64_MAX}, semiMax{INT64_MIN};
+      std::unique_ptr<uint32_t[]> semiBits;
+      bool semiOn = false;
+#endif
       Shared() : found(0), sizeIsSet(false){};
    };
 
@@ -327,7 +264,9 @@ class Hashjoin : public BinaryOperator {
    pos_t joinBoncz();
    /// computes join result into buildMatches and probeMatches
    /// Implementation: Using AVX 512 SIMD
+#ifndef VW_POS_16
    pos_t joinAllSIMD();
+#endif
    /// computes join result into buildMatches and probeMatches, respecting
    /// selection vector probeSel for probe side
    pos_t joinSel();
@@ -338,14 +277,112 @@ class Hashjoin : public BinaryOperator {
    /// computes join result into buildMatches and probeMatches, respecting
    /// selection vector probeSel for probe side
    /// Implementation: For SkylakeX using AVX512
+#ifndef VW_POS_16
    pos_t joinSelSIMD();
+#endif
+   /// the plan marked this join a semi join (HashJoinBuilder::semi()): only
+   /// existence of the probe key matters. Assumes unique build keys (see
+   /// semi()); without VW_JOIN_SEMI it runs as an inner join, equal then.
+   bool semiJoin = false;
+   /// VW_JOIN_SEMI: this join runs the existence probe joinSemi instead of
+   /// join, keyEquality and buildGather (set at the end of the build)
+   bool semiHash = false;
+#ifdef VW_JOIN_SEMI
+   /// VW_JOIN_SEMI: a join the plan marked semi (semiJoin) only needs
+   /// existence of the probe key. QueryBuilder records whether the keys
+   /// qualify (one int32 key per side, no build payload): then the probe
+   /// stops at the first entry whose hash and key match (joinSemi).
+   bool semiOk = true;
+   size_t semiBuildKeys = 0;
+   size_t semiKeyOffset = 0;
+   struct F2_Op* semiProbeDense = nullptr;
+   struct F3_Op* semiProbeSel = nullptr;
+   bool semiKeysOk() const {
+      return semiJoin && semiOk && semiBuildKeys == 1 &&
+             buildGather.ops.empty() &&
+             (semiProbeDense || semiProbeSel) && probeHash.ops.size() == 1;
+   }
+   pos_t joinSemi();
 
+ private:
+   template <bool Sel> pos_t joinSemiImpl();
+
+ public:
+#endif
+#ifdef VW_JOIN_SEMI_BITMAP
+   /// VW_JOIN_SEMI_BITMAP: after the build, a bitmap over the build keys'
+   /// range replaces hash, probe, key equality and gather when it fits in L2
+   bool semiActive = false;
+   bool semiCandidate() const { return semiKeysOk(); }
+   pos_t semiProbe(size_t n);
+   void semiRange();
+   void semiSetBits();
+#endif
+#ifdef VW_JOIN_BLOOM
+   /// probes that passed the Bloom filter for the current probe vector:
+   /// index into probeHashes and hash, in probe order (bloomOn only)
+   std::vector<pos_t> bloomSel;
+   std::vector<runtime::Hashmap::hash_t> bloomHashes;
+   size_t bloomCount = 0;
+   bool bloomOn = false;
+   /// plan fact recorded by QueryBuilder::addBuildKey: the build keys are
+   /// read through a selection vector, i.e. the build side is a filtered
+   /// subset of its input (the filter's precondition)
+   bool buildKeysSelected = false;
+   void bloomInsert();
+   void bloomFilter(size_t n);
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
+   /// VW_JOIN_FUSED_PROBE: the probe side's single int32 hash op (set by
+   /// QueryBuilder::addProbeKey when it is primitives::hash_int32_t_col or
+   /// hash_sel_int32_t_col; any second probe key clears fusedOk). The join
+   /// then hashes the keys itself instead of evaluating probeHash.
+   struct F2_Op* fusedDense = nullptr;
+   struct F3_Op* fusedSel = nullptr;
+   bool fusedOk = true;
+   /// this vector's hashes are computed by joinNewFirstPass (mode B)
+   bool fusedCompute = false;
+   bool fusedReady() const {
+      return fusedOk && (fusedDense || fusedSel) && probeHash.ops.size() == 1;
+   }
+   void fusedHashFilter(size_t n);
+#endif
+#ifdef VW_NEW_JOIN
+   /// VW_NEW_JOIN (andrew_pseudocode.md): 8 probes at a time, gather the
+   /// head entry, split into real / maybe lists, then follow chains
+   pos_t joinAllNew();
+   pos_t joinSelNew();
+
+ private:
+   template <bool Sel> pos_t joinNew();
+   template <bool Sel> size_t joinNewFirstPass(pos_t& followupWrite);
+   /// the maybe list (probe index, chain successor), appended to the real
+   /// list's successors in the followup buffers
+   std::vector<pos_t> newMaybeIds;
+   std::vector<runtime::Hashmap::EntryHeader*> newMaybeEntries;
+
+ public:
+#endif
+
+#ifdef VW_JOIN_DISPATCH
+ private:
+   /// VW_JOIN_DISPATCH: the probe path, resolved once at the end of the
+   /// build from plan facts and the build summary (resolvePaths); next()
+   /// then runs probeStep and join per probe vector without re-deciding
+   void (Hashjoin::*probeStep)(size_t n) = nullptr;
+   void resolvePaths();
+   void stepHash(size_t n);
+   void stepHashBloom(size_t n);
+   void stepFusedBloom(size_t n);
+   void stepFusedNew(size_t n);
+
+ public:
+#endif
    virtual size_t next() override;
    ~Hashjoin();
 };
 
 class HashGroup : public UnaryOperator {
- protected:
    runtime::Hashmap ht;
    size_t maxFill;
    const size_t initialMapSize = 1024;
@@ -373,15 +410,9 @@ class HashGroup : public UnaryOperator {
 
    /// ------ phase 1: local preaggregation
    /// ------ group lookup
-   /// Expression which produces hashes of group keys
-   Expression groupHash;
 
    template <typename T> class GroupLookup {
 
-#ifndef ORIGINAL_GROUPLOOKUP
-      /// Pass 1: prefetch + load chain heads into htMatches
-      void htProbe(pos_t n, decltype(ht) & ht);
-#endif
       /// Find entries in ht for groupHashes.
       /// Found entries are written to htMatches, missing entries
       /// are added to groupsNotFound
@@ -464,16 +495,72 @@ class HashGroup : public UnaryOperator {
    ColumnGroupLookup preAggregation;
    /// update aggregates
    Aggregates updateGroups;
+#ifdef VW_AGGR_FUSED
+   /// VW_AGGR_FUSED: updateGroups' ops when all are int64 SUM / COUNT(*)
+   /// (recorded by QueryBuilder::HashGroupBuilder::addValue). Their current
+   /// arguments are read at run time; updateGroupsFused then updates every
+   /// aggregate of a row's entry in one pass instead of one pass each.
+   struct FusedAggr {
+      enum Kind : uint8_t { Col, SelCol, Count } kind;
+      Op* op;
+      size_t offset;
+#ifdef VW_AGGR_FUSED_KINDS
+      /// SelCol: the selection Buffer, recorded at build time (nullptr: not a
+      /// Buffer, so not known to be shared)
+      const void* sel = nullptr;
+#endif
+   };
+   std::vector<FusedAggr> fusedAggrs;
+   bool fusable = true;
+   std::vector<pos_t> identitySel;
+   std::vector<int64_t> ones;
+   void updateGroupsFused(pos_t n);
+#ifdef VW_AGGR_FUSED_KINDS
+   /// VW_AGGR_FUSED_KINDS: fusedAggrs split by kind once (dense columns,
+   /// columns read through a selection vector, COUNT(*)), so the fused pass
+   /// reads dense columns directly, loads a shared selection once per row
+   /// and counts with += 1. The kernel is chosen once from the plan; false
+   /// if the plan's shape has none.
+   bool updateGroupsKinds(pos_t n);
+   bool kindsResolved = false;
+   bool kindsSupported = false;
+   const pos_t* kindsSelVec = nullptr;
+   std::vector<size_t> kindsDense, kindsSel;
+   int kindsCount = -1;
+#endif
+#endif
 
    /// ------ phase 2: global aggregation
    RowGroupLookup globalAggregation;
    pos_t findGroupsFromPartition(void* data, size_t n);
+#ifdef VW_GROUP_GLOBAL_DIRECT
+   /// VW_GROUP_GLOBAL_DIRECT: set by QueryBuilder when every key compares
+   /// correctly with memcmp (fixed-width scalar types; Char<N> padding bytes
+   /// are undefined); then the global phase uses globalFindOrCreate
+   bool globalDirectOk = true;
+   void globalFindOrCreate(void* data, size_t n);
+#endif
    Aggregates updateGroupsFromPartition;
 
    /// ------ produce result
    /// Gather primitives to produce vectors after
    /// global grouping is done
    Aggregates gatherGroups;
+#ifdef VW_GROUP_HAVING
+   /// VW_GROUP_HAVING (HashGroupBuilder::having): an output block first
+   /// gathers the condition's input column (havingInput), evaluates the
+   /// condition into havingSel, and gathers the other output columns only
+   /// for the passing groups (gatherGroups, re-pointed at havingSel); the
+   /// input column is then compacted in place. Blocks with no passing group
+   /// are skipped.
+   std::unique_ptr<Op> havingInput;
+   std::unique_ptr<Expression> havingCondition;
+   pos_t* havingSel = nullptr;
+   void* havingInputTarget = nullptr;
+   size_t havingInputSize = 0;
+   /// output element size of each gatherGroups op, in order
+   std::vector<size_t> gatherSizes;
+#endif
 
    struct Continuation
    /// state for control flow
@@ -489,16 +576,25 @@ class HashGroup : public UnaryOperator {
 
    virtual size_t next() override;
 
-   struct KeyColumn
-   {
+   struct KeyColumn {
       uint32_t size = 0;
       uint32_t offset = 0;
       void* data = nullptr;
+      /// Selection vector for this key column: row i reads data[sel[i]].
+      /// nullptr for keys that are already dense (e.g. join output buffers),
+      /// which are read as data[i]. Keys of one group-by can mix both kinds
+      /// (TPC-H Q3: l_orderkey via sel, o_orderdate/o_shippriority dense).
+      pos_t* sel = nullptr;
    };
 
    uint32_t totalKeySize = 0;
    std::deque<KeyColumn> keyColumns;
    std::vector<char> packedKeys;
+#ifdef VW_GROUP_NO_CONCAT
+   /// packed keys of the current vector: packedKeys, or the key column
+   /// itself for a single dense key
+   char* keyData = nullptr;
+#endif
    pos_t* selVec = nullptr;
 
 #ifdef VW_USE_CRC32
@@ -515,80 +611,44 @@ class HashGroup : public UnaryOperator {
 
    void Lookup(pos_t n);
    template <typename T> void Lookup_T(pos_t n);
-
-   void Group(pos_t n);
+#ifdef VW_GROUP_DISPATCH
+   /// VW_GROUP_DISPATCH: the pre-aggregation path is chosen once per operator
+   /// from what the plan fixes for its lifetime (number of key columns, key
+   /// width, whether the key comes through a selection vector, the
+   /// aggregates), instead of per-vector switches on totalKeySize
+   enum KeyMode { kSingle, kSingleSel, kPacked };
+   using VecStep = void (HashGroup::*)(pos_t n);
+   VecStep keyStep = nullptr;  ///< keys -> preAggregation.htMatches
+   VecStep aggStep = nullptr;  ///< aggregate update
+   std::vector<void (HashGroup::*)(pos_t, const KeyColumn&)> concatSteps;
+   bool pathsResolved = false;
+   void resolvePaths();
+   template <typename T, int Mode, bool Runs> void keyStepT(pos_t n);
+#ifdef VW_GROUP_RUN_HEADS
+   /// VW_GROUP_RUN_HEADS: per vector, the positions where the key differs
+   /// from the previous row's (run heads), a 0/1 head flag per row, and each
+   /// run's entry; the lookup runs only for heads
+   std::vector<pos_t> runHeads;
+   std::vector<uint8_t> runFlags;
+   std::vector<EntryHeader*> runEntries;
+#endif
+   void concatResolved(pos_t n);
+   void aggEvaluate(pos_t n) { updateGroups.evaluate(n); }
+#endif
+#ifdef VW_GROUP_BATCH_CREATE
+   /// VW_GROUP_BATCH_CREATE: pre-aggregation entries are carved from one
+   /// block per flush period (maxFill + vecSize entries, so a vector never
+   /// runs out), consecutively, so one vector's new groups can be
+   /// initialized by a single buildScatter call
+   EntryHeader* newBlock = nullptr;
+   size_t newUsed = 0;
+   size_t newCap = 0;
+#endif
 
  private:
    void clearHashtable();
 };
 
-/// Optimized HashGroup using Concat/Hash/Lookup key-packing path.
-/// Requires all addKey calls to supply a selection vector.
-class OptHashGroup : public HashGroup {
- public:
-   using HashGroup::HashGroup;
-   virtual size_t next() override;
-};
-
-
-/// LUT-based group-by for small, dense keyspaces (e.g. Q1's packed uint16_t).
-/// Replaces HashGroup when the key can be used as a direct array index.
-/// No hashing, no hash table, no chain walking — O(1) group lookup per tuple.
-class LUTGroup : public UnaryOperator {
- public:
-   static constexpr size_t LUT_SIZE = 65536; // max entries for uint16_t key
-
-   struct Shared : SharedState {
-      std::mutex mergeMutex;
-      /// Global accumulators: transposed layout — accum[valueIdx][key].
-      /// Each value gets its own contiguous LUT_SIZE array.
-      std::vector<std::vector<int64_t>> globalAccum;
-      /// Bitmap: which keys are occupied globally.
-      std::vector<bool> globalOccupied;
-      size_t nValues = 0;
-      bool globalInitialized = false;
-      std::atomic<size_t> producerClaimed{0};
-      Shared() {}
-   } & shared;
-
-   size_t vecSize;
-   /// Number of int64_t aggregate values per group
-   size_t nValues = 0;
-
-   /// Thread-local accumulators: transposed layout — accum[valueIdx][key]
-   std::vector<int64_t*> localAccum; // pointers to per-value arrays
-   std::vector<int64_t> localAccumStorage; // backing storage
-   std::vector<bool> localOccupied;
-
-   /// Packed key buffer (input from Project)
-   uint16_t* packedKeys = nullptr;
-   /// Selection vector (maps packed keys to column positions for sel-based values)
-   pos_t* selVec = nullptr;
-
-   struct ValueSpec {
-      void* colData;       // column data pointer (or buffer pointer)
-      bool hasSel;         // whether this value uses a selection vector
-      bool isCount;        // true = increment by 1, ignore colData
-   };
-   std::deque<ValueSpec> valueSpecs;
-
-   /// Output buffers for result gathering
-   /// First two are for unpacked key columns (returnflag, linestatus)
-   void* outReturnflag = nullptr;
-   void* outLinestatus = nullptr;
-   /// Then one per aggregate value
-   std::vector<void*> outValues;
-
-   struct Continuation {
-      bool consumed = false;
-      size_t lutPos = 0;  // current position in LUT scan
-   } cont;
-
-   LUTGroup(Shared& s);
-   virtual size_t next() override;
-};
-
-#ifdef ORIGINAL_GROUPLOOKUP
 template <typename T>
 pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
@@ -615,50 +675,6 @@ HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
    }
    return found;
 }
-#else
-template <typename T>
-void HashGroup::GroupLookup<T>::htProbe(pos_t n, runtime::Hashmap& ht) {
-   static constexpr pos_t PREFETCH_DIST = 16;
-
-   const pos_t primeEnd = std::min(n, PREFETCH_DIST);
-   for (pos_t j = 0; j < primeEnd; ++j) {
-      __builtin_prefetch(&ht.entries[self()->hashForTuple(j) & ht.mask], 0, 1);
-   }
-
-   for (pos_t i = 0; i < n; ++i) {
-      if (i + PREFETCH_DIST < n)
-         __builtin_prefetch(&ht.entries[self()->hashForTuple(i + PREFETCH_DIST) & ht.mask], 0, 1);
-      htMatches[i] = ht.find_chain(self()->hashForTuple(i));
-      groupsFound[i] = i;
-   }
-}
-
-template <typename T>
-pos_t INTERPRET_SEPARATE
-HashGroup::GroupLookup<T>::htLookup(pos_t n, runtime::Hashmap& ht) {
-   pos_t found = 0;
-   for (pos_t i = 0; i < n; ++i) {
-      auto hash = self()->hashForTuple(i);
-      auto el = htMatches[i];
-      if (el != ht.end()) {
-         if (el->hash == hash) {
-            htMatches[i] = el;
-            groupsFound[found++] = i;
-            goto nextChain;
-         }
-         for (el = el->next; el != ht.end(); el = el->next)
-            if (el->hash == hash) {
-               htMatches[i] = el;
-               groupsFound[found++] = i;
-               goto nextChain;
-            }
-      }
-      groupsNotFound->push_back(i);
-   nextChain:;
-   }
-   return found;
-}
-#endif
 
 template <typename T>
 pos_t HashGroup::GroupLookup<T>::htFollow(runtime::Hashmap& ht)
@@ -687,9 +703,6 @@ pos_t INTERPRET_SEPARATE
 HashGroup::GroupLookup<T>::findGroups(pos_t n, runtime::Hashmap& ht) {
    keysNEq->clear();
    groupsNotFound->clear();
-#ifndef ORIGINAL_GROUPLOOKUP
-   htProbe(n, ht);
-#endif
    auto found = htLookup(n, ht);
    auto keysEqual = keyEquality.evaluate(found);
    while (keysNEq->size()) {

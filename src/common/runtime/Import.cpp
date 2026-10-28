@@ -189,7 +189,9 @@ void parseColumns(runtime::Relation& r, std::vector<ColumnConfigOwning>& cols,
 
    bool allColumnsMMaped = true;
    string cachedir = dir + "/cached/";
-   if (!mkdir((dir + "/cached/").c_str(), 0777))
+   // mkdir returns 0 when it creates the directory; an existing one (EEXIST)
+   // is fine, any other error is not
+   if (mkdir((dir + "/cached/").c_str(), 0777) != 0 && errno != EEXIST)
       throw runtime_error("Could not create dir 'cached': " + dir + "/cached/");
    for (auto& col : colsC)
       if (!std::ifstream(cachedir + fileName + "_" + col.name))
@@ -198,7 +200,7 @@ void parseColumns(runtime::Relation& r, std::vector<ColumnConfigOwning>& cols,
    if (!allColumnsMMaped) {
       std::vector<std::vector<void*>> attributes;
       attributes.assign(colsC.size(), {});
-      ifstream relationFile(dir + fileName + ".tbl");
+      ifstream relationFile(dir + "/" + fileName + ".tbl");
       if (!relationFile.is_open())
          throw runtime_error("csv file not found: " + dir);
       string line;
@@ -366,6 +368,16 @@ void importTPCH(std::string dir, Database& db) {
                    {"r_comment", make_unique<algebra::Varchar>(152)}});
       parseColumns(rel, columns, dir, "region");
    }
+
+   // primary keys as the TPC-H schema declares them
+   db["part"].primaryKey = {"p_partkey"};
+   db["supplier"].primaryKey = {"s_suppkey"};
+   db["partsupp"].primaryKey = {"ps_partkey", "ps_suppkey"};
+   db["customer"].primaryKey = {"c_custkey"};
+   db["orders"].primaryKey = {"o_orderkey"};
+   db["lineitem"].primaryKey = {"l_orderkey", "l_linenumber"};
+   db["nation"].primaryKey = {"n_nationkey"};
+   db["region"].primaryKey = {"r_regionkey"};
 }
 
 void importSSB(std::string dir, Database& db) {

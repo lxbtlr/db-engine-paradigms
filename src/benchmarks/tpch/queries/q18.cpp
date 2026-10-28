@@ -60,13 +60,8 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
 
    auto& li = db["lineitem"];
 
-#ifdef NUMA_SHARD
-   auto l_orderkey = numaShardPtrs<types::Integer>(li, "l_orderkey");
-   auto l_quantity = numaShardPtrs<types::Numeric<12, 2>>(li, "l_quantity");
-#else
    auto l_orderkey = li["l_orderkey"].data<types::Integer>();
    auto l_quantity = li["l_quantity"].data<types::Numeric<12, 2>>();
-#endif
 
    tbb::enumerable_thread_specific<
        Hashmapx<types::Integer, types::Numeric<12, 2>, hash, false>>
@@ -78,16 +73,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
        [](auto& acc, auto&& value) { acc += value; }, zero, nrThreads);
 
    // scan lineitem and group by l_orderkey
-#ifdef NUMA_SHARD
-   numa_parallel_scan(nrThreads, li, morselSize,
-       [&](size_t begin, size_t end, size_t node) {
-          auto locals = groupOp.preAggLocals();
-          for (size_t i = begin; i < end; ++i) {
-             auto& group = locals.getGroup(l_orderkey[node][i]);
-             group += l_quantity[node][i];
-          }
-       });
-#else
    tbb::parallel_for(tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
                      [&](const tbb::blocked_range<size_t>& r) {
                         auto locals = groupOp.preAggLocals();
@@ -99,7 +84,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
                            // locals.consume(l_orderkey[i], l_quantity[i]);
                         }
                      });
-#endif
 
    Hashset<types::Integer, hash> ht1;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
@@ -146,30 +130,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
        entries3;
 
    auto& ord = db["orders"];
-#ifdef NUMA_SHARD
-   auto o_orderkey = numaShardPtrs<types::Integer>(ord, "o_orderkey");
-   auto o_custkey = numaShardPtrs<types::Integer>(ord, "o_custkey");
-   auto o_orderdate = numaShardPtrs<types::Date>(ord, "o_orderdate");
-   auto o_totalprice = numaShardPtrs<types::Numeric<12, 2>>(ord, "o_totalprice");
-   // scan orders
-   auto found = numa_parallel_reduce(
-       nrThreads, ord, morselSize, size_t(0),
-       [&](size_t begin, size_t end, size_t node, size_t& acc) {
-          auto& entries = entries3.local();
-          for (size_t i = begin; i < end; ++i) {
-             types::Char<25>* name;
-             if (ht1.contains(o_orderkey[node][i]) &&
-                 (name = ht2.findOne(o_custkey[node][i]))) {
-                entries.emplace_back(
-                    ht3.hash(o_orderkey[node][i]), o_orderkey[node][i],
-                    make_tuple(o_custkey[node][i], o_orderdate[node][i],
-                               o_totalprice[node][i], *name));
-                acc++;
-             }
-          }
-       },
-       [](const size_t& a, const size_t& b) { return a + b; });
-#else
    auto o_orderkey = ord["o_orderkey"].data<types::Integer>();
    auto o_custkey = ord["o_custkey"].data<types::Integer>();
    auto o_orderdate = ord["o_orderdate"].data<types::Date>();
@@ -185,7 +145,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
          found++;
       }
    });
-#endif
    ht3.setSize(found);
    parallel_insert(entries3, ht3);
 
@@ -196,21 +155,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
        [](auto& acc, auto&& value) { acc += value; }, zero, nrThreads);
 
    // scan lineitem and group by l_orderkey
-#ifdef NUMA_SHARD
-   numa_parallel_scan(nrThreads, li, morselSize,
-       [&](size_t begin, size_t end, size_t node) {
-          auto locals = finalGroupOp.preAggLocals();
-          for (size_t i = begin; i < end; ++i) {
-             std::tuple<types::Integer, types::Date, types::Numeric<12, 2>,
-                        types::Char<25>>* v;
-             if ((v = ht3.findOne(l_orderkey[node][i]))) {
-                auto& group =
-                    locals.getGroup(tuple_cat(*v, make_tuple(l_orderkey[node][i])));
-                group += l_quantity[node][i];
-             }
-          }
-       });
-#else
    tbb::parallel_for(
        tbb::blocked_range<size_t>(0, li.nrTuples, morselSize),
        [&](const tbb::blocked_range<size_t>& r) {
@@ -226,7 +170,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
              }
           }
        });
-#endif
 
    auto& result = resources.query->result;
    auto namAttr = result->addAttribute("c_name", sizeof(types::Char<25>));
@@ -288,18 +231,35 @@ std::unique_ptr<Q18Builder::Q18> Q18Builder::getQuery() {
                  primitives::aggr_plus_int64_t_col,
                  primitives::aggr_row_plus_int64_t_col,
                  primitives::gather_val_int64_t_col,
-                 Buffer(l_quantity, sizeof(int64_t)));
+                 Buffer(l_quantity, sizeof(int64_t)))
+#ifdef VW_GROUP_HAVING
+       // HAVING sum(l_quantity) > 300 inside the group-by: only l_quantity is
+       // gathered for every group, l_orderkey for the passing ones
+       .having(Buffer(l_quantity),
+               Expression().addOp(BF(primitives::sel_greater_int64_t_col_int64_t_val),
+                                  Buffer(sel_orderkey, sizeof(pos_t)),
+                                  Buffer(l_quantity), Value(&r->qty_bound)),
+               // sized: argument order is unspecified, either may create it
+               Buffer(sel_orderkey, sizeof(pos_t)))
+#endif
+       ;
+#ifndef VW_GROUP_HAVING
    Select(
        Expression().addOp(BF(primitives::sel_greater_int64_t_col_int64_t_val),
                           Buffer(sel_orderkey, sizeof(pos_t)),
                           Buffer(l_quantity), Value(&r->qty_bound)));
+#endif
    auto orders = Scan("orders");
-   // FIXME: This should be a right semi join (, but for now, hashjoin may be
-   // good enough)
    HashJoin(Buffer(orders_matches, sizeof(pos_t)))
+       .semi() // SQL: o_orderkey in (group-by subquery)
+#ifdef VW_GROUP_HAVING
+       .addBuildKey(Buffer(l_orderkey), primitives::hash_int32_t_col,
+                    primitives::scatter_int32_t_col)
+#else
        .addBuildKey(Buffer(l_orderkey), //
                     Buffer(sel_orderkey), primitives::hash_sel_int32_t_col,
                     primitives::scatter_sel_int32_t_col)
+#endif
        .addProbeKey(Column(orders, "o_orderkey"), //
                     primitives::hash_int32_t_col,
                     primitives::keys_equal_int32_t_col);

@@ -7,7 +7,7 @@ public:
   static runtime::Database& getDB() {
     static runtime::Database ssb;
     if (!ssb.hasRelation("lineorder")) {
-      importSSB(std::string(DATADIR) + "/ssb/1/", ssb);
+      importSSB(std::string(DATADIR) + "/ssb/sf1/", ssb);
     }
     return ssb;
   }

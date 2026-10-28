@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 2.8 FATAL_ERROR)
+# CMP0126 NEW: set(CACHE) does not remove a normal variable of the same
+# name, so values set before a cache declaration (e.g. by TARGET_MACHINE
+# presets) are not silently replaced by the cache default.
+if(POLICY CMP0126)
+  cmake_policy(SET CMP0126 NEW)
+endif()
 
 if(UNIX AND NOT APPLE)
   set(LINUX true)
@@ -38,86 +44,66 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 OPTION(VECTORWISE_BRANCHING "Use branching vectorwise primitives" OFF)
 OPTION(AUTOVECTORIZE "Allow the compiler to autovectorize" OFF)
-OPTION(DATADIR "Directory containing testdata" "")
+OPTION(DATADIR "Directory containing testdata" "/tank/alexb/swole/tpch/")
 OPTION(AVX512EXPERIMENTS OFF)
 OPTION(CANARY_IN_BENCH "Compile the canary into run_tpch (per-cell bracketing, -c/-C). Default OFF: the canary lives in the standalone `canary` binary (job-level prologue/epilogue) and run_tpch has zero canary code." OFF)
 OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
-OPTION(USE_TCMALLOC "Use tcmalloc from gperftools as the allocator" OFF)
-OPTION(NUMA_ALLOC "Replicate base-table columns per NUMA region" OFF)
-OPTION(NUMA_SHARD "Shard base-table columns across NUMA regions" OFF)
 OPTION(THREAD_PIN_PACKED "Pack threads per socket (vs spread round-robin)" OFF)
-OPTION(NUMA_DEBUG "Enable NUMA allocation debug logging and placement verification" OFF)
 
 # ── Machine topology ─────────────────────────────────────────────────────
 # TARGET_MACHINE selects a preset for SOCKETS_COUNT, CORES_PER_SOCKET,
-# SMT_PER_CORE, NUM_REGIONS, and layout flags.  Use "custom" to set them manually.
+# SMT_PER_CORE, and THREAD_PIN_PACKED.  Use "custom" to set them manually.
 set(TARGET_MACHINE "custom" CACHE STRING
     "Machine topology preset: custom, dubliner, roquefort, manchego, burrata, kafir")
 OPTION(CPU_LAYOUT_CONTIGUOUS "Contiguous CPU numbering per node (vs interleaved)" OFF)
 
-set(SOCKETS_COUNT 4 CACHE STRING "Number of physical sockets")
-set(CORES_PER_SOCKET 22 CACHE STRING "Physical cores per socket")
+set(SOCKETS_COUNT 4 CACHE STRING "Number of sockets/chiplets/memory domains")
+set(CORES_PER_SOCKET 22 CACHE STRING "Physical cores per socket/chiplet")
 set(SMT_PER_CORE 2 CACHE STRING "Hardware threads per physical core")
-# NUM_REGIONS: number of memory/L3 domains for data sharding.
-# Defaults to SOCKETS_COUNT.  Override for sub-socket domains (e.g. CCDs).
-set(NUM_REGIONS 0 CACHE STRING "Sharding regions (0 = auto from SOCKETS_COUNT)")
 
 if(TARGET_MACHINE STREQUAL "dubliner")
-  # 4-socket Xeon E7-8890v4, 22 cores/socket, 2-way SMT, interleaved CPU numbering
+  # 4-socket Xeon, 22 cores/socket, 2-way SMT, interleaved CPU numbering
   set(SOCKETS_COUNT 4)
   set(CORES_PER_SOCKET 22)
   set(SMT_PER_CORE 2)
-  set(NUM_REGIONS 4)
-  set(TARGET_ARCH "native")
+  set(PRESET_TARGET_ARCH "native")
 elseif(TARGET_MACHINE STREQUAL "roquefort")
-  # 1-socket AMD EPYC 7443P (Zen3), 24 cores, 2-way SMT, 1 NUMA node, 4 CCDs
-  # L3 domains (CCDs): 0={0-5,24-29} 1={6-11,30-35} 2={12-17,36-41} 3={18-23,42-47}
-  # Primaries-first SMT, contiguous cores per CCD.
+  # 1-socket AMD EPYC 7443P (Zen3), 24 cores, 2-way SMT, 1 NUMA node
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 24)
   set(SMT_PER_CORE 2)
-  set(NUM_REGIONS 4)
-  set(CPU_LAYOUT_CONTIGUOUS ON)
-  set(TARGET_ARCH "native")
+  set(PRESET_TARGET_ARCH "native")
 elseif(TARGET_MACHINE STREQUAL "manchego")
   # 2-socket Intel Xeon Silver 4509Y (Sapphire Rapids), 8 cores/socket,
   # 2-way SMT, interleaved CPU numbering (even=node0, odd=node1)
   set(SOCKETS_COUNT 2)
   set(CORES_PER_SOCKET 8)
   set(SMT_PER_CORE 2)
-  set(NUM_REGIONS 2)
-  set(TARGET_ARCH "sapphirerapids")
+  set(PRESET_TARGET_ARCH "sapphirerapids")
 elseif(TARGET_MACHINE STREQUAL "burrata")
   # 1-socket ARM Neoverse-N1, 128 cores, no SMT, 1 NUMA node
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 128)
   set(SMT_PER_CORE 1)
-  set(NUM_REGIONS 1)
-  set(TARGET_ARCH "neoverse-n1")
+  set(PRESET_TARGET_ARCH "neoverse-n1")
 elseif(TARGET_MACHINE STREQUAL "kafir")
   # 8-node Skylake-SP, 24 cores/node, 2-way SMT, contiguous CPU numbering
   set(SOCKETS_COUNT 8)
   set(CORES_PER_SOCKET 24)
   set(SMT_PER_CORE 2)
-  set(NUM_REGIONS 8)
   set(CPU_LAYOUT_CONTIGUOUS ON)
-  set(TARGET_ARCH "skylake-x")
+  set(PRESET_TARGET_ARCH "skylake-x")
 elseif(TARGET_MACHINE STREQUAL "rpi5")
   # Raspberry Pi 5: Broadcom BCM2712 (4x Cortex-A76), ARMv8.2-A, no SMT, 1 NUMA node
+  # -march=native is broken on RPi (missing /proc/cpuinfo fields), so we specify explicitly
   set(SOCKETS_COUNT 1)
   set(CORES_PER_SOCKET 4)
   set(SMT_PER_CORE 1)
-  set(NUM_REGIONS 1)
-  set(TARGET_ARCH "cortex-a76")
+  set(PRESET_TARGET_ARCH "cortex-a76")
 elseif(NOT TARGET_MACHINE STREQUAL "custom")
   message(FATAL_ERROR "Unknown TARGET_MACHINE: ${TARGET_MACHINE}. Valid: custom, dubliner, roquefort, manchego, burrata, kafir, rpi5")
-endif()
-
-# Default NUM_REGIONS to SOCKETS_COUNT if not set by preset or user
-if(NUM_REGIONS EQUAL 0)
-  set(NUM_REGIONS ${SOCKETS_COUNT})
 endif()
 
 IF(CPU_LAYOUT_CONTIGUOUS)
@@ -126,25 +112,11 @@ ENDIF()
 ADD_DEFINITIONS(-DCFG_SOCKETS_COUNT=${SOCKETS_COUNT})
 ADD_DEFINITIONS(-DCFG_CORES_PER_SOCKET=${CORES_PER_SOCKET})
 ADD_DEFINITIONS(-DCFG_SMT_PER_CORE=${SMT_PER_CORE})
-ADD_DEFINITIONS(-DCFG_NUM_REGIONS=${NUM_REGIONS})
-message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T  regions=${NUM_REGIONS}  contiguous=${CPU_LAYOUT_CONTIGUOUS}")
+message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORES_PER_SOCKET}C x ${SMT_PER_CORE}T  contiguous=${CPU_LAYOUT_CONTIGUOUS}")
 OPTION(NO_HUGE_PAGES "Disable huge pages for malloc_huge" OFF)
 OPTION(HUGE_2MB_MALLOC_HUGE "Use 2MB hugetlb pages for malloc_huge" OFF)
-OPTION(HUGE_1GB_MALLOC_HUGE "Use 1GB huge pages for malloc_huge" OFF)
-OPTION(HUGE_1GB_MALLOC_NUMA "Use 1GB huge pages for malloc_numa" OFF)
-OPTION(WARM_PAGES "Touch all relation pages before measurement to warm page tables" OFF)
-OPTION(INTERLEAVE_HT "Interleave hash table pages across NUMA nodes" OFF)
-OPTION(HYPER_FLOAT "Let TBB hyper-engine threads float (no pinning)" OFF)
-OPTION(SCAN_STATIC_PARTITION "Static per-thread slice partitioning in Scan::next()" OFF)
-OPTION(ORIGINAL_GROUPLOOKUP "Use original single-pass GroupLookup (no prefetch split)" OFF)
 set(MORSEL_SIZE 10000 CACHE STRING "Morsel size for parallel scan loops")
 
-IF(NUMA_ALLOC AND NUMA_SHARD)
-  message(FATAL_ERROR "NUMA_ALLOC and NUMA_SHARD are mutually exclusive. Pick one.")
-ENDIF()
-IF(SCAN_STATIC_PARTITION AND NUMA_SHARD)
-  message(FATAL_ERROR "SCAN_STATIC_PARTITION and NUMA_SHARD are mutually exclusive. Pick one.")
-ENDIF()
 OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise" OFF)
 
 if (VW_USE_CRC32)
@@ -153,12 +125,510 @@ if (VW_USE_CRC32)
 else ()
   message(STATUS "Building with MurMurHash")
 endif (VW_USE_CRC32)
+# VW_CRC32_FAST: bit-identical speedups of CRC32Hash (see Hash.hpp):
+#   - fixed seeds (HashGroup keys <= 8 bytes, hash/hash_sel primitives): the
+#     second crc32 per key is derived from the first (CRC linearity)
+#   - HashGroup keys > 8 bytes: 4 keys' chunk chains interleaved
+# Only affects builds with VW_USE_CRC32.
+OPTION(VW_CRC32_FAST "Bit-identical CRC32Hash speedups (linearity, interleaved wide keys)" OFF)
+if(VW_CRC32_FAST)
+  ADD_DEFINITIONS(-DVW_CRC32_FAST=1)
+  if(VW_USE_CRC32)
+    message(STATUS "Building with VW_CRC32_FAST")
+  else()
+    message(STATUS "Building with VW_CRC32_FAST (no effect: VW_USE_CRC32 is OFF)")
+  endif()
+endif()
+# VW_CRC32_VPCLMUL: CRC32Hash with VPCLMULQDQ, 8 keys per zmm, bit-identical
+# (SimdCrc.hpp): hash/hash_sel primitives and HashGroup keys <= 8 bytes.
+# Needs AVX-512F/DQ/VL/BW + VPCLMULQDQ (Ice Lake+, Sapphire Rapids, Zen 4)
+# in the target flags, else scalar with a warning. Combines with
+# VW_CRC32_FAST, which still covers wide keys and the fixed-seed scalar
+# paths. Only affects builds with VW_USE_CRC32.
+OPTION(VW_CRC32_VPCLMUL "CRC32Hash with VPCLMULQDQ (8 keys per zmm, bit-identical)" OFF)
+if(VW_CRC32_VPCLMUL)
+  ADD_DEFINITIONS(-DVW_CRC32_VPCLMUL=1)
+  if(VW_USE_CRC32)
+    message(STATUS "Building with VW_CRC32_VPCLMUL")
+  else()
+    message(STATUS "Building with VW_CRC32_VPCLMUL (no effect: VW_USE_CRC32 is OFF)")
+  endif()
+endif()
+
 
 OPTION(VW_GROUP_AGGR "Perform group-wise GROUP BY aggregation for VectorWise" OFF)
-if (VW_GROUP_AGGR)
+if(VW_GROUP_AGGR)
   ADD_DEFINITIONS(-DVW_GROUP_AGGR=1)
   message(STATUS "Building with VW_GROUP_AGGR")
-endif (VW_GROUP_AGGR)
+endif(VW_GROUP_AGGR)
+
+# VW_AGGR_FUSED: HashGroup updates all int64 SUM / COUNT(*) aggregates of a
+# row's pre-aggregation entry in one pass instead of one pass per aggregate
+# (breaks the per-aggregate store-forwarding chains; TPC-H Q1). Group-bys
+# with any other aggregate, or a single one, keep updateGroups.
+# VW_GROUP_BATCH_CREATE: HashGroup pre-aggregation creates a vector's new
+# groups in one consecutive block and initializes them (buildScatter) once
+# per vector instead of once per group (TPC-H Q18: 1.5M groups).
+OPTION(VW_GROUP_BATCH_CREATE "Batched group creation in VectorWise HashGroup pre-aggregation" OFF)
+if(VW_GROUP_BATCH_CREATE)
+  if(VW_GROUP_AGGR)
+    message(FATAL_ERROR "VW_GROUP_BATCH_CREATE does not support VW_GROUP_AGGR's per-group Group records")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_BATCH_CREATE=1)
+  message(STATUS "Building with VW_GROUP_BATCH_CREATE")
+endif()
+
+# VW_GROUP_GLOBAL_DIRECT: HashGroup's global phase finds or creates each
+# spilled row's group in one pass (memcmp on packed keys, batched init)
+# instead of findGroups + createMissingGroups with partition_by_key_row
+# dedup. Only for group-bys whose keys are all fixed-width scalars; others
+# keep the existing path.
+OPTION(VW_GROUP_GLOBAL_DIRECT "One-pass find-or-create in VectorWise HashGroup global phase" OFF)
+if(VW_GROUP_GLOBAL_DIRECT)
+  ADD_DEFINITIONS(-DVW_GROUP_GLOBAL_DIRECT=1)
+  message(STATUS "Building with VW_GROUP_GLOBAL_DIRECT")
+endif()
+
+# VW_GROUP_NO_CONCAT: a group-by on one dense 1/2/4/8-byte key hashes and
+# compares the key column in place instead of copying it into packed keys.
+OPTION(VW_GROUP_NO_CONCAT "Skip key packing for single dense keys in VectorWise HashGroup" OFF)
+if(VW_GROUP_NO_CONCAT)
+  ADD_DEFINITIONS(-DVW_GROUP_NO_CONCAT=1)
+  message(STATUS "Building with VW_GROUP_NO_CONCAT")
+endif()
+
+# VW_SPILL_WORD_COPY: VectorWise's HashGroup spills through
+# PartitionedDeque::push_back_words, which copies rows of <= 64 bytes inline
+# as 8-byte words instead of calling memcpy per row. Hyper's GroupBy keeps
+# push_back, so its code is the same with or without this option.
+OPTION(VW_SPILL_WORD_COPY "Inline word copy for spilled rows in PartitionedDeque" OFF)
+if(VW_SPILL_WORD_COPY)
+  ADD_DEFINITIONS(-DVW_SPILL_WORD_COPY=1)
+  message(STATUS "Building with VW_SPILL_WORD_COPY")
+endif()
+
+# VW_GROUP_DISPATCH: HashGroup resolves its code path once per operator from
+# plan-fixed facts (key columns, key width, selection, aggregates) and runs
+# specialized per-vector loops: no Concat for single keys, hash fused into
+# the lookup, batched group creation, fused SUM/COUNT update, one-pass global
+# find-or-create, inline spill copy. One switch for what
+# VW_GROUP_BATCH_CREATE, VW_FUSE_HASH, VW_GROUP_NO_CONCAT,
+# VW_GROUP_GLOBAL_DIRECT, VW_SPILL_WORD_COPY and VW_AGGR_FUSED do separately
+# (it compiles in their supporting code). Run reuse is VW_GROUP_RUN_HEADS.
+OPTION(VW_GROUP_DISPATCH "Plan-resolved specialized code paths in VectorWise HashGroup" OFF)
+if(VW_GROUP_DISPATCH)
+  if(VW_GROUP_AGGR)
+    message(FATAL_ERROR "VW_GROUP_DISPATCH does not support VW_GROUP_AGGR")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_DISPATCH=1 -DVW_GROUP_BATCH_CREATE=1
+                  -DVW_GROUP_GLOBAL_DIRECT=1 -DVW_SPILL_WORD_COPY=1
+                  -DVW_AGGR_FUSED=1)
+  message(STATUS "Building with VW_GROUP_DISPATCH")
+endif()
+
+# VW_GROUP_RUN_HEADS (needs VW_GROUP_DISPATCH): replaces last-match's
+# adaptive per-row check with a branch-free run pass: find the rows whose key
+# differs from the previous row's (AVX-512BW/VL: 16 keys per compare and
+# register compress; scalar otherwise), look up only those, copy each run's
+# entry to its rows. No adaptive threshold.
+OPTION(VW_GROUP_RUN_HEADS "Branch-free run-head lookup in VectorWise HashGroup (needs VW_GROUP_DISPATCH)" OFF)
+if(VW_GROUP_RUN_HEADS)
+  if(NOT VW_GROUP_DISPATCH)
+    message(FATAL_ERROR "VW_GROUP_RUN_HEADS replaces VW_GROUP_DISPATCH's key loop; enable VW_GROUP_DISPATCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_RUN_HEADS=1)
+  message(STATUS "Building with VW_GROUP_RUN_HEADS")
+endif()
+
+OPTION(VW_AGGR_FUSED "Fused multi-aggregate update in VectorWise HashGroup" OFF)
+if(VW_AGGR_FUSED)
+  if(VW_GROUP_AGGR)
+    message(FATAL_ERROR "VW_AGGR_FUSED and VW_GROUP_AGGR both replace the aggregate update; enable one")
+  endif()
+  ADD_DEFINITIONS(-DVW_AGGR_FUSED=1)
+  message(STATUS "Building with VW_AGGR_FUSED")
+endif()
+
+# VW_AGGR_FUSED_KINDS: the fused aggregate pass specialized by aggregate kind,
+# resolved once from the plan: dense columns read directly (no identity
+# selection), columns sharing one selection vector load it once per row,
+# COUNT(*) adds 1 (no column of ones). Other shapes keep the generic kernel.
+OPTION(VW_AGGR_FUSED_KINDS "Kind-specialized fused aggregate update in VectorWise HashGroup" OFF)
+if(VW_AGGR_FUSED_KINDS)
+  if(NOT VW_AGGR_FUSED AND NOT VW_GROUP_DISPATCH)
+    message(FATAL_ERROR "VW_AGGR_FUSED_KINDS specializes the fused aggregate update; enable VW_AGGR_FUSED or VW_GROUP_DISPATCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_AGGR_FUSED_KINDS=1)
+  message(STATUS "Building with VW_AGGR_FUSED_KINDS")
+endif()
+
+# VW_PROJ_COMPOUND: compound projection primitives (X100-style). Inside one
+# Project expression, an int64 +, -, * projection whose result feeds the
+# next one runs with it in one loop (CompoundPrimitives.hpp); chains are found
+# by ExpressionBuilder at build time, intermediate buffers are still written.
+OPTION(VW_PROJ_COMPOUND "Compound int64 projection primitives in VectorWise expressions" OFF)
+if(VW_PROJ_COMPOUND)
+  ADD_DEFINITIONS(-DVW_PROJ_COMPOUND=1)
+  message(STATUS "Building with VW_PROJ_COMPOUND")
+endif()
+
+OPTION(VW_GROUP_AGGR_SEL "Perform selection vector batching for VectorWise" OFF)
+if(VW_GROUP_AGGR_SEL)
+  ADD_DEFINITIONS(-DVW_GROUP_AGGR_SEL=1)
+  message(STATUS "Building with VW_GROUP_AGGR_SEL")
+endif(VW_GROUP_AGGR_SEL)
+
+OPTION(VW_POS_16 "Use uint16_t for VectorWise pos_t" OFF)
+if(VW_POS_16)
+  ADD_DEFINITIONS(-DVW_POS_16=1)
+  message(STATUS "Building with VW_POS_16")
+endif(VW_POS_16)
+
+OPTION(VW_FUSE_HASH "Perform hash inside Lookup() for VectorWise GROUP BY" OFF)
+if(VW_FUSE_HASH)
+  ADD_DEFINITIONS(-DVW_FUSE_HASH=1)
+  message(STATUS "Building with VW_FUSE_HASH")
+endif(VW_FUSE_HASH)
+
+# AVX-512 selection kernels (include/vectorwise/SimdSelection.hpp). The
+# existing sel_*/selsel_* primitive names are redirected to the SIMD kernels
+# for supported types; without AVX-512F in ARCH_FLAGS they stay scalar.
+OPTION(VW_SIMD_SEL "AVX-512 selection kernels for int32/int64/Date (sel/selsel, col_val/col_col)" OFF)
+if(VW_SIMD_SEL)
+  ADD_DEFINITIONS(-DVW_SIMD_SEL=1)
+  message(STATUS "Building with VW_SIMD_SEL")
+endif(VW_SIMD_SEL)
+
+# Gathered-input selection (selsel_*) under VW_SIMD_SEL:
+#   scalar     : keep the scalar _bf templates (default; on GDS-mitigated
+#                Cascade Lake neither SIMD variant beats them)
+#   scalarload : scalar loads through inSel -> mask -> compress
+#   hwgather   : vpgatherdd/vpgatherdq -> compare -> compress
+set(VW_SIMD_SEL_GATHER "scalar" CACHE STRING "VW_SIMD_SEL gathered-input kernels: scalar, scalarload, hwgather")
+set_property(CACHE VW_SIMD_SEL_GATHER PROPERTY STRINGS scalar scalarload hwgather)
+if(VW_SIMD_SEL_GATHER STREQUAL "scalarload")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_GATHER_SCALARLOAD=1)
+elseif(VW_SIMD_SEL_GATHER STREQUAL "hwgather")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_GATHER_HWGATHER=1)
+elseif(NOT VW_SIMD_SEL_GATHER STREQUAL "scalar")
+  message(FATAL_ERROR "VW_SIMD_SEL_GATHER must be scalar, scalarload or hwgather (got '${VW_SIMD_SEL_GATHER}')")
+endif()
+# Contiguous selection kernels under VW_SIMD_SEL:
+#   VW_SIMD_SEL_COMPRESS reg : register vpcompressd + masked store (default;
+#                              safe on Zen 4 where the memory form is slow)
+#                        mem : memory-form vpcompressd, like the old kernels
+#   VW_SIMD_SEL_UNROLL   1|2 : vectors of 16 per loop iteration
+#   VW_SIMD_SEL_WIDTH  512|256 : zmm kernels (default) or ymm kernels
+#                              (AVX512VL; avoids the AVX-512 frequency
+#                              license drop; UNROLL is ignored at 256)
+set(VW_SIMD_SEL_COMPRESS "reg" CACHE STRING "VW_SIMD_SEL compress form: reg, mem")
+set_property(CACHE VW_SIMD_SEL_COMPRESS PROPERTY STRINGS reg mem)
+if(VW_SIMD_SEL_COMPRESS STREQUAL "mem")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_COMPRESS_MEM=1)
+elseif(NOT VW_SIMD_SEL_COMPRESS STREQUAL "reg")
+  message(FATAL_ERROR "VW_SIMD_SEL_COMPRESS must be reg or mem (got '${VW_SIMD_SEL_COMPRESS}')")
+endif()
+set(VW_SIMD_SEL_UNROLL "1" CACHE STRING "VW_SIMD_SEL contiguous unroll: 1, 2")
+set_property(CACHE VW_SIMD_SEL_UNROLL PROPERTY STRINGS 1 2)
+if(VW_SIMD_SEL_UNROLL STREQUAL "2")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_UNROLL2=1)
+elseif(NOT VW_SIMD_SEL_UNROLL STREQUAL "1")
+  message(FATAL_ERROR "VW_SIMD_SEL_UNROLL must be 1 or 2 (got '${VW_SIMD_SEL_UNROLL}')")
+endif()
+set(VW_SIMD_SEL_WIDTH "512" CACHE STRING "VW_SIMD_SEL contiguous vector width: 512, 256")
+set_property(CACHE VW_SIMD_SEL_WIDTH PROPERTY STRINGS 512 256)
+if(VW_SIMD_SEL_WIDTH STREQUAL "256")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_WIDTH_256=1)
+  # Without this, clang on hosts tuned for 512-bit vectors (e.g. Zen 4
+  # -march=native) merges the two 4-lane int64 ymm compares into one zmm
+  # compare. Functions using zmm intrinsics (the 512 kernels) keep zmm.
+  set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/src/vectorwise/primitives/Selection.cpp
+    ${CMAKE_SOURCE_DIR}/src/benchmarks/primitives/selbench.cpp
+    ${CMAKE_SOURCE_DIR}/src/test/vectorwise/simd_selection.cpp
+    PROPERTIES COMPILE_OPTIONS "-mprefer-vector-width=256")
+elseif(NOT VW_SIMD_SEL_WIDTH STREQUAL "512")
+  message(FATAL_ERROR "VW_SIMD_SEL_WIDTH must be 512 or 256 (got '${VW_SIMD_SEL_WIDTH}')")
+endif()
+if(VW_SIMD_SEL)
+  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER} COMPRESS=${VW_SIMD_SEL_COMPRESS} UNROLL=${VW_SIMD_SEL_UNROLL} WIDTH=${VW_SIMD_SEL_WIDTH}")
+endif()
+
+# Software prefetch in the hash join probe loops (joinAllParallel /
+# joinSelParallel): directory slot 2*DIST probes ahead, first chain entry
+# DIST ahead.
+OPTION(VW_JOIN_PREFETCH "Software prefetch in VectorWise hash join probes" OFF)
+set(VW_JOIN_PREFETCH_DIST 16 CACHE STRING "VW_JOIN_PREFETCH: prefetch distance in probes")
+if(VW_JOIN_PREFETCH)
+  ADD_DEFINITIONS(-DVW_JOIN_PREFETCH=1 -DVW_JOIN_PREFETCH_DIST=${VW_JOIN_PREFETCH_DIST})
+  message(STATUS "Building with VW_JOIN_PREFETCH (distance ${VW_JOIN_PREFETCH_DIST})")
+endif(VW_JOIN_PREFETCH)
+
+# VW_JOIN_TWOPHASE: group prefetching in the hash join probe (first pass of
+# joinAllParallel / joinSelParallel in three loops, see Operators.cpp);
+# joins whose directory has fewer than VW_JOIN_TWOPHASE_MIN_SLOTS slots keep
+# the one-loop path. run_joinbench variant J2.
+OPTION(VW_JOIN_TWOPHASE "Two-phase (group prefetch) hash join probe" OFF)
+set(VW_JOIN_TWOPHASE_MIN_SLOTS 4096 CACHE STRING
+    "VW_JOIN_TWOPHASE: smallest directory (slots) that uses the two-phase probe")
+if(VW_JOIN_TWOPHASE)
+  if(VW_JOIN_PREFETCH)
+    message(FATAL_ERROR "VW_JOIN_TWOPHASE and VW_JOIN_PREFETCH both prefetch the same probe loop; enable one")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_TWOPHASE=1 -DVW_JOIN_TWOPHASE_MIN_SLOTS=${VW_JOIN_TWOPHASE_MIN_SLOTS})
+  message(STATUS "Building with VW_JOIN_TWOPHASE (min slots ${VW_JOIN_TWOPHASE_MIN_SLOTS})")
+endif()
+
+# VW_JOIN_SIMD: the existing AVX-512 hash join probes (joinAllSIMD /
+# joinSelSIMD) by default instead of joinAllParallel / joinSelParallel; the
+# SIMDjoin environment variable still overrides. Needs AVX-512F in the
+# target flags (else scalar with a warning) and 32-bit pos_t. Wins on
+# Sapphire Rapids, loses on GDS-mitigated gathers (Cascade Lake), see
+# run_joinbench variant J4.
+OPTION(VW_JOIN_SIMD "AVX-512 hash join probes by default" OFF)
+if(VW_JOIN_SIMD)
+  if(VW_POS_16)
+    message(FATAL_ERROR "VW_JOIN_SIMD needs 32-bit pos_t (VW_POS_16 is ON)")
+  endif()
+  if(VW_JOIN_TWOPHASE)
+    message(FATAL_ERROR "VW_JOIN_SIMD and VW_JOIN_TWOPHASE replace the same probe loop; enable one")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_SIMD=1)
+  message(STATUS "Building with VW_JOIN_SIMD")
+endif()
+
+# VW_NEW_JOIN: the join / join_sel refresh of andrew_pseudocode.md
+# (Hashjoin::joinAllNew / joinSelNew): 8 probes at a time gather the chain
+# head, split into real (head hash matches) and maybe (slot occupied, no
+# match) lists, then follow the chains of the concatenated list. AVX-512
+# when compiled for it (64-bit hashes, 32-bit pos_t), else an 8-lane scalar
+# block; a scalar loop for the last < 8 probes.
+OPTION(VW_NEW_JOIN "Real/maybe-list hash join probe (andrew_pseudocode.md)" OFF)
+#   VW_NEW_JOIN_FULL  what `full` means: tag (default; the directory
+#                     pointer's tag bit for the hash is set) or occupied
+#                     (the slot has a chain head)
+set(VW_NEW_JOIN_FULL "tag" CACHE STRING "VW_NEW_JOIN: full = tag | occupied")
+if(VW_NEW_JOIN)
+  if(VW_NEW_JOIN_FULL STREQUAL "tag")
+    ADD_DEFINITIONS(-DVW_NEW_JOIN_FULL_TAG=1)
+  elseif(NOT VW_NEW_JOIN_FULL STREQUAL "occupied")
+    message(FATAL_ERROR "VW_NEW_JOIN_FULL must be tag or occupied (got '${VW_NEW_JOIN_FULL}')")
+  endif()
+  if(VW_JOIN_SIMD OR VW_JOIN_TWOPHASE)
+    message(FATAL_ERROR "VW_NEW_JOIN replaces the join probe; disable VW_JOIN_SIMD and VW_JOIN_TWOPHASE")
+  endif()
+  ADD_DEFINITIONS(-DVW_NEW_JOIN=1)
+  message(STATUS "Building with VW_NEW_JOIN (full = ${VW_NEW_JOIN_FULL})")
+endif()
+
+# VW_JOIN_BLOOM: each VectorWise Hashjoin builds a register-blocked Bloom
+# filter (VW_JOIN_BLOOM_BITS bits per build key, 4 bits per key in one 64-bit
+# word) next to the shared hash table, and filters every probe vector with it
+# (AVX-512, 8 hashes at a time) before the directory is touched; the join's
+# first pass visits only the survivors. Whether a join gets a filter is fixed
+# once per operator from a plan fact and a hardware fact (the same rule as
+# VW_JOIN_DISPATCH): the build keys are read through a selection (a filtered
+# build side) and the hash directory is at least the L1 data cache
+# (runtime::cacheBytes). No per-vector switch. VW_JOIN_BLOOM_MIN_KEYS is used
+# only when the cache size cannot be read.
+# Works with the default join and VW_NEW_JOIN; 64-bit hashes only.
+OPTION(VW_JOIN_BLOOM "VectorWise-owned Bloom filter in front of hash join probes" OFF)
+# VW_JOIN_BLOOM_GATHER: how the AVX2 filter test (machines without AVX-512,
+# include/vectorwise/BloomKernels.hpp) fetches its 4 filter words: scalar
+# loads assembled in a register, or hw (vpgatherqq). AVX-512 and scalar
+# builds are unaffected.
+set(VW_JOIN_BLOOM_GATHER "scalar" CACHE STRING "VW_JOIN_BLOOM AVX2 word fetch: scalar, hw")
+set_property(CACHE VW_JOIN_BLOOM_GATHER PROPERTY STRINGS scalar hw)
+if(VW_JOIN_BLOOM_GATHER STREQUAL "hw")
+  ADD_DEFINITIONS(-DVW_JOIN_BLOOM_GATHER_HW=1)
+elseif(NOT VW_JOIN_BLOOM_GATHER STREQUAL "scalar")
+  message(FATAL_ERROR "VW_JOIN_BLOOM_GATHER must be scalar or hw (got '${VW_JOIN_BLOOM_GATHER}')")
+endif()
+set(VW_JOIN_BLOOM_BITS 16 CACHE STRING "VW_JOIN_BLOOM: filter bits per build key")
+set(VW_JOIN_BLOOM_MIN_KEYS 4096 CACHE STRING "VW_JOIN_BLOOM: smallest filtered build when the L1 size is unknown")
+if(VW_JOIN_BLOOM)
+  if(HASH_SIZE_32)
+    message(FATAL_ERROR "VW_JOIN_BLOOM needs 64-bit hashes (HASH_SIZE_32 is ON)")
+  endif()
+  if(VW_JOIN_TWOPHASE OR VW_JOIN_SIMD OR VW_JOIN_PREFETCH)
+    message(FATAL_ERROR "VW_JOIN_BLOOM supports the default join and VW_NEW_JOIN; disable VW_JOIN_TWOPHASE, VW_JOIN_SIMD and VW_JOIN_PREFETCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_BLOOM=1 -DVW_JOIN_BLOOM_BITS=${VW_JOIN_BLOOM_BITS}
+                  -DVW_JOIN_BLOOM_MIN_KEYS=${VW_JOIN_BLOOM_MIN_KEYS})
+  message(STATUS "Building with VW_JOIN_BLOOM (${VW_JOIN_BLOOM_BITS} bits/key, min ${VW_JOIN_BLOOM_MIN_KEYS} keys)")
+endif()
+
+# VW_JOIN_FUSED_PROBE: a join with one int32 probe key hashes the keys
+# itself instead of evaluating its probe hash expression: with VW_JOIN_BLOOM
+# active, hashing and the filter test are one pass and only survivors are
+# written; otherwise VW_NEW_JOIN's first pass hashes 8 keys in registers.
+# Bit-identical hashes; other probe sides keep the separate hash pass.
+# Needs VW_JOIN_BLOOM (hash + filter, any join) or VW_NEW_JOIN (hash +
+# first pass), and 64-bit hashes.
+OPTION(VW_JOIN_FUSED_PROBE "Fuse probe hashing into the VectorWise join (needs VW_JOIN_BLOOM or VW_NEW_JOIN)" OFF)
+if(VW_JOIN_FUSED_PROBE)
+  if(NOT VW_NEW_JOIN AND NOT VW_JOIN_BLOOM)
+    message(FATAL_ERROR "VW_JOIN_FUSED_PROBE fuses into VW_JOIN_BLOOM's filter pass or VW_NEW_JOIN's first pass; enable one")
+  endif()
+  if(HASH_SIZE_32)
+    message(FATAL_ERROR "VW_JOIN_FUSED_PROBE needs 64-bit hashes (HASH_SIZE_32 is ON)")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_FUSED_PROBE=1)
+  message(STATUS "Building with VW_JOIN_FUSED_PROBE")
+endif()
+
+# VW_JOIN_SEMI: VectorWise Hashjoins the plan derives as semi joins
+# (~HashJoinBuilder: unique build keys, no build column used; Q18's IN
+# subquery, and the primary-key inner joins Q3 customer, Q5 region, Q9 part,
+# which Hyper's plans run as Hashset::contains) with one int32 key per side
+# probe the hash table for existence only, as Hashset::contains does: walk
+# the chain, compare hash and key inline, stop at the first match, emit the
+# probe row once. No key equality pass, no gather. The same hash table,
+# hash and probe hashing as the inner join; other joins are unchanged.
+# Without it a marked join runs as an inner join (equal result, the chain is
+# walked to its end). Marked joins assume unique build keys (see semi()).
+OPTION(VW_JOIN_SEMI "Existence-only hash probe (Hashset::contains) for joins the plan derives as semi" OFF)
+if(VW_JOIN_SEMI)
+  ADD_DEFINITIONS(-DVW_JOIN_SEMI=1)
+endif()
+
+# VW_JOIN_SEMI_BITMAP: a semi join (above) whose build key range fits in the
+# L2 cache as a bitmap (one bit per key in [min, max]; L2 of cpu0 from sysfs,
+# runtime::cacheBytes(2); unknown L2: no bitmap) is probed through that
+# bitmap instead of the hash table (AVX-512: range check and bit test, 16
+# keys per step): no probe hashing, directory, chain or key check. Typer's
+# plans have no such structure, so it is an engine option outside the
+# like-for-like comparison. L2 is the level below every machine's measured
+# crossover (run_joindispatchbench semi sweep: the bitmap still wins at L2 on
+# all four and loses from 2x L2 to L3/2). Needs VW_JOIN_DISPATCH, which owns
+# the decision. Replaces VW_JOIN_SEMI_MAX_BYTES (removed).
+OPTION(VW_JOIN_SEMI_BITMAP "Semi joins through a build-key bitmap when it fits in L2 (needs VW_JOIN_DISPATCH)" OFF)
+if(DEFINED VW_JOIN_SEMI_MAX_BYTES AND NOT "${VW_JOIN_SEMI_MAX_BYTES}" STREQUAL "0")
+  message(FATAL_ERROR "VW_JOIN_SEMI_MAX_BYTES was removed: use VW_JOIN_SEMI_BITMAP=ON (bitmap <= L2)")
+endif()
+
+# VW_JOIN_DISPATCH: Hashjoin resolves its probe path once per operator, at the
+# end of the build, from plan facts (semi marker, key count and types, build
+# keys read through a selection, single int32 probe key) and the build
+# summary (row count, key range), then runs one member-function pointer per
+# probe vector instead of today's per-vector checks. It compiles in and
+# chooses between the paths VW_JOIN_SEMI, VW_JOIN_BLOOM and
+# VW_JOIN_FUSED_PROBE add separately (see study/JOIN_DISPATCH_STUDY.md):
+#   semi         derived semi join, one int32 key per side: the existence
+#                probe on the hash path (VW_JOIN_SEMI), after the filter if
+#                one is chosen; with VW_JOIN_SEMI_BITMAP the bitmap instead
+#                when it fits in L2
+#   Bloom filter the directory is at least the L1 size (runtime::cacheBytes;
+#                VW_JOIN_BLOOM_MIN_KEYS rows if L1 is unknown) and the build
+#                keys are read through a selection (a filtered build side);
+#                fixed for the operator (no per-vector adaptive switch)
+#   fused hash   one int32 probe key, with the filter or VW_NEW_JOIN
+OPTION(VW_JOIN_DISPATCH "Plan-resolved probe path per VectorWise Hashjoin (compiles in VW_JOIN_SEMI, VW_JOIN_BLOOM, VW_JOIN_FUSED_PROBE)" OFF)
+if(VW_JOIN_DISPATCH)
+  if(HASH_SIZE_32)
+    message(FATAL_ERROR "VW_JOIN_DISPATCH needs 64-bit hashes (HASH_SIZE_32 is ON)")
+  endif()
+  if(VW_JOIN_TWOPHASE OR VW_JOIN_SIMD OR VW_JOIN_PREFETCH)
+    message(FATAL_ERROR "VW_JOIN_DISPATCH compiles in VW_JOIN_BLOOM; disable VW_JOIN_TWOPHASE, VW_JOIN_SIMD and VW_JOIN_PREFETCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_DISPATCH=1 -DVW_JOIN_SEMI=1 -DVW_JOIN_BLOOM=1
+                  -DVW_JOIN_BLOOM_BITS=${VW_JOIN_BLOOM_BITS}
+                  -DVW_JOIN_BLOOM_MIN_KEYS=${VW_JOIN_BLOOM_MIN_KEYS}
+                  -DVW_JOIN_FUSED_PROBE=1)
+  message(STATUS "Building with VW_JOIN_DISPATCH")
+endif()
+# VW_JOIN_SEMI_BITMAP (above): its own block, so the dispatch block's
+# defines stay what dispatch implies (scripts/attribution.py reads them)
+if(VW_JOIN_SEMI_BITMAP)
+  if(NOT VW_JOIN_DISPATCH)
+    message(FATAL_ERROR "VW_JOIN_SEMI_BITMAP needs VW_JOIN_DISPATCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_SEMI_BITMAP=1)
+  message(STATUS "Building with VW_JOIN_SEMI_BITMAP (semi bitmap when it fits in L2)")
+endif()
+
+# VW_GROUP_HAVING: HashGroupBuilder::having(input, condition, selection)
+# filters the group-by's output before it is gathered (SQL HAVING): only the
+# condition's input column is gathered for every group; the other output
+# columns are gathered for the passing groups only. TPC-H Q18 uses it instead
+# of its Select over the group-by output.
+OPTION(VW_GROUP_HAVING "HAVING filter inside VectorWise HashGroup's output (Q18 drops its Select)" OFF)
+if(VW_GROUP_HAVING)
+  ADD_DEFINITIONS(-DVW_GROUP_HAVING=1)
+  message(STATUS "Building with VW_GROUP_HAVING")
+endif()
+
+# Hash join entry layout (QueryBuilder::HashJoinBuilder). All OFF / 8 keeps
+# the existing layout: header, then fields packed in add* call order, stride
+# rounded up to 8.
+#   VW_JOIN_ALIGN_FIELDS  align each field to its natural alignment, taken
+#                         from its size (largest power of two dividing it,
+#                         capped at 8): int32 4, int64 8, Char<25> 2
+#   VW_JOIN_ENTRY_PAD     round the entry stride up to 8 (default), 16, 32 or
+#                         64 bytes, so entry headers do not straddle cache lines
+#   VW_JOIN_SLIM_HEADER   join entries start their payload right after
+#                         EntryHeader::hash; drops the 8-byte group pointer
+#                         VW_GROUP_AGGR adds (no effect without VW_GROUP_AGGR)
+#   VW_Q9_FIELD_ORDER     TPC-H Q9 partsupp join: scatter ps_supplycost before
+#                         the Char<25> n_name, so the int64 is 8-aligned
+OPTION(VW_JOIN_ALIGN_FIELDS "Align hash join entry fields to their natural alignment" OFF)
+if(VW_JOIN_ALIGN_FIELDS)
+  ADD_DEFINITIONS(-DVW_JOIN_ALIGN_FIELDS=1)
+  message(STATUS "Building with VW_JOIN_ALIGN_FIELDS")
+endif()
+set(VW_JOIN_ENTRY_PAD "8" CACHE STRING "Hash join entry stride alignment in bytes: 8, 16, 32, 64")
+set_property(CACHE VW_JOIN_ENTRY_PAD PROPERTY STRINGS 8 16 32 64)
+if(VW_JOIN_ENTRY_PAD MATCHES "^(16|32|64)$")
+  ADD_DEFINITIONS(-DVW_JOIN_ENTRY_PAD=${VW_JOIN_ENTRY_PAD})
+  message(STATUS "Building with VW_JOIN_ENTRY_PAD=${VW_JOIN_ENTRY_PAD}")
+elseif(NOT VW_JOIN_ENTRY_PAD STREQUAL "8")
+  message(FATAL_ERROR "VW_JOIN_ENTRY_PAD must be 8, 16, 32 or 64 (got '${VW_JOIN_ENTRY_PAD}')")
+endif()
+OPTION(VW_JOIN_SLIM_HEADER "Hash join entries skip EntryHeader::group (VW_GROUP_AGGR)" OFF)
+if(VW_JOIN_SLIM_HEADER)
+  ADD_DEFINITIONS(-DVW_JOIN_SLIM_HEADER=1)
+  if(VW_GROUP_AGGR)
+    message(STATUS "Building with VW_JOIN_SLIM_HEADER")
+  else()
+    message(STATUS "Building with VW_JOIN_SLIM_HEADER (no effect: VW_GROUP_AGGR is OFF, the header has no group pointer)")
+  endif()
+endif()
+OPTION(VW_Q9_FIELD_ORDER "TPC-H Q9: scatter ps_supplycost before n_name in the partsupp join" OFF)
+if(VW_Q9_FIELD_ORDER)
+  ADD_DEFINITIONS(-DVW_Q9_FIELD_ORDER=1)
+  message(STATUS "Building with VW_Q9_FIELD_ORDER")
+endif()
+
+# AVX-512 MurmurHash64A kernels (include/vectorwise/SimdHash.hpp) for the
+# hash/hash_sel/rehash/rehash_sel primitives and HashGroup's packed-key hash.
+# Bit-identical to the scalar hash. Only applies to the default MurMurHash
+# (not with VW_USE_CRC32 or HASH_SIZE_32); needs AVX512F + AVX512DQ.
+OPTION(VW_SIMD_HASH "AVX-512 MurmurHash64A kernels for VectorWise hashing" OFF)
+if(VW_SIMD_HASH)
+  if(VW_USE_CRC32 OR HASH_SIZE_32)
+    message(WARNING "VW_SIMD_HASH only affects MurMurHash; it is a no-op with VW_USE_CRC32 / HASH_SIZE_32")
+  endif()
+  ADD_DEFINITIONS(-DVW_SIMD_HASH=1)
+  message(STATUS "Building with VW_SIMD_HASH")
+endif(VW_SIMD_HASH)
+
+# VW_SIMD_HASH_GATHER: how the AVX-512 hash kernels (VW_SIMD_HASH,
+# VW_CRC32_VPCLMUL) collect keys through a selection vector (hash_sel,
+# rehash_sel): insert (default; scalar loads assembled in registers) or stack
+# (the original: 8 narrow stores, one vector reload, which stalls on store
+# forwarding with gcc).
+set(VW_SIMD_HASH_GATHER "insert" CACHE STRING "AVX-512 hash kernels' gather: insert | stack")
+if(VW_SIMD_HASH_GATHER STREQUAL "stack")
+  ADD_DEFINITIONS(-DVW_SIMD_HASH_GATHER_STACK=1)
+elseif(NOT VW_SIMD_HASH_GATHER STREQUAL "insert")
+  message(FATAL_ERROR "VW_SIMD_HASH_GATHER must be insert or stack (got '${VW_SIMD_HASH_GATHER}')")
+endif()
+
+OPTION(VW_SIMD_SEL_CHAR "AVX-512BW Char<N> == constant selection kernel" OFF)
+if(VW_SIMD_SEL_CHAR)
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_CHAR=1)
+  message(STATUS "Building with VW_SIMD_SEL_CHAR")
+endif(VW_SIMD_SEL_CHAR)
 
 #set(GROUP_VERSION 0 CACHE STRING "Group Version to use")
 #message(STATUS "Building with GROUP_VERSION: ${GROUP_VERSION}")
@@ -166,10 +636,19 @@ endif (VW_GROUP_AGGR)
 
 # Compiler flags for the different targets
 # TARGET_ARCH selects a machine-specific flag profile.
-# "native" (default) auto-detects via -march=native / -mcpu=native.
-# Set to a known profile for cross-compilation or reproducible builds.
-set(TARGET_ARCH "native" CACHE STRING
-    "Target architecture profile: native, skylake-x, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, cortex-a76, armv8.2-generic, armv9-generic")
+# Empty (default) = the TARGET_MACHINE preset's profile, or "native" for
+# custom. "native" auto-detects via -march=native / -mcpu=native.
+# Set to a known profile for cross-compilation or reproducible builds; an
+# explicit -DTARGET_ARCH overrides the preset.
+set(TARGET_ARCH "" CACHE STRING
+    "Target architecture profile (empty = TARGET_MACHINE preset): native, skylake-x, icelake, sapphirerapids, neoverse-n1, neoverse-v1, neoverse-v2, ampere-altra, cortex-a76, armv8.2-generic, armv9-generic")
+if(TARGET_ARCH STREQUAL "")
+  if(DEFINED PRESET_TARGET_ARCH)
+    set(TARGET_ARCH "${PRESET_TARGET_ARCH}")
+  else()
+    set(TARGET_ARCH "native")
+  endif()
+endif()
 
 if(TARGET_ARCH STREQUAL "native")
   # Auto-detect: -mcpu=native on ARM, -march=native on x86
@@ -214,9 +693,17 @@ message(STATUS "TARGET_ARCH=${TARGET_ARCH}  =>  ARCH_FLAGS=${ARCH_FLAGS}")
 if(COMPILER STREQUAL "clang")
   #if(USE_CLANG)
   # clang doesn't have -Wno-psabi (GCC-specific ABI warning)
-  set(WARN_FLAGS "-Wall -Wextra -Wno-unknown-pragmas")
+  if(COMPILER_VERSION STREQUAL "old")
+    set(WARN_FLAGS "-Wall -Wextra -Wno-unknown-pragmas")
+  else()
+    set(WARN_FLAGS "-Wall -Wextra -Wno-unknown-pragmas")
+  endif()
 else()
-  set(WARN_FLAGS "-Wall -Wextra -Wno-psabi -Wno-unknown-pragmas")
+  if(COMPILER_VERSION STREQUAL "old")
+    set(WARN_FLAGS "-Wall -Wextra -Wno-psabi -Wno-unknown-pragmas")
+  else()
+    set(WARN_FLAGS "-fno-tree-coalesce-vars  -Wchanges-meaning -Wall -Wextra -Wno-psabi -Wno-unknown-pragmas") # -fno-tree-coalesce-vars 
+  endif()
 endif()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 ${ARCH_FLAGS} -std=c++17 -fPIC ${WARN_FLAGS} -fno-omit-frame-pointer ")
@@ -260,20 +747,8 @@ ELSE()
   ADD_DEFINITIONS(-DHASH_SIZE=64)
 ENDIF()
 
-IF(NUMA_ALLOC)
-  ADD_DEFINITIONS(-DNUMA_ALLOC)
-ENDIF()
-
-IF(NUMA_SHARD)
-  ADD_DEFINITIONS(-DNUMA_SHARD)
-ENDIF()
-
 IF(THREAD_PIN_PACKED)
   ADD_DEFINITIONS(-DTHREAD_PIN_PACKED)
-ENDIF()
-
-IF(NUMA_DEBUG)
-  ADD_DEFINITIONS(-DNUMA_DEBUG)
 ENDIF()
 
 IF(NO_HUGE_PAGES)
@@ -284,56 +759,84 @@ IF(HUGE_2MB_MALLOC_HUGE)
   ADD_DEFINITIONS(-DHUGE_2MB_MALLOC_HUGE)
 ENDIF()
 
-IF(HUGE_1GB_MALLOC_HUGE)
-  ADD_DEFINITIONS(-DHUGE_1GB_MALLOC_HUGE)
-ENDIF()
-
-IF(HUGE_1GB_MALLOC_NUMA)
-  ADD_DEFINITIONS(-DHUGE_1GB_MALLOC_NUMA)
-ENDIF()
-
-IF(WARM_PAGES)
-  ADD_DEFINITIONS(-DWARM_PAGES)
-ENDIF()
-
-IF(INTERLEAVE_HT)
-  ADD_DEFINITIONS(-DINTERLEAVE_HT)
-ENDIF()
-
-IF(HYPER_FLOAT)
-  ADD_DEFINITIONS(-DHYPER_FLOAT)
-ENDIF()
-
-IF(SCAN_STATIC_PARTITION)
-  ADD_DEFINITIONS(-DSCAN_STATIC_PARTITION)
-ENDIF()
-
-IF(ORIGINAL_GROUPLOOKUP)
-  ADD_DEFINITIONS(-DORIGINAL_GROUPLOOKUP)
-ENDIF()
-
 ADD_DEFINITIONS(-DCFG_MORSEL_SIZE=${MORSEL_SIZE})
 
-# Always link libnuma — assertTopology() is unconditional
-set(NUMA_LIB numa)
 
 IF(AUTOVECTORIZE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftree-vectorize")
 ELSE(AUTOVECTORIZE)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize")
-if(COMPILER STREQUAL "clang")
-  #if(USE_CLANG)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-vectorize -fno-slp-vectorize")
-  endif()
+	if(COMPILER STREQUAL "clang")
+
+	  if(COMPILER_VERSION STREQUAL "old")
+	    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize -fno-tree-slp-vectorize")
+	  else()
+	  #if(USE_CLANG)
+	    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-tree-vectorize -fno-tree-slp-vectorize")
+	  endif(CLANG_OLD)
+	endif(CLANG)
 ENDIF(AUTOVECTORIZE)
 
+# PGO: profile-guided optimization
+# Usage: build with -DPGO=generate, run workload, rebuild with -DPGO=use
+set(PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, generate, or use")
+if(PGO STREQUAL "generate")
+  if(COMPILER STREQUAL "clang")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-generate=${CMAKE_BINARY_DIR}/pgo-profiles")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-generate=${CMAKE_BINARY_DIR}/pgo-profiles")
+  else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-generate -fprofile-dir=${CMAKE_BINARY_DIR}/pgo-profiles")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fprofile-generate")
+  endif()
+  message(STATUS "PGO: generating profiles to ${CMAKE_BINARY_DIR}/pgo-profiles")
+elseif(PGO STREQUAL "use")
+  if(COMPILER STREQUAL "clang")
+    # Clang needs llvm-profdata merge first: llvm-profdata merge -output=default.profdata pgo-profiles/
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-use=${CMAKE_BINARY_DIR}/pgo-profiles/default.profdata")
+  else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-use -fprofile-dir=${CMAKE_BINARY_DIR}/pgo-profiles -fprofile-correction")
+  endif()
+  message(STATUS "PGO: using profiles from ${CMAKE_BINARY_DIR}/pgo-profiles")
+endif()
 
 # Download and unpack googletest at configure time
-configure_file(3rdparty/GTest.CMakeLists.txt googletest-download/CMakeLists.txt)
-execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}" .
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download" )
-execute_process(COMMAND "${CMAKE_COMMAND}" --build .
-    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download" )
+# GTEST_SOURCE_DIR: use an existing googletest checkout instead of cloning
+# (e.g. on nodes without network). Empty = clone into the build directory.
+set(GTEST_SOURCE_DIR "" CACHE PATH "Existing googletest source tree (skips the download)")
+if(GTEST_SOURCE_DIR)
+  if(NOT EXISTS "${GTEST_SOURCE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "GTEST_SOURCE_DIR=${GTEST_SOURCE_DIR} has no CMakeLists.txt")
+  endif()
+  set(GTEST_SRC "${GTEST_SOURCE_DIR}")
+else()
+  set(GTEST_SRC "${CMAKE_BINARY_DIR}/googletest-src")
+  # A configure that died mid-download leaves stamp files saying the clone is
+  # done while googletest-src is empty; ExternalProject then never retries.
+  if(NOT EXISTS "${GTEST_SRC}/CMakeLists.txt")
+    file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/googletest-download"
+                        "${CMAKE_BINARY_DIR}/googletest-src"
+                        "${CMAKE_BINARY_DIR}/googletest-build")
+  endif()
+  configure_file(3rdparty/GTest.CMakeLists.txt googletest-download/CMakeLists.txt)
+  # The download project declares an old cmake_minimum_required, which
+  # CMake 4 rejects unless CMAKE_POLICY_VERSION_MINIMUM is set.
+  execute_process(COMMAND "${CMAKE_COMMAND}" -G "${CMAKE_GENERATOR}"
+                          -DCMAKE_POLICY_VERSION_MINIMUM=3.5 .
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download"
+      RESULT_VARIABLE gtest_cfg_result
+      OUTPUT_VARIABLE gtest_cfg_log ERROR_VARIABLE gtest_cfg_log)
+  if(NOT gtest_cfg_result EQUAL 0)
+    message(FATAL_ERROR "googletest download project failed to configure:\n${gtest_cfg_log}")
+  endif()
+  execute_process(COMMAND "${CMAKE_COMMAND}" --build .
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/googletest-download"
+      RESULT_VARIABLE gtest_dl_result
+      OUTPUT_VARIABLE gtest_dl_log ERROR_VARIABLE gtest_dl_log)
+  if(NOT gtest_dl_result EQUAL 0 OR NOT EXISTS "${GTEST_SRC}/CMakeLists.txt")
+    message(FATAL_ERROR "googletest download (git clone) failed; no network? "
+                        "Set -DGTEST_SOURCE_DIR=<checkout> to use an existing tree.\n${gtest_dl_log}")
+  endif()
+endif()
 
 # Prevent GoogleTest from overriding our compiler/linker options
 # when building with Visual Studio
@@ -342,7 +845,7 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 # Add googletest directly to our build. This adds
 # the following targets: gtest, gtest_main, gmock
 # and gmock_main
-add_subdirectory("${CMAKE_BINARY_DIR}/googletest-src"
+add_subdirectory("${GTEST_SRC}"
                  "${CMAKE_BINARY_DIR}/googletest-build")
 
 # Suppress -Werror for googletest/googlemock (old gtest triggers warnings with newer GCC)
@@ -389,7 +892,6 @@ ENDIF()
 
 
 
-
 add_library(common
   src/common/algebra/Operators.cpp
   src/common/algebra/Types.cpp
@@ -408,7 +910,7 @@ target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-target_link_libraries(common ${NUMA_LIB})
+target_link_libraries(common)
 
 
 set(HYPER_TRANSLATORS
@@ -488,17 +990,6 @@ add_executable(run_tpch
   ${HYPER_TRANSLATORS}
   src/benchmarks/tpch/run.cpp
   )
-# Embed the git commit so the canary's version is reproducible/attributable.
-execute_process(
-  COMMAND git rev-parse --short HEAD
-  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-  OUTPUT_VARIABLE GIT_COMMIT_SHORT
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  ERROR_QUIET)
-if(NOT GIT_COMMIT_SHORT)
-  set(GIT_COMMIT_SHORT "unknown")
-endif()
-target_compile_definitions(run_tpch PRIVATE GIT_COMMIT_SHORT="${GIT_COMMIT_SHORT}")
 target_include_directories(run_tpch PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
@@ -523,10 +1014,6 @@ if(CANARY_IN_BENCH)
 endif()
 
 # ── Standalone canary tool ────────────────────────────────────────────────
-# A frozen reference measurement run before/after a job by the run-job
-# prologue/epilogue. Deliberately a SEPARATE executable so run_tpch carries no
-# canary code in its critical path. It embeds the same git commit so its
-# version is reproducible/attributable.
 add_executable(canary src/tools/canary.cpp)
 target_include_directories(canary PRIVATE include)
 target_compile_definitions(canary PRIVATE GIT_COMMIT_SHORT="${GIT_COMMIT_SHORT}")
@@ -560,6 +1047,95 @@ target_include_directories(run_prim PUBLIC
     PRIVATE src)
 target_link_libraries(run_prim vectorwise common ${TBB_LIBRARIES}  ${JEVENTSLIB})
 
+add_executable(run_selbench
+  src/benchmarks/primitives/selbench.cpp
+  )
+target_include_directories(run_selbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+target_link_libraries(run_selbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
+
+add_executable(run_hashbench
+  src/benchmarks/primitives/hashbench.cpp
+  )
+target_include_directories(run_hashbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+target_link_libraries(run_hashbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
+
+add_executable(run_aggrbench
+  src/benchmarks/primitives/aggrbench.cpp
+  )
+target_include_directories(run_aggrbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+
+# run_joinbench: hash join probe variants on TPC-H-shaped joins
+add_executable(run_joinbench
+  src/benchmarks/primitives/joinbench.cpp
+  )
+target_include_directories(run_joinbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+target_link_libraries(run_joinbench common ${TBB_LIBRARIES})
+
+# run_joindispatchbench: cost questions behind Hashjoin::resolvePaths
+# (Q18 Select elision, semi bitmap vs hash, per-vector dispatch)
+add_executable(run_joindispatchbench
+  src/benchmarks/primitives/joindispatchbench.cpp
+  )
+target_include_directories(run_joindispatchbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
+    PRIVATE src)
+target_link_libraries(run_joindispatchbench vectorwise common ${TBB_LIBRARIES})
+
+# run_crcbench: CRC-32C lowerings (x86-64 and aarch64)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|aarch64|arm64|ARM64")
+  add_executable(run_crcbench
+    src/benchmarks/primitives/crcbench.cpp
+    )
+endif()
+
+# run_neonbench: the engine's AVX-512 kernels against their aarch64 options
+# (scalar engine code, SIMDe translation, NEON, SVE); see study/NEON_PORT_STUDY.md.
+# run_neonbench_autovec is the same source without -fno-tree-vectorize:
+# SIMDe's generic fallbacks lean on the vectorizer that AUTOVECTORIZE=OFF
+# turns off for the engine.
+add_executable(run_neonbench
+  src/benchmarks/primitives/neonbench.cpp
+  )
+target_include_directories(run_neonbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
+    PRIVATE src)
+target_link_libraries(run_neonbench vectorwise common ${TBB_LIBRARIES})
+add_executable(run_neonbench_autovec
+  src/benchmarks/primitives/neonbench.cpp
+  )
+target_include_directories(run_neonbench_autovec PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
+    PRIVATE src)
+target_compile_definitions(run_neonbench_autovec PRIVATE NEONBENCH_AUTOVEC=1)
+target_compile_options(run_neonbench_autovec PRIVATE -ftree-vectorize -ftree-slp-vectorize)
+target_link_libraries(run_neonbench_autovec vectorwise common ${TBB_LIBRARIES})
+
+# run_widthbench (aarch64): sustained instructions / uops per cycle, to check
+# llvm-mca's dispatch width for the core (src/benchmarks/hardware/widthbench.cpp)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  add_executable(run_widthbench src/benchmarks/hardware/widthbench.cpp)
+endif()
+
+# run_compressbench: memory side effects of masked / compress stores with mask 0
+add_executable(run_compressbench
+  src/benchmarks/primitives/compressbench.cpp
+  )
+
 # Enable tests
 enable_testing()
 set(CTEST_OUTPUT_ON_FAILURE "1")
@@ -570,6 +1146,12 @@ add_executable(test_all
   src/test/tpch.cpp
   src/test/ssb.cpp
   src/test/vectorwise/primitives.cpp
+  src/test/vectorwise/simd_selection.cpp
+  src/test/vectorwise/simd_hash.cpp
+  src/test/vectorwise/simd_aggr.cpp
+  src/test/vectorwise/compound.cpp
+  src/test/vectorwise/bloom_avx2.cpp
+  src/test/vectorwise/crc32_fast.cpp
   src/test/vectorwise/Operators.cpp
   src/test/common/Hashmap.cpp
   src/test/common/Database.cpp

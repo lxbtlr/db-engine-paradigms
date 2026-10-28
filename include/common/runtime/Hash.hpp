@@ -4,6 +4,7 @@
 #include "common/defs.hpp"
 #include "common/runtime/SIMD.hpp"
 #include "common/runtime/Types.hpp"
+#include <cstring>
 #ifndef SIMDE_ENABLE_NATIVE_ALIASES
 #define SIMDE_ENABLE_NATIVE_ALIASES
 #endif
@@ -193,11 +194,16 @@ class MurMurHash : public Hash<MurMurHash> {
 
       uint64_t h = seed ^ (len * m);
 
-      const uint64_t* data = (const uint64_t*)key;
-      const uint64_t* end = data + (len / 8);
+      // keys are packed at arbitrary offsets: walk bytes and memcpy each
+      // 8-byte chunk, not an (unaligned, UB) uint64_t load; compiles to the
+      // same single load
+      const unsigned char* data = (const unsigned char*)key;
+      const unsigned char* end = data + (len / 8) * 8;
 
       while (data != end) {
-         uint64_t k = *data++;
+         uint64_t k;
+         std::memcpy(&k, data, sizeof(k));
+         data += sizeof(k);
 
          k *= m;
          k ^= k >> r;
@@ -216,7 +222,7 @@ class MurMurHash : public Hash<MurMurHash> {
       case 4: h ^= uint64_t(data2[3]) << 24;FALLTHROUGH
       case 3: h ^= uint64_t(data2[2]) << 16;FALLTHROUGH
       case 2: h ^= uint64_t(data2[1]) << 8;FALLTHROUGH
-      case 1: h ^= uint64_t(data2[0]); h *= m;FALLTHROUGH
+      case 1: h ^= uint64_t(data2[0]); h *= m;
       };
 
       h ^= h >> r;
@@ -448,31 +454,124 @@ class CRC32Hash : public Hash<CRC32Hash> {
    hashKey(T k, hash_t seed) const -> typename std::enable_if<IS_INT_LE(64,T), hash_t>::type{
    // inline hash_t hashKey(uint64_t k, uint64_t seed) const {
       uint64_t result1 = _mm_crc32_u64(seed, k);
+#ifdef VW_CRC32_FAST
+      // A compile-time seed (0 in HashGroup::Hash_T, the constant seed of the
+      // hash/hash_sel primitives): one crc32 per key, see hashKeyFixedSeed.
+      // A per-row seed (rehash, chained chunks) keeps two independent crc32:
+      // deriving result2 from result1 would put it on the serial chain.
+      if (__builtin_constant_p(seed))
+         return hashKeyFixedSeed(k, seed, seedTerm(seed));
+#endif
       uint64_t result2 = _mm_crc32_u64(0x04c11db7, k);
       return ((result2 << 32) | result1) * 0x2545F4914F6CDD1Dull;
    }
    inline uint64_t hashKey(uint64_t k) const { return hashKey(k, 0); }
 
+#ifdef VW_CRC32_FAST
+   /// CRC is linear over GF(2) in its state: crc(c, k) = crc(0, k) ^
+   /// crc(c, 0). So crc(0x04c11db7, k) = crc(seed, k) ^ seedTerm(seed), where
+   /// seedTerm only depends on the seed: for n keys hashed with one seed it
+   /// is computed once, and each key takes one crc32 instead of two.
+   static inline uint64_t seedTerm(hash_t seed) {
+      return _mm_crc32_u64((uint32_t)seed ^ 0x04c11db7u, 0);
+   }
+   /// hashKey(k, seed), bit-identical, given term = seedTerm(seed)
+   template<class T> inline auto
+   hashKeyFixedSeed(T k, hash_t seed, uint64_t term) const
+       -> typename std::enable_if<IS_INT_LE(64,T), hash_t>::type {
+      uint64_t result1 = _mm_crc32_u64(seed, k);
+      uint64_t result2 = result1 ^ term;
+      return ((result2 << 32) | result1) * 0x2545F4914F6CDD1Dull;
+   }
+#endif
+
+#ifdef __AVX512F__
+
+   inline Vec8u hashKey(Vec8u k, Vec8u seed) const {
+      Vec8u res(uint64_t(0));
+      for (unsigned i = 0; i < 8; ++i)
+         res.entry[i] = hashKey(k.entry[i], seed.entry[i]);
+      return res;
+   }
+#endif
+
    inline uint64_t hashKey(const void* key, int len, uint64_t seed) const {
       auto data = reinterpret_cast<const uint8_t*>(key);
       uint64_t s = seed;
       while (len >= 8) {
-         s = hashKey(*reinterpret_cast<const uint64_t*>(data), s);
+         // packed keys sit at arbitrary offsets: memcpy, not an (unaligned,
+         // UB) uint64_t load; compiles to the same single load
+         uint64_t k;
+         std::memcpy(&k, data, sizeof(k));
+         s = hashKey(k, s);
          data += 8;
          len -= 8;
       }
       if (len >= 4) {
-         s = hashKey((uint32_t) * reinterpret_cast<const uint32_t*>(data), s);
+         uint32_t k;
+         std::memcpy(&k, data, sizeof(k));
+         s = hashKey(k, s);
          data += 4;
          len -= 4;
       }
       switch (len) {
       case 3: s ^= ((uint64_t)data[2]) << 16;FALLTHROUGH
       case 2: s ^= ((uint64_t)data[1]) << 8;FALLTHROUGH
-      case 1: s ^= data[0];FALLTHROUGH
+      case 1: s ^= data[0];
       }
       return s;
    }
+
+#ifdef VW_CRC32_FAST
+   /// out[i] = hashKey(keys + i * keySize, keySize, seed) for n keys packed
+   /// at a keySize stride (HashGroup's concatenated group keys). One key's
+   /// chunk chain is serial (crc32 -> shift/or -> imul per chunk); keys are
+   /// independent, so 4 keys' chains run in lockstep and overlap. The first
+   /// chunk shares the seed across keys and uses hashKeyFixedSeed.
+   /// Bit-identical to the per-key loop.
+   inline void hashKeys(const char* keys, uint32_t keySize, size_t n,
+                        hash_t seed, hash_t* out) const {
+      constexpr unsigned R = 4;
+      const uint32_t full = keySize / 8;         // 8-byte chunks
+      const uint32_t has4 = (keySize % 8) >= 4;  // one 4-byte chunk
+      const uint32_t chunks = full + has4;
+      const uint32_t tail = keySize % 4;         // bytes XORed in at the end
+      const uint32_t tailOff = full * 8 + has4 * 4;
+      const uint64_t term = seedTerm(seed);
+      // chunk j of a key: 8-byte chunks, then the zero-extended 4-byte one
+      auto chunk = [&](const char* key, uint32_t j) -> uint64_t {
+         if (j < full) {
+            uint64_t k;
+            std::memcpy(&k, key + 8 * j, sizeof(k));
+            return k;
+         }
+         uint32_t k;
+         std::memcpy(&k, key + 8 * full, sizeof(k));
+         return k;
+      };
+      size_t i = 0;
+      for (; i + R <= n; i += R) {
+         const char* key[R];
+         uint64_t s[R];
+         for (unsigned r = 0; r < R; ++r) key[r] = keys + (i + r) * keySize, s[r] = seed;
+         if (chunks > 0)
+            for (unsigned r = 0; r < R; ++r)
+               s[r] = hashKeyFixedSeed(chunk(key[r], 0), seed, term);
+         for (uint32_t j = 1; j < chunks; ++j)
+            for (unsigned r = 0; r < R; ++r) s[r] = hashKey(chunk(key[r], j), s[r]);
+         for (unsigned r = 0; r < R; ++r) {
+            const auto* data = reinterpret_cast<const uint8_t*>(key[r] + tailOff);
+            switch (tail) {
+            case 3: s[r] ^= ((uint64_t)data[2]) << 16;FALLTHROUGH
+            case 2: s[r] ^= ((uint64_t)data[1]) << 8;FALLTHROUGH
+            case 1: s[r] ^= data[0];
+            }
+            out[i + r] = s[r];
+         }
+      }
+      for (; i < n; ++i) out[i] = hashKey(keys + i * keySize, (int)keySize, seed);
+   }
+#endif
 };
 EXTRAOPS(CRC32Hash);
 } // namespace runtime

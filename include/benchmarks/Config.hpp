@@ -4,7 +4,13 @@
 
 struct ExperimentConfig{
   typedef vectorwise::pos_t (vectorwise::Hashjoin::*joinFun)();
+  // VW_JOIN_SIMD: the AVX-512 joins (joinAllSIMD / joinSelSIMD) by default;
+  // the SIMDjoin environment variable still overrides
+#ifdef VW_JOIN_SIMD
+  bool useSimdJoin = true;
+#else
   bool useSimdJoin = false;
+#endif
   bool useSimdHash = false;
   bool useSimdSel = false;
   bool useSimdProj = false;
@@ -17,6 +23,7 @@ struct ExperimentConfig{
   vectorwise::primitives::F3 proj_multiplies_int64_t_col_int64_t_col();
   vectorwise::primitives::F4 proj_multiplies_sel_int64_t_col_int64_t_col();
   vectorwise::primitives::F3 sel_less_int32_t_col_int32_t_val();
+  vectorwise::primitives::F3 sel_less_equal_int32_t_col_int32_t_val();
   vectorwise::primitives::F4 selsel_greater_equal_int32_t_col_int32_t_val();
   vectorwise::primitives::F4 selsel_less_int64_t_col_int64_t_val();
   vectorwise::primitives::F4 selsel_greater_equal_int64_t_col_int64_t_val();

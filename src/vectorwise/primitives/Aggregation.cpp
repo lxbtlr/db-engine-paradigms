@@ -35,10 +35,24 @@ pos_t aggr_count_star_(pos_t n, int64_t* RES entries[], void* RES /*param1*/,
                        size_t offset)
 /// update count aggregates for each entry pointed to by entries
 {
-   for (uint64_t i = 0; i < n; ++i) {
-      auto aggregate = addBytes(entries[i], offset);
+#ifdef VW_GROUP_AGGR
+   for (auto entry : groups) {
+      Group* RES group = entry->group;
+
+      pos_t size = group->size;
+      if (size == 0) {
+         continue;
+      }
+
+      int64_t* aggregate = addBytes(reinterpret_cast<int64_t*>(entry), offset);
+      *aggregate += static_cast<int64_t>(size);
+   }
+#else
+   for (pos_t i = 0; i < n; i++) {
+      int64_t* aggregate = addBytes(entries[i], offset);
       *aggregate += 1;
    }
+#endif
    return n;
 }
 FAggr aggr_count_star = (FAggr)&aggr_count_star_;

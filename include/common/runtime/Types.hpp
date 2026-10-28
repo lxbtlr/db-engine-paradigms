@@ -271,6 +271,9 @@ template <unsigned maxLen> class Char {
       Char<maxLen> result;
       result.len = strLen;
       memcpy(result.value, str, strLen);
+      // zero the unused tail: the group-by hashes and compares all maxLen
+      // bytes of a packed key, so equal strings must be equal bytes
+      memset(result.value + strLen, 0, maxLen - strLen);
       return result;
    }
 

@@ -1,11 +1,7 @@
 #include "vectorwise/QueryBuilder.hpp"
 #include <cstddef>
-#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
-#include "common/runtime/Concurrency.hpp"
-#endif
-#if defined(NUMA_DEBUG) && (defined(NUMA_ALLOC) || defined(NUMA_SHARD))
 #include <cstdio>
-#endif
+#include <cstdlib>
 
 using namespace std;
 
@@ -17,6 +13,16 @@ size_t padding(size_t size, size_t align) {
    auto pad = moreThanAlign ? align - moreThanAlign : 0;
    return pad;
 }
+
+#ifdef VW_JOIN_ALIGN_FIELDS
+/// Natural alignment of a hash join entry field, from its size alone (a DS
+/// carries no type): the largest power of two dividing size, capped at 8.
+/// int32 -> 4, int64 -> 8, Char<25> (26 bytes) -> 2.
+static size_t joinFieldAlign(size_t size) {
+   size_t align = size & (~size + 1);
+   return align == 0 ? 1 : (align > 8 ? 8 : align);
+}
+#endif
 
 size_t QueryBuilder::nextOpNr() { return opNr++; }
 size_t QueryBuilder::nextOnceNr() { return onceNr++; }
@@ -61,29 +67,6 @@ QueryBuilder::ScanBuilder QueryBuilder::Scan(std::string relation) {
    auto& rel = db[relation];
    auto nr = nextOpNr();
    auto& s = operatorState.get<Scan::Shared>(nr);
-#ifdef NUMA_SHARD
-#ifdef NUMA_DEBUG
-   fprintf(stderr, "[SCAN] relation=%s nr=%zu nrTuples=%zu this_worker=%p worker_id=%zu\n",
-           relation.c_str(), nr, rel.nrTuples,
-           (void*)runtime::this_worker,
-           runtime::this_worker ? runtime::this_worker->worker_id : 999999);
-   fprintf(stderr, "[SCAN] got Shared at %p hasNumaShards=%d\n",
-           (void*)&s, (int)rel.hasNumaShards);
-#endif
-   if (rel.hasNumaShards) {
-      for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
-         s.ranges[r].tupleBegin = rel.numaShards[r].tupleBegin;
-         s.ranges[r].tupleEnd = rel.numaShards[r].tupleEnd;
-      }
-   } else {
-      s.ranges[0].tupleBegin = 0;
-      s.ranges[0].tupleEnd = rel.nrTuples;
-      for (size_t r = 1; r < runtime::NUM_NUMA_REGIONS; ++r) {
-         s.ranges[r].tupleBegin = 0;
-         s.ranges[r].tupleEnd = 0;
-      }
-   }
-#endif
    auto scan = make_unique<class Scan>(s, rel.nrTuples, vecs.getVecSize());
    auto* res = scan.get();
    pushOperator(move(scan));
@@ -156,50 +139,10 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
    r.buf = DataStorage::BufferSpec::Column;
    auto& attr = scan.rel[attribute];
    r.dataSize = attr.type->rt_size();
-
-#ifdef NUMA_SHARD
-   {
-      void* base = attr.data();
-      if (scan.rel.hasNumaShards) {
-         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n) {
-            auto it = scan.rel.numaShards[n].columns.find(attribute);
-            r.shardBases[n] = (it != scan.rel.numaShards[n].columns.end())
-                                  ? it->second
-                                  : base; // inactive region — fallback to global
-         }
-         size_t home = runtime::regionOf(runtime::this_worker->worker_id);
-         r.data = r.shardBases[home];
-      } else {
-         // Non-sharded relation: all shardBases point to the single column
-         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n)
-            r.shardBases[n] = base;
-         r.data = base;
-      }
-#ifdef NUMA_DEBUG
-      fprintf(stderr, "worker %zu col %s shardBases=[",
-              runtime::this_worker->worker_id, attribute.c_str());
-      for (size_t i = 0; i < runtime::NUM_NUMA_REGIONS; ++i)
-         fprintf(stderr, "%s%p", i ? "," : "", r.shardBases[i]);
-      fprintf(stderr, "] data=%p\n", r.data);
-#endif
-   }
-#elif defined(NUMA_ALLOC)
-   if (scan.rel.hasNumaReplicas) {
-      size_t region = runtime::regionOf(runtime::this_worker->worker_id);
-      r.data = scan.rel.numaReplicas[region].columns[attribute];
-#ifdef NUMA_DEBUG
-      fprintf(stderr, "worker %zu region %zu col %s data=%p numa_replica=%p\n",
-              runtime::this_worker->worker_id, region,
-              attribute.c_str(), attr.data(), r.data);
-#endif
-   } else {
-      r.data = attr.data();
-   }
-#else
    r.data = attr.data();
-#endif
-
    r.scan = &scan.scan;
+   r.attribute = attribute;
+   r.rel = &scan.rel;
    return r;
 }
 
@@ -225,11 +168,7 @@ void QueryBuilder::DataStorage::registerDS(void** location) {
       assert(location);
       assert(scan);
       assert(dataSize);
-#ifdef NUMA_SHARD
-      scan->addConsumer(location, dataSize, shardBases);
-#else
       scan->addConsumer(location, dataSize);
-#endif
    }
 }
 
@@ -244,6 +183,9 @@ QueryBuilder::DataStorage::operator pos_t*() const {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F1 op, DS a) {
+#ifdef VW_PROJ_COMPOUND
+   flushHeld();
+#endif
    auto f1 = make_unique<F1_Op>(a, op);
    a.registerDS(&f1->input);
    expression->ops.push_back(move(f1));
@@ -252,6 +194,9 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F1 op, DS a) {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F2 op, DS a, DS b) {
+#ifdef VW_PROJ_COMPOUND
+   flushHeld();
+#endif
    auto f2 = make_unique<F2_Op>(a, b, op);
    a.registerDS(&f2->input);
    b.registerDS(&f2->param1);
@@ -261,6 +206,14 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F2 op, DS a, DS b) {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F3 op, DS a, DS b, DS c) {
+#ifdef VW_PROJ_COMPOUND
+   primitives::compound::Desc desc;
+   if (primitives::compound::describe((const void*)op, desc)) {
+      holdOrFuse({desc, (const void*)op, DS(), a, b, c});
+      return *this;
+   }
+   flushHeld();
+#endif
    auto f3 = make_unique<F3_Op>(a, b, c, op);
    a.registerDS(&f3->outputSelectionV);
    b.registerDS(&f3->param1);
@@ -271,6 +224,14 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F3 op, DS a, DS b, DS c) {
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
                                        DS d) {
+#ifdef VW_PROJ_COMPOUND
+   primitives::compound::Desc desc;
+   if (primitives::compound::describe((const void*)op, desc)) {
+      holdOrFuse({desc, (const void*)op, a, b, c, d});
+      return *this;
+   }
+   flushHeld();
+#endif
    auto f4 = make_unique<F4_Op>(a, b, c, d, op);
    a.registerDS(&f4->inputSelectionV);
    b.registerDS(&f4->outputSelectionV);
@@ -279,32 +240,176 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
    expression->ops.push_back(move(f4));
    return *this;
 }
-QueryBuilder::ExpressionBuilder&
-QueryBuilder::ExpressionBuilder::addConcat(DS sel, DS col, DS out,
-                                           size_t offset) {
-   auto concat = make_unique<ConcatOp>(sel, col, out,
-                                       col.dataSize, out.dataSize, offset);
-   sel.registerDS(reinterpret_cast<void**>(&concat->sel));
-   col.registerDS(reinterpret_cast<void**>(&concat->in));
-   expression->ops.push_back(move(concat));
-   return *this;
-}
-
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Expression>() {
+#ifdef VW_PROJ_COMPOUND
+   flushHeld();
+#endif
    return move(expression);
 }
 
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Aggregates>() {
+#ifdef VW_PROJ_COMPOUND
+   flushHeld();
+#endif
    auto r = make_unique<vectorwise::Aggregates>();
    r->ops = move(expression->ops);
    return r;
 }
 
+#ifdef VW_PROJ_COMPOUND
+void QueryBuilder::ExpressionBuilder::flushHeld() {
+   if (!held) return;
+   auto& h = *held;
+   if (h.desc.selInput) {
+      auto f4 = make_unique<F4_Op>(h.sel, h.out, h.p1, h.p2,
+                                   (primitives::F4)h.prim);
+      h.sel.registerDS(&f4->inputSelectionV);
+      h.out.registerDS(&f4->outputSelectionV);
+      h.p1.registerDS(&f4->param1);
+      h.p2.registerDS(&f4->param2);
+      expression->ops.push_back(move(f4));
+   } else {
+      auto f3 = make_unique<F3_Op>(h.out, h.p1, h.p2, (primitives::F3)h.prim);
+      h.out.registerDS(&f3->outputSelectionV);
+      h.p1.registerDS(&f3->param1);
+      h.p2.registerDS(&f3->param2);
+      expression->ops.push_back(move(f3));
+   }
+   held.reset();
+}
+
+void QueryBuilder::ExpressionBuilder::holdOrFuse(const HeldProjection& next) {
+   if (held && fuse(*held, next)) {
+      held.reset(); // pairs: the compound is not chained again
+      return;
+   }
+   flushHeld();
+   held = next;
+}
+
+/// first's result feeds second: build one CompoundOp for both if second
+/// reads that result densely, their selections (if any) are the same
+/// Buffer, and no output aliases an input; decided from the plan only
+bool QueryBuilder::ExpressionBuilder::fuse(const HeldProjection& first,
+                                           const HeldProjection& second) {
+   using namespace primitives::compound;
+   auto same = [](const DS& x, const DS& y) {
+      return x.buf != DS::BufferSpec::None && x.buf == y.buf && x.data == y.data;
+   };
+   const DS& mid = first.out;
+   if (mid.buf != DS::BufferSpec::Buffer ||
+       second.out.buf != DS::BufferSpec::Buffer)
+      return false;
+   const bool p1Mid = second.desc.a == Col && same(second.p1, mid);
+   const bool p2Mid = second.desc.b == Col && same(second.p2, mid);
+   if (p1Mid == p2Mid) return false; // second does not chain, or reads it twice
+   DS c = p1Mid ? second.p2 : second.p1;
+   const Form cForm = p1Mid ? second.desc.b : second.desc.a;
+   bool cLeft = p2Mid;
+   if (first.desc.selInput && second.desc.selInput &&
+       !same(first.sel, second.sel))
+      return false;
+   const DS& sel = first.desc.selInput ? first.sel : second.sel;
+   if ((first.desc.selInput || second.desc.selInput) &&
+       sel.buf != DS::BufferSpec::Buffer)
+      return false;
+   using Ins = std::initializer_list<const DS*>;
+   for (const DS* in : Ins{&first.p1, &first.p2, &c, &mid})
+      if (same(*in, second.out)) return false;
+   for (const DS* in : Ins{&first.p1, &first.p2, &c})
+      if (same(*in, mid)) return false;
+   // canonical operand order (the kernel table holds only these)
+   Form a = first.desc.a, b = first.desc.b;
+   DS pa = first.p1, pb = first.p2;
+   if (commutative(first.desc.op) && a > b) {
+      std::swap(a, b);
+      std::swap(pa, pb);
+   }
+   if (commutative(second.desc.op)) cLeft = false;
+   auto k = kernel(first.desc.op, a, b, second.desc.op, cForm, cLeft);
+   if (!k) return false;
+   auto op = make_unique<CompoundOp>();
+   op->kernel = k;
+   op->sel = sel.data;
+   op->mid = mid.data;
+   op->out = second.out.data;
+   op->a = pa.data;
+   op->b = pb.data;
+   op->c = c.data;
+   pa.registerDS(&op->a);
+   pb.registerDS(&op->b);
+   c.registerDS(&op->c);
+   expression->ops.push_back(move(op));
+   return true;
+}
+#endif
+
 QueryBuilder::HashJoinBuilder::HashJoinBuilder(QueryBuilder& b) : base(b) {}
-QueryBuilder::HashJoinBuilder::~HashJoinBuilder() {
+bool QueryBuilder::uniqueBuild(
+    const std::vector<HashJoinBuilder::BuildKey>& keys) const {
+   if (keys.empty()) return false;
+   // one row source: every key through the same selection, which must not
+   // list a row twice
+   void* sel = keys.front().sel;
+   for (auto& k : keys)
+      if (k.sel != sel) return false;
+   if (sel && repeatingSelections.count(sel)) return false;
+   // a group-by's single key output
+   if (keys.size() == 1 && keys[0].col.buf == DataStorage::BufferSpec::Buffer)
+      return uniqueBuffers.count(keys[0].col.data) != 0;
+   // columns of one relation covering its declared primary key
+   const runtime::Relation* rel = keys[0].col.rel;
+   if (!rel || rel->primaryKey.empty()) return false;
+   for (auto& pk : rel->primaryKey) {
+      bool covered = false;
+      for (auto& k : keys) {
+         if (k.col.buf != DataStorage::BufferSpec::Column || k.col.rel != rel)
+            return false;
+         covered |= k.col.attribute == pk;
+      }
+      if (!covered) return false;
+   }
+   return true;
+}
+
+QueryBuilder::HashJoinBuilder::~HashJoinBuilder() noexcept(false) {
+   // derived semi join: unique build keys and no build column used means
+   // each probe row matches at most one build row, so inner join == semi join
+   const bool unique = base.uniqueBuild(buildKeys);
+   const bool buildColumns = !join->buildGather.ops.empty();
+   join->semiJoin = unique && !buildColumns;
+   static const bool trace = std::getenv("VW_DISPATCH_TRACE") != nullptr;
+   if (trace && runtime::this_worker->worker_id == 0)
+      std::fprintf(stderr, "vw plan join %p: buildKeys=%zu uniqueBuild=%d "
+                           "buildColumns=%d semi=%d asserted=%d\n",
+                   static_cast<void*>(join), buildKeys.size(), int(unique),
+                   int(buildColumns), int(join->semiJoin), int(semiAsserted));
+   // the join's output lists a probe row more than once iff a probe row can
+   // match several build rows or the probe selection already repeats rows
+   const bool repeats =
+       !unique ||
+       (join->probeSel && base.repeatingSelections.count(join->probeSel));
+   auto mark = [&](void* s) {
+      if (repeats)
+         base.repeatingSelections.insert(s);
+      else
+         base.repeatingSelections.erase(s);
+   };
+   mark(join->probeMatches);
+   for (void* t : pushedTargets) mark(t);
+   if (semiAsserted && !join->semiJoin)
+      throw runtime_error(
+          "HashJoin::semi(): not derivable: the build keys are not unique by "
+          "declared primary keys or a group-by key, or build columns are used");
+#ifdef VW_JOIN_ENTRY_PAD
+   // 16/32/64: entries start on that boundary (allocations are 64-aligned),
+   // so an entry's header never straddles a cache line
+   join->ht_entry_size += padding(join->ht_entry_size, VW_JOIN_ENTRY_PAD);
+#else
    join->ht_entry_size += padding(join->ht_entry_size, 8);
+#endif
 }
 
 QueryBuilder::HashJoinBuilder
@@ -320,7 +425,15 @@ QueryBuilder::HashJoin(DS probeMatches, pos_t (Hashjoin::*joinFun)()) {
    join->followupBufferSize = vecs.getVecSize() + 1;
    b.join = join.get();
    b.join->join = joinFun;
+#ifdef VW_JOIN_SLIM_HEADER
+   // join entries only use EntryHeader::next and ::hash; the group pointer
+   // VW_GROUP_AGGR appends belongs to HashGroup, so the payload starts after
+   // hash (== sizeof(EntryHeader) without VW_GROUP_AGGR)
+   b.join->ht_entry_size = offsetof(runtime::Hashmap::EntryHeader, hash) +
+                           sizeof(runtime::Hashmap::hash_t);
+#else
    b.join->ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
+#endif
    b.join->batchSize = vecs.getVecSize();
    b.join->buildMatches = static_cast<runtime::Hashmap::EntryHeader**>(
        vecs.get(sizeof(runtime::Hashmap::EntryHeader*)));
@@ -342,10 +455,20 @@ QueryBuilder::HashJoin(DS probeMatches, pos_t (Hashjoin::*joinFun)()) {
 QueryBuilder::HashJoinBuilder&
 QueryBuilder::HashJoinBuilder::addBuildKey(DS col, primitives::F2 hash,
                                            primitives::FScatter scatter) {
+   buildKeys.push_back({col, nullptr});
 
+#ifdef VW_JOIN_ALIGN_FIELDS
+   join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(col.dataSize));
+#endif
    auto entryOffset = join->ht_entry_size;
    keyOffsets.push_back(entryOffset);
    join->ht_entry_size += col.dataSize;
+#ifdef VW_JOIN_SEMI
+   ++join->semiBuildKeys;
+   join->semiKeyOffset = entryOffset;
+   if (!(col.dataSize == 4 && scatter == primitives::scatter_int32_t_col))
+      join->semiOk = false;
+#endif
 
    // create hash primitive for build side
    auto hash_build = make_unique<F2_Op>(buildHashBuffer, col, hash);
@@ -364,10 +487,23 @@ QueryBuilder::HashJoinBuilder::addBuildKey(DS col, primitives::F2 hash,
 QueryBuilder::HashJoinBuilder&
 QueryBuilder::HashJoinBuilder::addBuildKey(DS col, DS sel, primitives::F3 hash,
                                            primitives::FScatterSel scatter) {
+   buildKeys.push_back({col, sel.data});
 
+#ifdef VW_JOIN_ALIGN_FIELDS
+   join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(col.dataSize));
+#endif
    auto entryOffset = join->ht_entry_size;
    keyOffsets.push_back(entryOffset);
    join->ht_entry_size += col.dataSize;
+#ifdef VW_JOIN_SEMI
+   ++join->semiBuildKeys;
+   join->semiKeyOffset = entryOffset;
+   if (!(col.dataSize == 4 && scatter == primitives::scatter_sel_int32_t_col))
+      join->semiOk = false;
+#endif
+#ifdef VW_JOIN_BLOOM
+   join->buildKeysSelected = true; // the build side is a filtered subset
+#endif
 
    // create hash primitive for build side
    auto hash_build = make_unique<F3_Op>(sel, buildHashBuffer, col, hash);
@@ -396,6 +532,19 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, primitives::F2 hash,
    // create hash primitive for probe side
    auto hash_probe = make_unique<F2_Op>(probeHashBuffer, col, hash);
    col.registerDS(&hash_probe->param1);
+#ifdef VW_JOIN_SEMI
+   if (join->probeHash.ops.empty() && hash == primitives::hash_int32_t_col &&
+       eq == primitives::keys_equal_int32_t_col)
+      join->semiProbeDense = hash_probe.get();
+   else
+      join->semiOk = false;
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
+   if (join->probeHash.ops.empty() && hash == primitives::hash_int32_t_col)
+      join->fusedDense = hash_probe.get();
+   else
+      join->fusedOk = false;
+#endif
    join->probeHash.ops.push_back(move(hash_probe));
    join->probeHashes =
        reinterpret_cast<runtime::Hashmap::hash_t*>(probeHashBuffer);
@@ -422,6 +571,19 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, DS sel, primitives::F3 hash,
    auto hash_probe = make_unique<F3_Op>(sel, probeHashBuffer, col, hash);
    sel.registerDS(&hash_probe->outputSelectionV);
    col.registerDS(&hash_probe->param2);
+#ifdef VW_JOIN_SEMI
+   if (join->probeHash.ops.empty() && hash == primitives::hash_sel_int32_t_col &&
+       eq == primitives::keys_equal_int32_t_col)
+      join->semiProbeSel = hash_probe.get();
+   else
+      join->semiOk = false;
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
+   if (join->probeHash.ops.empty() && hash == primitives::hash_sel_int32_t_col)
+      join->fusedSel = hash_probe.get();
+   else
+      join->fusedOk = false;
+#endif
    join->probeHash.ops.push_back(move(hash_probe));
    join->probeHashes =
        reinterpret_cast<runtime::Hashmap::hash_t*>(probeHashBuffer);
@@ -445,6 +607,15 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, DS sel, primitives::F3 hash,
    auto hash_probe = make_unique<F3_Op>(sel, probeHashBuffer, col, hash);
    sel.registerDS(&hash_probe->outputSelectionV);
    col.registerDS(&hash_probe->param2);
+#ifdef VW_JOIN_SEMI
+   join->semiOk = false; // key equality through a separate selection
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
+   if (join->probeHash.ops.empty() && hash == primitives::hash_sel_int32_t_col)
+      join->fusedSel = hash_probe.get();
+   else
+      join->fusedOk = false;
+#endif
    join->probeHash.ops.push_back(move(hash_probe));
    join->probeHashes =
        reinterpret_cast<runtime::Hashmap::hash_t*>(probeHashBuffer);
@@ -462,6 +633,9 @@ QueryBuilder::HashJoinBuilder::addProbeKey(DS col, DS sel, primitives::F3 hash,
 QueryBuilder::HashJoinBuilder& QueryBuilder::HashJoinBuilder::addBuildValue(
     DS source, primitives::FScatter scatter, DS target,
     primitives::FGather gather) {
+#ifdef VW_JOIN_ALIGN_FIELDS
+   join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(source.dataSize));
+#endif
    auto entryOffset = join->ht_entry_size;
    join->ht_entry_size += source.dataSize;
 
@@ -482,6 +656,9 @@ QueryBuilder::HashJoinBuilder& QueryBuilder::HashJoinBuilder::addBuildValue(
     DS source, DS sel, primitives::FScatterSel scatter, DS target,
     primitives::FGather gather) {
 
+#ifdef VW_JOIN_ALIGN_FIELDS
+   join->ht_entry_size += padding(join->ht_entry_size, joinFieldAlign(source.dataSize));
+#endif
    auto entryOffset = join->ht_entry_size;
    join->ht_entry_size += source.dataSize;
 
@@ -512,6 +689,7 @@ QueryBuilder::HashJoinBuilder::setProbeSelVector(DS sel,
 
 QueryBuilder::HashJoinBuilder&
 QueryBuilder::HashJoinBuilder::pushProbeSelVector(DS sel, DS target) {
+   pushedTargets.push_back(target.data);
    if (probeHasSelection)
       throw runtime_error("Pushing a probe selection vector is in conflict "
                           "with first setting a probe selection vector.");
@@ -519,6 +697,11 @@ QueryBuilder::HashJoinBuilder::pushProbeSelVector(DS sel, DS target) {
    auto lookup = move(base.Expression().addOp(
        primitives::lookup_sel, target, base.Value(join->probeMatches), sel));
    join->keyEquality.ops.push_back(move(lookup.expression->ops.back()));
+   return *this;
+}
+
+QueryBuilder::HashJoinBuilder& QueryBuilder::HashJoinBuilder::semi() {
+   semiAsserted = true; // checked in ~HashJoinBuilder
    return *this;
 }
 
@@ -603,77 +786,46 @@ QueryBuilder::HashGroupBuilder QueryBuilder::HashGroup() {
    return b;
 }
 
-QueryBuilder::HashGroupBuilder QueryBuilder::OptHashGroup() {
-   HashGroupBuilder b(*this);
-   auto nr = nextOpNr();
-   auto& s = operatorState.get<class HashGroup::Shared>(nr);
-   auto gr = make_unique<class OptHashGroup>(s);
-   b.group = gr.get();
-   gr->vecSize = vecs.getVecSize();
-   gr->groupStore.setSource(&runtime::this_worker->allocator);
-
-   auto& op = *gr;
-   op.groupHt =
-       make_unique<runtime::HashmapSmall<pos_t, pos_t>>(vecs.getVecSize());
-   auto& local = op.preAggregation;
-   local.ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
-   local.groupHashes = static_cast<runtime::Hashmap::hash_t*>(
-       vecs.get(8));
-   local.htMatches = static_cast<runtime::Hashmap::EntryHeader**>(
-       vecs.get(sizeof(runtime::Hashmap::EntryHeader*)));
-   local.groupsFound = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
-   local.groupsNotFound =
-       reinterpret_cast<SizeBuffer<pos_t>*>(vecs.getSizeBuffer(sizeof(pos_t)));
-   local.keysNEq =
-       reinterpret_cast<SizeBuffer<pos_t>*>(vecs.getSizeBuffer(sizeof(pos_t)));
-   local.partitionEndsIn = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
-   local.partitionEndsOut = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
-   local.unpartitionedRows = local.groupsNotFound->data();
-   local.partitionedRows = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
-   local.groupRepresentatives = static_cast<pos_t*>(vecs.get(sizeof(pos_t)));
-
-   b.localLookup.partitionEndsIn = local.partitionEndsIn;
-   b.localLookup.partitionEndsOut = local.partitionEndsOut;
-   b.localLookup.unpartitionedRows = local.unpartitionedRows;
-   b.localLookup.partitionedRows = local.partitionedRows;
-
-   auto& global = op.globalAggregation;
-   global.ht_entry_size = sizeof(runtime::Hashmap::EntryHeader);
-   global.groupHashes = local.groupHashes;
-   global.htMatches = local.htMatches;
-   global.groupsFound = local.groupsFound;
-   global.groupsNotFound = local.groupsNotFound;
-   global.keysNEq = local.keysNEq;
-   global.partitionEndsIn = local.partitionEndsIn;
-   global.partitionEndsOut = local.partitionEndsOut;
-   global.unpartitionedRows = global.groupsNotFound->data();
-   global.partitionedRows = local.partitionedRows;
-   global.groupRepresentatives = local.groupRepresentatives;
-
-   b.globalLookup.partitionEndsIn = local.partitionEndsIn;
-   b.globalLookup.partitionEndsOut = local.partitionEndsOut;
-   b.globalLookup.unpartitionedRows = local.unpartitionedRows;
-   b.globalLookup.partitionedRows = local.partitionedRows;
-
-   auto scatter_build = make_unique<FScatterSelOp>(
-       primitives::scatter_sel_hash_t_col, Value(local.groupRepresentatives),
-       Value(local.groupHashes), reinterpret_cast<void**>(&local.scatterStart),
-       &local.ht_entry_size, offsetof(runtime::Hashmap::EntryHeader, hash));
-   local.buildScatter += move(scatter_build);
-
-   auto scatter_build_global = make_unique<FScatterSelRowOp>(
-       primitives::scatter_sel_row_hash_t_col,
-       Value(global.groupRepresentatives), &global.rowData, &global.rowSize, 0,
-       reinterpret_cast<void**>(&global.scatterStart), &global.ht_entry_size,
-       offsetof(runtime::Hashmap::EntryHeader, hash));
-   global.buildScatter += move(scatter_build_global);
-
-   op.child = popOperator();
-   pushOperator(move(gr));
-   return b;
+#ifdef VW_GROUP_HAVING
+QueryBuilder::HashGroupBuilder&
+QueryBuilder::HashGroupBuilder::having(DS input,
+                                       std::unique_ptr<vectorwise::Expression>&& condition,
+                                       DS selection) {
+   auto& op = *group;
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: one having() per group-by; put every "
+                          "conjunct in its Expression");
+   auto& gathers = op.gatherGroups.ops;
+   size_t idx = gathers.size();
+   for (size_t i = 0; i < gathers.size(); ++i) {
+      auto* g = dynamic_cast<GatherOpVal*>(gathers[i].get());
+      if (g && g->target == input.data) idx = i;
+   }
+   if (idx == gathers.size())
+      throw runtime_error("HashGroup::having: input is not an output of this group-by");
+   // the condition's input: gathered for every group
+   op.havingInputTarget = input.data;
+   op.havingInputSize = op.gatherSizes[idx];
+   op.havingInput = move(gathers[idx]);
+   gathers.erase(gathers.begin() + idx);
+   op.gatherSizes.erase(op.gatherSizes.begin() + idx);
+   // every other output: gathered for the passing groups only
+   op.havingSel = selection;
+   for (size_t i = 0; i < gathers.size(); ++i) {
+      auto* g = dynamic_cast<GatherOpVal*>(gathers[i].get());
+      if (!g) throw runtime_error("HashGroup::having: unexpected output op");
+      gathers[i] = make_unique<GatherOpValSel>(g->sourceStart, g->offset,
+                                               g->struct_size, g->target,
+                                               op.gatherSizes[i], op.havingSel);
+   }
+   op.havingCondition = move(condition);
+   return *this;
 }
+#endif
 
 QueryBuilder::HashGroupBuilder::~HashGroupBuilder() {
+   // a group-by's output has one row per key: a single key column is unique
+   if (keyOutputs.size() == 1) base.uniqueBuffers.insert(keyOutputs.front());
 
    // set partitioning buffers in operator
    // This way, op will know the actual output pointers
@@ -702,6 +854,20 @@ QueryBuilder::HashGroupBuilder::~HashGroupBuilder() {
    global.rowSize = rowSize;
 }
 
+#ifdef VW_GROUP_GLOBAL_DIRECT
+/// keys whose bytes are fully defined, so packed keys compare with memcmp
+/// (Char<N> for N > 1 leaves the bytes after len undefined)
+static bool memcmpSafeKey(primitives::NEQCheckRow eqG) {
+   return eqG == primitives::keys_not_equal_row_int32_t_col ||
+          eqG == primitives::keys_not_equal_row_int64_t_col ||
+          eqG == primitives::keys_not_equal_row_int8_t_col ||
+          eqG == primitives::keys_not_equal_row_int16_t_col ||
+          eqG == primitives::keys_not_equal_row_Date_col ||
+          eqG == primitives::keys_not_equal_row_hash_t_col ||
+          eqG == primitives::keys_not_equal_row_Char_1_col;
+}
+#endif
+
 QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
     DS col, primitives::F2 hash,
     /**** global aggr *****/
@@ -712,6 +878,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
     primitives::FScatterSelRow scatterG,
     /**** output *****/
     primitives::FGatherVal gather, DS out) {
+   keyOutputs.push_back(out.data); // unique if it is the only key
    auto& op = *this->group;
    auto& local = op.preAggregation;
    auto& global = op.globalAggregation;
@@ -727,31 +894,15 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
 
    auto partitionOffset =
        entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
-
-   op.groupHash +=
-       base.Expression().addOp(hash, base.Value(local.groupHashes), col);
-
-   auto neqCheck = make_unique<NEqualityCheck>(
-       eq, local.groupsFound, reinterpret_cast<void**>(local.htMatches), col,
-       entryOffset, local.keysNEq);
-   col.registerDS(&neqCheck->probeKey);
-   local.keyEquality += move(neqCheck);
+#ifdef VW_GROUP_GLOBAL_DIRECT
+   if (!memcmpSafeKey(eqG)) op.globalDirectOk = false;
+#endif
 
    auto neqCheckGlobal = make_unique<NEQCheckRowOp>(
        eqG, global.groupsFound, reinterpret_cast<void**>(global.htMatches),
        &global.rowData, entryOffset, &global.rowSize, partitionOffset,
        global.keysNEq);
    global.keyEquality += move(neqCheckGlobal);
-
-   auto partition = make_unique<FPartitionByKeyOp>(
-       partitionByKey, localLookup.unpartitionedRows, col, local.groupHashes,
-       localLookup.partitionEndsIn, localLookup.partitionedRows,
-       localLookup.partitionEndsOut, op.groupHt.get());
-   col.registerDS(&partition->get<1>());
-   local.partitionKeys += move(partition);
-   // swap buffers so that next key reads output of this partition primitive
-   std::swap(localLookup.partitionEndsIn, localLookup.partitionEndsOut);
-   std::swap(localLookup.unpartitionedRows, localLookup.partitionedRows);
 
    auto partitionGlobal = make_unique<FPartitionByKeyRowOp>(
        partitionByKeyG, globalLookup.unpartitionedRows, &global.rowData, 0,
@@ -780,6 +931,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    auto gather_groups = make_unique<GatherOpVal>(
        gather, reinterpret_cast<void**>(global.htMatches), entryOffset,
        &global.ht_entry_size, out);
+#ifdef VW_GROUP_HAVING
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: add every key and value before having()");
+   op.gatherSizes.push_back(out.dataSize);
+#endif
    op.gatherGroups.ops.push_back(move(gather_groups));
    return *this;
 }
@@ -795,6 +951,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
     primitives::FScatterSelRow scatterG,
     /**** output *****/
     primitives::FGatherVal gather, DS out) {
+   keyOutputs.push_back(out.data); // unique if it is the only key
 
    auto& op = *this->group;
    auto& local = op.preAggregation;
@@ -807,6 +964,8 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    op.keyColumns.push_back({colSize, op.totalKeySize, col.data});
    auto& keyColumn = op.keyColumns.back();
    col.registerDS(&keyColumn.data);
+   keyColumn.sel = sel;
+   sel.registerDS(&keyColumn.sel);
    op.totalKeySize += colSize;
    if (op.selVec == nullptr) {
       op.selVec = sel;
@@ -815,33 +974,15 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
 
    auto partitionOffset =
        entryOffset - sizeof(runtime::Hashmap::EntryHeader::next);
-
-   op.groupHash +=
-       base.Expression().addOp(hash, sel, base.Value(local.groupHashes), col);
-
-   auto neqCheck = make_unique<NEqualityCheckSel>(
-       eq, local.groupsFound, reinterpret_cast<void**>(local.htMatches), sel,
-       col, entryOffset, local.keysNEq);
-   sel.registerDS(&neqCheck->probeSel);
-   col.registerDS(&neqCheck->probeKey);
-   local.keyEquality += move(neqCheck);
+#ifdef VW_GROUP_GLOBAL_DIRECT
+   if (!memcmpSafeKey(eqG)) op.globalDirectOk = false;
+#endif
 
    auto neqCheckGlobal = make_unique<NEQCheckRowOp>(
        eqG, global.groupsFound, reinterpret_cast<void**>(global.htMatches),
        &global.rowData, entryOffset, &global.rowSize, partitionOffset,
        global.keysNEq);
    global.keyEquality += move(neqCheckGlobal);
-
-   auto partition = make_unique<FPartitionByKeySelOp>(
-       partitionByKey, localLookup.unpartitionedRows, sel, col,
-       local.groupHashes, localLookup.partitionEndsIn,
-       localLookup.partitionedRows, localLookup.partitionEndsOut,
-       op.groupHt.get());
-   col.registerDS(&partition->get<2>());
-   local.partitionKeys += move(partition);
-   // swap buffers so that next key reads output of this partition primitive
-   std::swap(localLookup.partitionEndsIn, localLookup.partitionEndsOut);
-   std::swap(localLookup.unpartitionedRows, localLookup.partitionedRows);
 
    auto partitionGlobal = make_unique<FPartitionByKeyRowOp>(
        partitionByKeyG, globalLookup.unpartitionedRows, &global.rowData, 0,
@@ -869,6 +1010,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
    auto gather_groups = make_unique<GatherOpVal>(
        gather, reinterpret_cast<void**>(global.htMatches), entryOffset,
        &global.ht_entry_size, out);
+#ifdef VW_GROUP_HAVING
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: add every key and value before having()");
+   op.gatherSizes.push_back(out.dataSize);
+#endif
    op.gatherGroups.ops.push_back(move(gather_groups));
    return *this;
 }
@@ -900,6 +1046,16 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    auto aggr_op = make_unique<FAggrOp>(
        aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset);
    col.registerDS(&aggr_op->get<1>());
+#ifdef VW_AGGR_FUSED
+   if (aggr == primitives::aggr_plus_int64_t_col)
+      op.fusedAggrs.push_back(
+          {HashGroup::FusedAggr::Col, aggr_op.get(), entryOffset});
+   else if (aggr == primitives::aggr_count_star)
+      op.fusedAggrs.push_back(
+          {HashGroup::FusedAggr::Count, aggr_op.get(), entryOffset});
+   else
+      op.fusable = false;
+#endif
    op.updateGroups += move(aggr_op);
 
    auto aggrGlobal_op = make_unique<FAggrRowOp>(
@@ -910,6 +1066,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    auto gather_groups = make_unique<GatherOpVal>(
        gather, reinterpret_cast<void**>(global.htMatches), entryOffset,
        &global.ht_entry_size, out);
+#ifdef VW_GROUP_HAVING
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: add every key and value before having()");
+   op.gatherSizes.push_back(out.dataSize);
+#endif
    op.gatherGroups.ops.push_back(move(gather_groups));
    return *this;
 }
@@ -942,6 +1103,19 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
        aggr, reinterpret_cast<void**>(local.htMatches), sel, col, entryOffset);
    sel.registerDS(&aggr_op->get<1>());
    col.registerDS(&aggr_op->get<2>());
+#ifdef VW_AGGR_FUSED
+   if (aggr == primitives::aggr_sel_plus_int64_t_col) {
+      op.fusedAggrs.push_back(
+          {HashGroup::FusedAggr::SelCol, aggr_op.get(), entryOffset});
+#ifdef VW_AGGR_FUSED_KINDS
+      // the selection vector's identity, fixed by the plan (a Buffer's
+      // address is set at build time; only Column pointers move per morsel)
+      op.fusedAggrs.back().sel =
+          sel.buf == DS::BufferSpec::Buffer ? sel.data : nullptr;
+#endif
+   } else
+      op.fusable = false;
+#endif
    op.updateGroups += move(aggr_op);
 
    auto aggrGlobal_op = make_unique<FAggrRowOp>(
@@ -952,6 +1126,11 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    auto gather_groups = make_unique<GatherOpVal>(
        gather, reinterpret_cast<void**>(global.htMatches), entryOffset,
        &global.ht_entry_size, out);
+#ifdef VW_GROUP_HAVING
+   if (op.havingCondition)
+      throw runtime_error("HashGroup: add every key and value before having()");
+   op.gatherSizes.push_back(out.dataSize);
+#endif
    op.gatherGroups.ops.push_back(move(gather_groups));
    return *this;
 }
@@ -974,79 +1153,4 @@ QueryBuilder::HashGroupBuilder::padToAlign(size_t align) {
        padding(group->globalAggregation.ht_entry_size, align);
    return *this;
 }
-// ---------------------------------------------------------------------------
-// LUTGroupBuilder
-// ---------------------------------------------------------------------------
-QueryBuilder::LUTGroupBuilder::LUTGroupBuilder(QueryBuilder& b) : base(b) {}
-
-QueryBuilder::LUTGroupBuilder QueryBuilder::LUTGroup() {
-   LUTGroupBuilder b(*this);
-   auto nr = nextOpNr();
-   auto& s = operatorState.get<class LUTGroup::Shared>(nr);
-   auto gr = make_unique<class LUTGroup>(s);
-   b.group = gr.get();
-   gr->vecSize = vecs.getVecSize();
-   gr->child = popOperator();
-   pushOperator(move(gr));
-   return b;
-}
-
-QueryBuilder::LUTGroupBuilder&
-QueryBuilder::LUTGroupBuilder::setKeyAndSel(DS packedKeyBuf, DS selBuf) {
-   group->packedKeys = reinterpret_cast<uint16_t*>(packedKeyBuf.data);
-   packedKeyBuf.registerDS(reinterpret_cast<void**>(&group->packedKeys));
-   group->selVec = reinterpret_cast<pos_t*>(selBuf.data);
-   selBuf.registerDS(reinterpret_cast<void**>(&group->selVec));
-   return *this;
-}
-
-QueryBuilder::LUTGroupBuilder&
-QueryBuilder::LUTGroupBuilder::addValue(DS col, DS out) {
-   LUTGroup::ValueSpec spec;
-   spec.colData = col.data;
-   spec.hasSel = false;
-   spec.isCount = false;
-   group->valueSpecs.push_back(spec);
-   // Register so column pointers are updated by Scan
-   auto idx = group->valueSpecs.size() - 1;
-   col.registerDS(&group->valueSpecs[idx].colData);
-   group->outValues.push_back(out.data);
-   group->nValues++;
-   return *this;
-}
-
-QueryBuilder::LUTGroupBuilder&
-QueryBuilder::LUTGroupBuilder::addValueSel(DS col, DS out) {
-   LUTGroup::ValueSpec spec;
-   spec.colData = col.data;
-   spec.hasSel = true;
-   spec.isCount = false;
-   group->valueSpecs.push_back(spec);
-   auto idx = group->valueSpecs.size() - 1;
-   col.registerDS(&group->valueSpecs[idx].colData);
-   group->outValues.push_back(out.data);
-   group->nValues++;
-   return *this;
-}
-
-QueryBuilder::LUTGroupBuilder&
-QueryBuilder::LUTGroupBuilder::addCount(DS out) {
-   LUTGroup::ValueSpec spec;
-   spec.colData = nullptr;
-   spec.hasSel = false;
-   spec.isCount = true;
-   group->valueSpecs.push_back(spec);
-   group->outValues.push_back(out.data);
-   group->nValues++;
-   return *this;
-}
-
-QueryBuilder::LUTGroupBuilder&
-QueryBuilder::LUTGroupBuilder::setKeyOutputs(DS outReturnflag,
-                                              DS outLinestatus) {
-   group->outReturnflag = outReturnflag.data;
-   group->outLinestatus = outLinestatus.data;
-   return *this;
-}
-
 } // namespace vectorwise

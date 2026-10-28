@@ -25,24 +25,46 @@ console = Console()
 
 BOOL_OPTIONS = [
     ("AUTOVECTORIZE",         "Allow the compiler to autovectorize",                      False),
-    ("SCAN_STATIC_PARTITION", "Static per-thread slice partitioning in Scan::next()",     False),
-    ("ORIGINAL_GROUPLOOKUP",  "Use original single-pass GroupLookup (no prefetch split)", False),
-    ("NUMA_ALLOC",            "Replicate base-table columns per NUMA region (4x copy)",   False),
-    ("NUMA_SHARD",            "Shard base-table columns across NUMA regions",             False),
     ("THREAD_PIN_PACKED",     "Pack threads per socket (vs spread round-robin)",           False),
-    ("NUMA_DEBUG",            "NUMA placement verification (move_pages)",                  False),
     ("VW_USE_CRC32",          "Use CRC32 hashing for VectorWise (default: MurMurHash)",   False),
     ("VECTORWISE_BRANCHING",  "Use branching vectorwise primitives",                       False),
     ("AVX512EXPERIMENTS",     "Enable AVX512 experiment targets",                          False),
     ("HARDWARE_BENCHMARKS",   "Enable hardware benchmark targets",                         False),
     ("NO_HUGE_PAGES",         "Disable huge pages for malloc_huge",                        False),
     ("HUGE_2MB_MALLOC_HUGE",  "Use 2MB hugetlb pages for malloc_huge",                    False),
-    ("HUGE_1GB_MALLOC_HUGE",  "Use 1GB huge pages for malloc_huge",                       False),
-    ("HUGE_1GB_MALLOC_NUMA",  "Use 1GB huge pages for malloc_numa",                       False),
-    ("WARM_PAGES",            "Touch all relation pages before measurement",               False),
-    ("INTERLEAVE_HT",         "Interleave hash table pages across NUMA nodes",             False),
-    ("HYPER_FLOAT",           "Let TBB hyper-engine threads float (no pinning)",           False),
+    ("VW_SIMD_SEL",           "AVX-512 selection kernels (int32/int64/Date)",              False),
+    ("VW_SIMD_SEL_CHAR",      "AVX-512BW Char<N> == constant selection kernel",            False),
+    ("VW_SIMD_HASH",          "AVX-512 MurmurHash64A hashing kernels",                     False),
+    ("VW_JOIN_PREFETCH",      "Software prefetch in VectorWise hash join probes",          False),
+    ("VW_JOIN_TWOPHASE",      "Two-phase (group prefetch) hash join probe",                False),
+    ("VW_JOIN_SIMD",          "AVX-512 hash join probes by default",                       False),
+    ("VW_NEW_JOIN",           "Real/maybe-list hash join probe (andrew_pseudocode.md)",   False),
+    ("VW_JOIN_SEMI",          "Existence-only hash probe (Hashset::contains) for semi()",  False),
+    ("VW_JOIN_SEMI_BITMAP",   "Semi joins through a build-key bitmap <= L2 (needs DISPATCH)", False),
+    ("VW_JOIN_BLOOM",         "VectorWise-owned Bloom filter in front of join probes",    False),
+    ("VW_JOIN_FUSED_PROBE",   "Fuse probe hashing into the VW join (VW_JOIN_BLOOM/NEW_JOIN)", False),
+    ("VW_GROUP_BATCH_CREATE", "HashGroup: batched group creation in pre-aggregation",      False),
+    ("VW_GROUP_GLOBAL_DIRECT","HashGroup: one-pass find-or-create in the global phase",    False),
+    ("VW_GROUP_NO_CONCAT",    "HashGroup: single dense key used in place, no packing",     False),
+    ("VW_SPILL_WORD_COPY",    "HashGroup: inline word copy of spilled rows",               False),
+    ("VW_AGGR_FUSED",         "HashGroup: all int64 SUM/COUNT aggregates in one pass",     False),
+    ("VW_GROUP_DISPATCH",     "HashGroup: plan-resolved specialized code paths",           False),
+    ("VW_GROUP_RUN_HEADS",    "HashGroup: branch-free run-head lookup (needs VW_GROUP_DISPATCH)", False),
+    ("VW_JOIN_ALIGN_FIELDS",  "Align hash join entry fields to their natural alignment",  False),
+    ("VW_JOIN_SLIM_HEADER",   "Hash join entries skip EntryHeader::group (VW_GROUP_AGGR)", False),
+    ("VW_Q9_FIELD_ORDER",     "TPC-H Q9: ps_supplycost before n_name in partsupp join",    False),
+    ("VW_CRC32_FAST",         "Bit-identical CRC32Hash speedups (needs VW_USE_CRC32)",     False),
+    ("VW_CRC32_VPCLMUL",      "CRC32Hash with VPCLMULQDQ, 8 keys/zmm (needs VW_USE_CRC32)", False),
 ]
+
+# VW_SIMD_SEL gathered-input (selsel) kernels
+VW_SIMD_SEL_GATHER_CHOICES = ["scalar", "scalarload", "hwgather"]
+# VW_SIMD_SEL contiguous kernels: compress form and unroll
+VW_SIMD_SEL_COMPRESS_CHOICES = ["reg", "mem"]
+VW_SIMD_SEL_UNROLL_CHOICES = ["1", "2"]
+VW_SIMD_SEL_WIDTH_CHOICES = ["512", "256"]
+# hash join entry stride alignment in bytes
+VW_JOIN_ENTRY_PAD_CHOICES = ["8", "16", "32", "64"]
 
 TARGET_ARCH_CHOICES = [
     "native",
@@ -60,37 +82,29 @@ TARGET_ARCH_CHOICES = [
 BUILD_TYPES = ["Release", "RelWithDebInfo", "Debug"]
 
 # ── Machine topology presets ──────────────────────────────────────────────
-# Each entry: (SOCKETS_COUNT, CORES_PER_SOCKET, SMT_PER_CORE, CPU_LAYOUT_CONTIGUOUS, TARGET_ARCH, NUM_REGIONS)
+# Each entry: (SOCKETS_COUNT, CORES_PER_SOCKET, SMT_PER_CORE, CPU_LAYOUT_CONTIGUOUS, TARGET_ARCH)
 
 MACHINE_PRESETS = {
-    "dubliner":  (4, 22, 2, False, "native", 4),          # 4-socket Xeon, interleaved
-    "roquefort": (1, 24, 2, True, "native", 4),            # 1-socket AMD EPYC 7443P (Zen3), 4 CCDs
-    "manchego":  (2, 8, 2, False, "sapphirerapids", 2),    # 2-socket Xeon Silver 4509Y (SPR)
-    "burrata":   (1, 128, 1, False, "neoverse-n1", 1),     # 1-socket ARM Neoverse-N1
-    "kafir":     (8, 24, 2, True, "skylake-x", 8),         # 8-node Skylake-SP, contiguous
-    "rpi5":      (1, 4, 1, False, "cortex-a76", 1),        # Raspberry Pi 5 (BCM2712, 4x Cortex-A76)
+    "dubliner":  (4, 22, 2, False, "native"),           # 4-socket Xeon, interleaved
+    "roquefort": (1, 24, 2, False, "native"),            # 1-socket AMD EPYC 7443P (Zen3)
+    "manchego":  (2, 8, 2, False, "sapphirerapids"),     # 2-socket Xeon Silver 4509Y (SPR)
+    "burrata":   (1, 128, 1, False, "neoverse-n1"),      # 1-socket ARM Neoverse-N1
+    "kafir":     (8, 24, 2, True, "skylake-x"),          # 8-node Skylake-SP, contiguous
+    "rpi5":      (1, 4, 1, False, "cortex-a76"),          # Raspberry Pi 5 (BCM2712, 4x Cortex-A76)
     "custom":    None,  # user sets values manually
 }
 
 # ── Preset configurations ─────────────────────────────────────────────────
 
-PRESETS = { # untested
+PRESETS = {
     "ARM baseline": {
         "COMPILER": "clang",
         "TARGET_ARCH": "neoverse-n1",
-        "SCAN_STATIC_PARTITION": True,
     },
     "ARM optimized": {
         "COMPILER": "clang",
         "TARGET_ARCH": "neoverse-n1",
-        "SCAN_STATIC_PARTITION": True,
         "AUTOVECTORIZE": True,
-    },
-    "ARM NUMA replicate": {
-        "USE_CLANG": True,
-        "TARGET_ARCH": "neoverse-n1",
-        "SCAN_STATIC_PARTITION": True,
-        "NUMA_ALLOC": True,
     },
     "x86 baseline": {
         "TARGET_ARCH": "native",
@@ -99,22 +113,13 @@ PRESETS = { # untested
         "TARGET_ARCH": "skylake-x",
         "AVX512EXPERIMENTS": True,
     },
-    "x86 NUMA shard": {
-        "TARGET_ARCH": "native",
-        "NUMA_SHARD": True,
-    },
     "Custom": None,
 }
 
 # ── Validation ────────────────────────────────────────────────────────────
 
 def validate_options(opts):
-    errors = []
-    if opts.get("NUMA_ALLOC") and opts.get("NUMA_SHARD"):
-        errors.append("NUMA_ALLOC and NUMA_SHARD are mutually exclusive.")
-    if opts.get("SCAN_STATIC_PARTITION") and opts.get("NUMA_SHARD"):
-        errors.append("SCAN_STATIC_PARTITION and NUMA_SHARD are mutually exclusive.")
-    return errors
+    return []
 
 # ── Interactive configuration ─────────────────────────────────────────────
 
@@ -141,12 +146,16 @@ def configure():
     opts["SOCKETS_COUNT"] = "4"
     opts["CORES_PER_SOCKET"] = "22"
     opts["SMT_PER_CORE"] = "2"
-    opts["NUM_REGIONS"] = "0"  # 0 = auto (defaults to SOCKETS_COUNT)
     opts["CPU_LAYOUT_CONTIGUOUS"] = False
     opts["BUILD_TYPE"] = "Release"
     opts["DATADIR"] = ""
     opts["BUILD_DIR"] = "build"
     opts["JOBS"] = str(os.cpu_count() or 4)
+    opts["VW_SIMD_SEL_GATHER"] = "scalar"
+    opts["VW_SIMD_SEL_COMPRESS"] = "reg"
+    opts["VW_SIMD_SEL_UNROLL"] = "1"
+    opts["VW_SIMD_SEL_WIDTH"] = "512"
+    opts["VW_JOIN_ENTRY_PAD"] = "8"
 
     # Apply preset
     if preset is not None:
@@ -172,7 +181,6 @@ def configure():
             opts["SMT_PER_CORE"] = str(mp[2])
             opts["CPU_LAYOUT_CONTIGUOUS"] = mp[3]
             opts["TARGET_ARCH"] = mp[4]
-            opts["NUM_REGIONS"] = str(mp[5])
         else:
             opts["SOCKETS_COUNT"] = questionary.text(
                 "Sockets / chiplets / memory domains:", default=opts["SOCKETS_COUNT"]).ask()
@@ -180,8 +188,6 @@ def configure():
                 "Cores per socket / chiplet:", default=opts["CORES_PER_SOCKET"]).ask()
             opts["SMT_PER_CORE"] = questionary.text(
                 "Hardware threads per core (SMT):", default=opts["SMT_PER_CORE"]).ask()
-            opts["NUM_REGIONS"] = questionary.text(
-                "Sharding regions (0 = auto from sockets):", default=opts["NUM_REGIONS"]).ask()
             opts["CPU_LAYOUT_CONTIGUOUS"] = questionary.confirm(
                 "Contiguous CPU numbering per node? (vs interleaved)", default=False).ask()
 
@@ -232,33 +238,43 @@ def configure():
         for name, _, _ in BOOL_OPTIONS[:3]:
             opts[name] = name in compiler_opts
 
-        # NUMA group
-        numa_opts = questionary.checkbox(
-            "NUMA options (space to toggle):",
+        # Build features group
+        feature_opts = questionary.checkbox(
+            "Build feature options (space to toggle):",
             choices=[
                 questionary.Choice(f"{name}: {desc}", value=name, checked=opts.get(name, default))
-                for name, desc, default in BOOL_OPTIONS[3:10]
+                for name, desc, default in BOOL_OPTIONS[3:]
             ],
         ).ask()
-        if numa_opts is None:
+        if feature_opts is None:
             sys.exit(1)
-        for name, _, _ in BOOL_OPTIONS[3:10]:
-            opts[name] = name in numa_opts
+        for name, _, _ in BOOL_OPTIONS[3:]:
+            opts[name] = name in feature_opts
 
-        # Advanced group
-        show_advanced = questionary.confirm("Show advanced options?", default=False).ask()
-        if show_advanced:
-            adv_opts = questionary.checkbox(
-                "Advanced options (space to toggle):",
-                choices=[
-                    questionary.Choice(f"{name}: {desc}", value=name, checked=opts.get(name, default))
-                    for name, desc, default in BOOL_OPTIONS[10:]
-                ],
+        if opts.get("VW_SIMD_SEL"):
+            opts["VW_SIMD_SEL_GATHER"] = questionary.select(
+                "VW_SIMD_SEL gathered-input (selsel) kernels:",
+                choices=VW_SIMD_SEL_GATHER_CHOICES,
+                default=opts["VW_SIMD_SEL_GATHER"],
             ).ask()
-            if adv_opts is None:
+            if opts["VW_SIMD_SEL_GATHER"] is None:
                 sys.exit(1)
-            for name, _, _ in BOOL_OPTIONS[10:]:
-                opts[name] = name in adv_opts
+            for key, label, choices in (
+                ("VW_SIMD_SEL_COMPRESS", "VW_SIMD_SEL compress form:", VW_SIMD_SEL_COMPRESS_CHOICES),
+                ("VW_SIMD_SEL_UNROLL", "VW_SIMD_SEL contiguous unroll:", VW_SIMD_SEL_UNROLL_CHOICES),
+                ("VW_SIMD_SEL_WIDTH", "VW_SIMD_SEL contiguous vector width:", VW_SIMD_SEL_WIDTH_CHOICES),
+            ):
+                opts[key] = questionary.select(label, choices=choices, default=opts[key]).ask()
+                if opts[key] is None:
+                    sys.exit(1)
+
+        opts["VW_JOIN_ENTRY_PAD"] = questionary.select(
+            "Hash join entry stride alignment (bytes):",
+            choices=VW_JOIN_ENTRY_PAD_CHOICES,
+            default=opts["VW_JOIN_ENTRY_PAD"],
+        ).ask()
+        if opts["VW_JOIN_ENTRY_PAD"] is None:
+            sys.exit(1)
 
         # Data directory
         datadir = questionary.text(
@@ -304,7 +320,6 @@ def build_cmake_args(opts):
         args.append(f"-DSOCKETS_COUNT={opts['SOCKETS_COUNT']}")
         args.append(f"-DCORES_PER_SOCKET={opts['CORES_PER_SOCKET']}")
         args.append(f"-DSMT_PER_CORE={opts['SMT_PER_CORE']}")
-        args.append(f"-DNUM_REGIONS={opts['NUM_REGIONS']}")
         val = "ON" if opts.get("CPU_LAYOUT_CONTIGUOUS", False) else "OFF"
         args.append(f"-DCPU_LAYOUT_CONTIGUOUS={val}")
     if opts["DATADIR"]:
@@ -312,6 +327,11 @@ def build_cmake_args(opts):
     for name, _, _ in BOOL_OPTIONS:
         val = "ON" if opts.get(name, False) else "OFF"
         args.append(f"-D{name}={val}")
+    args.append(f"-DVW_SIMD_SEL_GATHER={opts.get('VW_SIMD_SEL_GATHER', 'scalar')}")
+    args.append(f"-DVW_SIMD_SEL_COMPRESS={opts.get('VW_SIMD_SEL_COMPRESS', 'reg')}")
+    args.append(f"-DVW_SIMD_SEL_UNROLL={opts.get('VW_SIMD_SEL_UNROLL', '1')}")
+    args.append(f"-DVW_SIMD_SEL_WIDTH={opts.get('VW_SIMD_SEL_WIDTH', '512')}")
+    args.append(f"-DVW_JOIN_ENTRY_PAD={opts.get('VW_JOIN_ENTRY_PAD', '8')}")
     return args
 
 # ── Build execution ───────────────────────────────────────────────────────

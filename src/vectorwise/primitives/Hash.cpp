@@ -2,6 +2,8 @@
 #include "common/runtime/Hash.hpp"
 #include "vectorwise/Operations.hpp"
 #include "vectorwise/Primitives.hpp"
+#include "vectorwise/SimdCrc.hpp"
+#include "vectorwise/SimdHash.hpp"
 #include <functional>
 
 using namespace types;
@@ -20,6 +22,29 @@ namespace primitives {
 #endif
 
 
+#if defined(VW_SIMD_HASH) && !defined(VW_HAVE_SIMD_HASH)
+#pragma message("VW_SIMD_HASH: needs AVX-512F+DQ and 64-bit hashes, using scalar hashing")
+#endif
+
+#ifdef VW_SIMD_HASH
+// VW_SIMD_HASH: the public names point at the AVX-512 MurmurHash64A kernels
+// (SimdHash.hpp) for supported key types when DEFAULT_HASH is MurMurHash;
+// otherwise at the scalar templates. Results are bit-identical.
+#define MK_HASH(type)                                                          \
+   F2 hash_##type##_col = (F2)simd_hash::pick_hash<type, DEFAULT_HASH>(        \
+       &hash<type, DEFAULT_HASH>);
+#define MK_HASH_SEL(type)                                                      \
+   F3 hash_sel_##type##_col =                                                  \
+       (F3)simd_hash::pick_hash_sel<type, DEFAULT_HASH>(                       \
+           &hash_sel<type, DEFAULT_HASH>);
+#define MK_REHASH(type)                                                        \
+   F2 rehash_##type##_col = (F2)simd_hash::pick_rehash<type, DEFAULT_HASH>(    \
+       &rehash<type, DEFAULT_HASH>);
+#define MK_REHASH_SEL(type)                                                    \
+   F3 rehash_sel_##type##_col =                                                \
+       (F3)simd_hash::pick_rehash_sel<type, DEFAULT_HASH>(                     \
+           &rehash_sel<type, DEFAULT_HASH>);
+#else
 #define MK_HASH(type) F2 hash_##type##_col = (F2)&hash<type, DEFAULT_HASH>;
 #define MK_HASH_SEL(type)                                                      \
    F3 hash_sel_##type##_col = (F3)&hash_sel<type, DEFAULT_HASH>;
@@ -27,6 +52,24 @@ namespace primitives {
    F2 rehash_##type##_col = (F2)&rehash<type, DEFAULT_HASH>;
 #define MK_REHASH_SEL(type)                                                    \
    F3 rehash_sel_##type##_col = (F3)&rehash_sel<type, DEFAULT_HASH>;
+#endif
+
+#if defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32) && !defined(VW_HAVE_SIMD_CRC)
+#pragma message("VW_CRC32_VPCLMUL: needs AVX-512F/DQ/VL/BW + VPCLMULQDQ and 64-bit hashes, using scalar CRC32 hashing")
+#endif
+#if defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32)
+// VW_CRC32_VPCLMUL: hash/hash_sel of supported key types point at the
+// VPCLMULQDQ CRC32Hash kernels (SimdCrc.hpp) when the ISA is there;
+// bit-identical. rehash stays as above.
+#undef MK_HASH
+#undef MK_HASH_SEL
+#define MK_HASH(type)                                                          \
+   F2 hash_##type##_col = (F2)simd_crc::pick_hash<type, DEFAULT_HASH>(         \
+       &hash<type, DEFAULT_HASH>);
+#define MK_HASH_SEL(type)                                                      \
+   F3 hash_sel_##type##_col = (F3)simd_crc::pick_hash_sel<type, DEFAULT_HASH>( \
+       &hash_sel<type, DEFAULT_HASH>);
+#endif
 
 EACH_TYPE(NIL, MK_HASH)
 EACH_TYPE(NIL, MK_HASH_SEL)
@@ -55,10 +98,19 @@ pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES i
 {
   size_t rest = n % 8;
   Vec8u seeds(seed);
-  asm(
+  // The loop advances the selection and result pointers, so they are in/out
+  // operands on copies (modifying input-only operands is undefined behaviour
+  // and broke the tail below). End = result + len, and the do-while loop is
+  // skipped when there is no full group of 8: the old end of
+  // result + 64 + len ran one extra group past n.
+  pos_t* selPos = inSel;
+  hash_t* resPos = result;
+  const size_t fullBytes = (n - rest) * 8;
+  if (fullBytes)
+  asm volatile(
     "movabsq	$29875498475984, %%r8;"
     "vpbroadcastq	%%r8, %%zmm6;"
-    "leaq	64(%2,%3), %%r11;"
+    "leaq	(%1,%3), %%r11;"
     "movl	$-1, %%r8d;"
     "kmovb	%%r8d, %%k1;"
     "movabsq	$-4132994306676758123, %%r8;"
@@ -71,12 +123,12 @@ pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES i
     "vpmullq	%%zmm2, %%zmm5, %%zmm5;"
     "vpbroadcastq	%%r8, %%zmm4;"
     "vpxorq	%%zmm6, %%zmm4, %%zmm4;"
-    ".Hash4SelInner:;"
+    ".Hash4SelInner%=:;"
     "vmovdqu32	(%0), %%ymm1;"
     "kmovb	%%k1, %%k2;"
-    "addq	$64, %2;"
+    "addq	$64, %1;"
     "addq	$32, %0;"
-    "vpgatherdd	(%1,%%ymm1,4), %%ymm0%{%%k2%};"
+    "vpgatherdd	(%2,%%ymm1,4), %%ymm0%{%%k2%};"
     "vpmovzxdq	%%ymm0, %%zmm0;"
     "vpmullq	%%zmm2, %%zmm0, %%zmm1;"
     "vpsrlvq	%%zmm3, %%zmm1, %%zmm7;"
@@ -90,15 +142,14 @@ pos_t hash4_selASM(pos_t n, pos_t* RES inSel, hash_t* RES result, int32_t* RES i
     "vpmullq	%%zmm2, %%zmm14, %%zmm15;"
     "vpsrlvq	%%zmm3, %%zmm15, %%zmm16;"
     "vpxorq	%%zmm15, %%zmm16, %%zmm17;"
-    "vmovdqu64	%%zmm17, -64(%2);"
-    "cmpq	%%r11, %2;"
-    "jne	.Hash4SelInner;"
-    ::
-     "r"(inSel), // pointer to selection vector
-     "r"(input), // pointer to data for gathering
-     "r"(result), // pointer to output vector
-     "r"((n-rest)*8)
-    : "k1", "k2", "r11", "r10", "r8","ymm1",
+    "vmovdqu64	%%zmm17, -64(%1);"
+    "cmpq	%%r11, %1;"
+    "jne	.Hash4SelInner%=;"
+    : "+r"(selPos), // pointer to selection vector (advanced)
+      "+r"(resPos)  // pointer to output vector (advanced)
+    : "r"(input),   // pointer to data for gathering
+      "r"(fullBytes)
+    : "memory", "cc", "k1", "k2", "r11", "r10", "r8","ymm1",
       "zmm0", "zmm1","zmm2","zmm3","zmm4", "zmm5", "zmm6",
       "zmm7", "zmm8","zmm9","zmm10","zmm11", "zmm12", "zmm13",
       "zmm14", "zmm15","zmm16","zmm17");

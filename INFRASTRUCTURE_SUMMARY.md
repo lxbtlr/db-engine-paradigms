@@ -196,3 +196,74 @@ The defining pattern: **everything is async and self-reporting, no babysitting.*
   or the user's explicit sync, never by inspecting `/home`.
 - The NUMA sharding smoke test verified 4 regions; `NUMA_ALLOC` variant failed
   NUMA-validation reproducibly (no tldr; heads-up texts sent instead).
+- **baseline full-thread sweep (Sep 19):** 4 configs on 4 machines from `baseline`
+  branch @ `adae38e` — `baseline` (no flags), `gcc_crc` (-DVW_USE_CRC32=ON),
+  `clang` (-DUSE_CLANG=ON), `clang_crc` (both). Threads 4..max step 4; sf100;
+  q1,3,6,9,18; 5 reps. Scripts: `build_baseline_sweep.sh`,
+  `submit_baseline_sweep_machine.sh`. Builds run CONCURRENT per-machine (build
+  dirs are per-machine named; the orchestrator pre-checks-out `baseline` and the
+  build script VERIFIES (does not mutate) the shared NFS worktree, so concurrent
+  builds are safe).
+- **clang-on-roquefort libstdc++ gotcha:** `clang++-18` defaults to the NEWEST
+  installed libstdc++ (GCC 16 on roquefort) which FAILS to compile the
+  thread-pool code (`Concurrency.hpp` std::vector<std::thread> emplace_back —
+  "member access into incomplete type __normal_iterator"). Fix: pin clang to the
+  default g++'s libstdc++ via
+  `-DCMAKE_CXX_FLAGS=--gcc-install-dir=/usr/lib/gcc/$(gcc -print-multiarch)/$(g++ -dumpversion)`
+  for `clang_*` configs. manchego worked un-pinned (only gcc 11/12 present).
+  Detect with: `echo '#include <vector>' | clang++-18 -E -x c++ - | grep stl_vector.h`.
+- **Build parallelism cap:** clang builds on large nodes (dubliner 176thr,
+  burrata 128thr) capped at `-j32` to avoid memory pressure; `build_baseline_sweep.sh`
+  uses `JOBS=$(( nproc < 32 ? nproc : 32 ))`.
+
+- **query1 matrix (Sep 20):** 3 compilers (gcc16/gcc9/clang22) x 2 CRC32 x 2 POS16
+  x 3 group {none,og,ga} = 36 configs/machine, run `-q1 -s0 -r10 -t1,2,4,8` sf1 both
+  engines. gcc9 SKIPPED on burrata (ARM): SIMDe `__builtin_inf16` missing on gcc-9
+  (no `__has_builtin` pre-GCC-10). Result: 1056 runs (dubliner 288 + manchego 288 +
+  roquefort 288 + burrata 192). Combined CSVs under `/tank/alexb/swole/sweeps/`.
+- **query1 branch CHANGED run.cpp PMU column ORDER** (l1-hits before instr.; stores/
+  loads/all_rd repositioned). The new order still matches EXISTING registered
+  header_versions exactly: dubliner=v3, roquefort=v4, manchego=v4_manchego,
+  burrata=v4_burrata. NO new migration needed.
+- **header auto-detect AMBIGUITY:** ingest-tpch's auto-detect compares SORTED column
+  sets, so versions with the same column SET but different ORDER (v3 vs v4) are
+  indistinguishable -> picks arbitrarily, then ingest fails on positional mismatch.
+  roquefort auto-picked v3 (wrong) -> 0 ingested. MUST force explicit
+  `--header-version` for roquefort (=v4), dubliner (=v3) on query1 output.
+- **ingest-tpch ABORTS on first malformed manifest line** (does NOT skip per-line):
+  an empty build_event field (e.g. a config absent from build_map) makes the WHOLE
+  ingest fail -> 0 runs. Guard with `[ -n "$BE" ] || continue` when building the
+  manifest.
+- **combine_tpch.py takes 2 args** (MANIFEST OUT_CSV), writes to OUT_CSV directly;
+  manifest second field must be the **.out path** (NOT the binary path), one
+  `buildname <path>` per line. Invoking with 1 arg + `> out.csv` just dumps usage
+  text into the CSV. The q1 matrix finalize scripts had both bugs (wrote binary
+  path + 1-arg redirect) -> regenerated correctly from login host.
+- **make_public.sh not reachable from compute nodes** (`.pi/agent` path not on nodes
+  / only dubliner had it): only dubliner's CSV auto-published; manchego/roquefort/
+  burrata CSVs copied to `/tank/www/alexb/swole/` manually from the login host.
+- **ingest-tpch is idempotent on the run natural key**
+  (task_id, build_event_id, snapshot_id, engine_id, trial). Re-ingesting the same
+  config+snapshot+trial yields `0 runs ingested from N file(s)` — NOT an error.
+  The q1_tests phase re-ran `-t 1` with `chrt -f 1`, but threads=1 was already in
+  the corpus from the q1 matrix (same build_event 166, snapshot 4, trial 0) -> all
+  132 re-runs deduped to 0. Scheduling policy (chrt) is NOT part of the key, so it
+  cannot be used to distinguish otherwise-identical runs. Combined CSVs still built
+  fine (combine is independent of ingest). Verify a config is truly new by checking
+  parse_out (via corpus/parse.py) + the natural key before expecting inserts.
+- **Run-policy dimension: `scheduling`** (migration 0020). Runtime scheduling
+  policy is NOT a build characteristic, so it must NOT be minted as a new
+  build_event_id (build_event = spec + compiled binary; chrt is neither).
+  `run.scheduling TEXT DEFAULT 'default'` is now part of the run natural key
+  (task, build_event, snapshot, engine, trial, scheduling). Ingest with
+  `ingest-tpch MANIFEST --scheduling chrt-f1` to record a re-run of the same
+  binary under a different policy as a distinct, labeled run. `ingest_batch`
+  keeps UNIQUE(out_sha256) (one .out = one run = one scheduling); to re-read a
+  file under a new policy, clear its stale ingest_batch row + FK children
+  (environment_fact -> run_environment -> run_timeline/run_canary -> ingest_batch)
+  first. SQLite table rebuild needs `PRAGMA legacy_alter_table=ON` before the
+  RENAME or the 11 views that SELECT FROM run break ("no such table: run").
+- **q1_tests phase (2026-09-20)**: 132 single-thread `chrt -f 1` runs, all
+  succeeded, ingested as 264 runs under scheduling='chrt-f1' (dubliner v3,
+  manchego v4_manchego, roquefort v4, burrata v4_burrata). This was the first
+  use of the scheduling dimension.

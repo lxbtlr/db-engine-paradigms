@@ -56,6 +56,39 @@ pos_t GatherOpVal::run(pos_t n) {
    return op(n, sourceStart, offset, struct_size, target);
 }
 
+#ifdef VW_GROUP_HAVING
+GatherOpValSel::GatherOpValSel(void** s, size_t off, size_t* s_s, void* t,
+                               size_t es, pos_t* sl)
+    : sourceStart(s), offset(off), struct_size(s_s), target(t), elemSize(es),
+      sel(sl) {}
+
+namespace {
+template <typename T>
+void gatherValSel(pos_t n, const pos_t* RES sel, const char* RES base,
+                  size_t stride, T* RES out) {
+   for (pos_t j = 0; j < n; ++j)
+      std::memcpy(&out[j], base + size_t(sel[j]) * stride, sizeof(T));
+}
+} // namespace
+
+pos_t GatherOpValSel::run(pos_t n) {
+   const char* base = static_cast<const char*>(*sourceStart) + offset;
+   const size_t stride = *struct_size;
+   switch (elemSize) {
+   case 1: gatherValSel(n, sel, base, stride, static_cast<uint8_t*>(target)); break;
+   case 2: gatherValSel(n, sel, base, stride, static_cast<uint16_t*>(target)); break;
+   case 4: gatherValSel(n, sel, base, stride, static_cast<uint32_t*>(target)); break;
+   case 8: gatherValSel(n, sel, base, stride, static_cast<uint64_t*>(target)); break;
+   default: {
+      char* out = static_cast<char*>(target);
+      for (pos_t j = 0; j < n; ++j)
+         std::memcpy(out + size_t(j) * elemSize, base + size_t(sel[j]) * stride, elemSize);
+   }
+   }
+   return n;
+}
+#endif
+
 EqualityCheck::EqualityCheck(primitives::EQCheck p, void** ptrs, size_t off,
                              pos_t* probeI, void* probeD)
     : prim(p), pointers(ptrs), offset(off), probeIdxs(probeI),
@@ -90,6 +123,13 @@ pos_t F3_Op::run(pos_t n) {
 pos_t F4_Op::run(pos_t n) {
    return operation(n, inputSelectionV, outputSelectionV, param1, param2);
 }
+#ifdef VW_PROJ_COMPOUND
+pos_t CompoundOp::run(pos_t n) {
+   return kernel(n, static_cast<const pos_t*>(sel), static_cast<int64_t*>(mid),
+                 static_cast<int64_t*>(out), static_cast<const int64_t*>(a),
+                 static_cast<const int64_t*>(b), static_cast<const int64_t*>(c));
+}
+#endif
 
 pos_t ConcatOp::run(pos_t n) {
    auto* s = reinterpret_cast<pos_t*>(sel);

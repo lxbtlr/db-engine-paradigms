@@ -1,0 +1,786 @@
+#pragma once
+//===----------------------------------------------------------------------===//
+// AVX-512 selection kernels (CMake options VW_SIMD_SEL, VW_SIMD_SEL_CHAR).
+//
+// Selection is the only primitive family with compressed (variable-length)
+// output, and neither gcc nor clang autovectorizes it (see
+// study/VW_AUTOVEC_STUDY.md). These kernels do compare -> compress -> masked store,
+// 16 elements per iteration, with masked tails (no scalar epilogue).
+//
+// Every kernel has the same signature as the scalar template it replaces in
+// Primitives.hpp, so the F3/F4 casts in Selection.cpp stay valid. The pick_*
+// helpers at the bottom return the SIMD kernel when the option and ISA allow
+// it, and the scalar pointer otherwise.
+//
+// ISA requirements:
+//   int32 / int64 / Date kernels : x86-64 + AVX512F
+//   Char<N> == constant kernel   : additionally AVX512BW (byte masks)
+// Without them nothing below is defined and pick_* return the scalar pointer.
+//===----------------------------------------------------------------------===//
+#include "common/runtime/Types.hpp"
+#include "vectorwise/defs.hpp"
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <type_traits>
+
+#if defined(__x86_64__) && defined(__AVX512F__)
+#include <immintrin.h>
+#define VW_HAVE_SIMD_SEL 1
+#if defined(__AVX512BW__)
+#define VW_HAVE_SIMD_SEL_CHAR 1
+#endif
+// 256-bit (ymm) contiguous kernels need AVX512VL for masked ymm compares,
+// compress and narrowing stores.
+#if defined(__AVX512VL__)
+#define VW_HAVE_SIMD_SEL_256 1
+#endif
+#endif
+
+namespace vectorwise {
+namespace primitives {
+namespace simd {
+
+#ifdef VW_HAVE_SIMD_SEL
+
+static_assert(sizeof(types::Date) == 4 &&
+                  std::is_standard_layout<types::Date>::value,
+              "Date must be a plain int32 to use the int32 kernels");
+
+/// Lane width in bits for the supported element types (0 = unsupported).
+template <typename T> struct Width { static constexpr int bits = 0; };
+template <> struct Width<int32_t> { static constexpr int bits = 32; };
+template <> struct Width<int64_t> { static constexpr int bits = 64; };
+template <> struct Width<types::Date> { static constexpr int bits = 32; };
+
+/// std:: comparator -> AVX-512 integer compare predicate (-1 = unsupported).
+/// All compares are signed, which matches int32_t, int64_t and Date.
+template <template <typename> class Op> struct CmpImm {
+   static constexpr int imm = -1;
+};
+template <> struct CmpImm<std::equal_to> {
+   static constexpr int imm = _MM_CMPINT_EQ;
+};
+template <> struct CmpImm<std::less> {
+   static constexpr int imm = _MM_CMPINT_LT;
+};
+template <> struct CmpImm<std::less_equal> {
+   static constexpr int imm = _MM_CMPINT_LE;
+};
+template <> struct CmpImm<std::greater_equal> {
+   static constexpr int imm = _MM_CMPINT_NLT;
+};
+template <> struct CmpImm<std::greater> {
+   static constexpr int imm = _MM_CMPINT_NLE;
+};
+
+template <typename T, template <typename> class Op>
+constexpr bool kernel_ok = Width<T>::bits != 0 && CmpImm<Op>::imm >= 0;
+
+inline int32_t raw(int32_t v) { return v; }
+inline int64_t raw(int64_t v) { return v; }
+inline int32_t raw(const types::Date& d) { return d.value; }
+
+/// Mask with the low r (1..16) bits set.
+inline __mmask16 tail_mask(size_t r) { return (__mmask16)((1u << r) - 1); }
+
+inline __m512i lane_ids() {
+   return _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+                            15);
+}
+
+/// How matching positions are written (CMake VW_SIMD_SEL_COMPRESS):
+///   Reg: register vpcompressd + masked store sized to the match count. Fast
+///        everywhere, including AMD Zen 4, where the memory form is microcoded.
+///   Mem: memory-form vpcompressd (_mm512_mask_compressstoreu_epi32), as in the
+///        pre-existing *_avx512 kernels; fewer uops on Intel.
+/// Both write exactly popcount(m) positions and nothing past them. Under
+/// VW_POS_16 a 16-bit memory compress would need AVX512-VBMI2, so Mem falls
+/// back to Reg there.
+enum class Emit { Reg, Mem };
+#ifdef VW_SIMD_SEL_COMPRESS_MEM
+constexpr Emit kEmit = Emit::Mem;
+#else
+constexpr Emit kEmit = Emit::Reg;
+#endif
+/// Vectors of 16 per loop iteration in the contiguous kernels
+/// (CMake VW_SIMD_SEL_UNROLL).
+#ifdef VW_SIMD_SEL_UNROLL2
+constexpr unsigned kUnroll = 2;
+#else
+constexpr unsigned kUnroll = 1;
+#endif
+
+/// Compress the lanes of `ids` selected by `m` and store them at `out`.
+/// Returns the number of positions written.
+template <Emit E>
+inline size_t emit_as(pos_t* RES out, __mmask16 m, __m512i ids) {
+   const unsigned cnt = __builtin_popcount((unsigned)m);
+#ifndef VW_POS_16
+   if constexpr (E == Emit::Mem) {
+      _mm512_mask_compressstoreu_epi32(out, m, ids);
+      return cnt;
+   }
+#endif
+   const __m512i packed = _mm512_maskz_compress_epi32(m, ids);
+   const __mmask16 st = (__mmask16)((1u << cnt) - 1);
+#ifdef VW_POS_16
+   _mm512_mask_cvtepi32_storeu_epi16(out, st, packed);
+#else
+   _mm512_mask_storeu_epi32(out, st, packed);
+#endif
+   return cnt;
+}
+
+/// emit with the CMake-selected form (gathered-input and Char kernels).
+inline size_t emit(pos_t* RES out, __mmask16 m, __m512i ids) {
+   return emit_as<kEmit>(out, m, ids);
+}
+
+/// Load 16 selection-vector entries as 32-bit lanes (r valid entries, 1..16).
+inline __m512i load_idx(const pos_t* p, size_t r) {
+#ifdef VW_POS_16
+   if (r == 16)
+      return _mm512_cvtepu16_epi32(
+          _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p)));
+   alignas(32) uint16_t tmp[16] = {0};
+   std::memcpy(tmp, p, r * sizeof(pos_t));
+   return _mm512_cvtepu16_epi32(
+       _mm256_load_si256(reinterpret_cast<const __m256i*>(tmp)));
+#else
+   if (r == 16) return _mm512_loadu_si512(p);
+   return _mm512_maskz_loadu_epi32(tail_mask(r), p);
+#endif
+}
+
+/// Compare 16 contiguous elements starting at element i (k = valid lanes).
+template <typename T, template <typename> class Op>
+inline __mmask16 cmp_contig(const T* a, size_t i, __mmask16 k, __m512i c) {
+   constexpr int IMM = CmpImm<Op>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      const __m512i v = _mm512_maskz_loadu_epi32(k, a + i);
+      return _mm512_mask_cmp_epi32_mask(k, v, c, IMM);
+   } else {
+      const __mmask8 klo = (__mmask8)k, khi = (__mmask8)(k >> 8);
+      const __m512i lo = _mm512_maskz_loadu_epi64(klo, a + i);
+      const __m512i hi = _mm512_maskz_loadu_epi64(khi, a + i + 8);
+      const __mmask8 mlo = _mm512_mask_cmp_epi64_mask(klo, lo, c, IMM);
+      const __mmask8 mhi = _mm512_mask_cmp_epi64_mask(khi, hi, c, IMM);
+      return (__mmask16)(mlo | ((unsigned)mhi << 8));
+   }
+}
+
+/// Same, full 16 lanes, unmasked loads (hot loop).
+template <typename T, template <typename> class Op>
+inline __mmask16 cmp_contig_full(const T* a, size_t i, __m512i c) {
+   constexpr int IMM = CmpImm<Op>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      const __m512i v = _mm512_loadu_si512(a + i);
+      return _mm512_cmp_epi32_mask(v, c, IMM);
+   } else {
+      const __m512i lo = _mm512_loadu_si512(a + i);
+      const __m512i hi = _mm512_loadu_si512(a + i + 8);
+      const __mmask8 mlo = _mm512_cmp_epi64_mask(lo, c, IMM);
+      const __mmask8 mhi = _mm512_cmp_epi64_mask(hi, c, IMM);
+      return (__mmask16)(mlo | ((unsigned)mhi << 8));
+   }
+}
+
+/// Gather 16 elements a[idx[j]] (k = valid lanes) as one (32-bit) or two
+/// (64-bit) registers.
+template <typename T>
+inline void gather(const T* a, __m512i idx, __mmask16 k, __m512i& lo,
+                   __m512i& hi) {
+   const __m512i z = _mm512_setzero_si512();
+   if constexpr (Width<T>::bits == 32) {
+      lo = _mm512_mask_i32gather_epi32(z, k, idx, a, 4);
+   } else {
+      lo = _mm512_mask_i32gather_epi64(z, (__mmask8)k,
+                                       _mm512_castsi512_si256(idx), a, 8);
+      hi = _mm512_mask_i32gather_epi64(z, (__mmask8)(k >> 8),
+                                       _mm512_extracti64x4_epi64(idx, 1), a, 8);
+   }
+}
+
+template <typename T, template <typename> class Op>
+inline __mmask16 cmp_regs(__mmask16 k, __m512i alo, __m512i ahi, __m512i blo,
+                          __m512i bhi) {
+   constexpr int IMM = CmpImm<Op>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      (void)ahi;
+      (void)bhi;
+      return _mm512_mask_cmp_epi32_mask(k, alo, blo, IMM);
+   } else {
+      const __mmask8 mlo =
+          _mm512_mask_cmp_epi64_mask((__mmask8)k, alo, blo, IMM);
+      const __mmask8 mhi =
+          _mm512_mask_cmp_epi64_mask((__mmask8)(k >> 8), ahi, bhi, IMM);
+      return (__mmask16)(mlo | ((unsigned)mhi << 8));
+   }
+}
+
+template <typename T> inline __m512i broadcast(const T& v) {
+   if constexpr (Width<T>::bits == 32)
+      return _mm512_set1_epi32(raw(v));
+   else
+      return _mm512_set1_epi64(raw(v));
+}
+
+//--- continuous -> compressed ------------------------------------------------
+
+/// result = positions i with Op(param1[i], *param2); E = compress form,
+/// U = vectors of 16 per iteration (1 or 2).
+template <typename T, template <typename> class Op, Emit E, unsigned U>
+pos_t sel_col_val_v(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   static_assert(U == 1 || U == 2, "unroll must be 1 or 2");
+   const __m512i c = broadcast(*param2);
+   const __m512i step = _mm512_set1_epi32(16);
+   __m512i ids = lane_ids();
+   size_t found = 0, i = 0;
+   if constexpr (U == 2) {
+      const __m512i step2 = _mm512_set1_epi32(32);
+      for (; i + 32 <= n; i += 32) {
+         // both compares issue before either store
+         const __mmask16 m0 = cmp_contig_full<T, Op>(param1, i, c);
+         const __mmask16 m1 = cmp_contig_full<T, Op>(param1, i + 16, c);
+         found += emit_as<E>(result + found, m0, ids);
+         found += emit_as<E>(result + found, m1, _mm512_add_epi32(ids, step));
+         ids = _mm512_add_epi32(ids, step2);
+      }
+   }
+   for (; i + 16 <= n; i += 16) {
+      found += emit_as<E>(result + found, cmp_contig_full<T, Op>(param1, i, c),
+                          ids);
+      ids = _mm512_add_epi32(ids, step);
+   }
+   if (i < n) {
+      const __mmask16 k = tail_mask(n - i);
+      found += emit_as<E>(result + found, cmp_contig<T, Op>(param1, i, k, c),
+                          ids);
+   }
+   return found;
+}
+
+/// Compare 16 elements of two columns starting at i, unmasked (hot loop).
+template <typename T, template <typename> class Op>
+inline __mmask16 cmp_colcol_full(const T* a, const T* b, size_t i) {
+   constexpr int IMM = CmpImm<Op>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      return _mm512_cmp_epi32_mask(_mm512_loadu_si512(a + i),
+                                   _mm512_loadu_si512(b + i), IMM);
+   } else {
+      const __mmask8 mlo = _mm512_cmp_epi64_mask(
+          _mm512_loadu_si512(a + i), _mm512_loadu_si512(b + i), IMM);
+      const __mmask8 mhi = _mm512_cmp_epi64_mask(
+          _mm512_loadu_si512(a + i + 8), _mm512_loadu_si512(b + i + 8), IMM);
+      return (__mmask16)(mlo | ((unsigned)mhi << 8));
+   }
+}
+
+/// Same for the last r < 16 elements (masked loads and compares).
+template <typename T, template <typename> class Op>
+inline __mmask16 cmp_colcol_tail(const T* a, const T* b, size_t i,
+                                 __mmask16 k) {
+   __m512i alo, ahi, blo, bhi;
+   if constexpr (Width<T>::bits == 32) {
+      alo = _mm512_maskz_loadu_epi32(k, a + i);
+      blo = _mm512_maskz_loadu_epi32(k, b + i);
+      ahi = bhi = alo;
+   } else {
+      alo = _mm512_maskz_loadu_epi64((__mmask8)k, a + i);
+      ahi = _mm512_maskz_loadu_epi64((__mmask8)(k >> 8), a + i + 8);
+      blo = _mm512_maskz_loadu_epi64((__mmask8)k, b + i);
+      bhi = _mm512_maskz_loadu_epi64((__mmask8)(k >> 8), b + i + 8);
+   }
+   return cmp_regs<T, Op>(k, alo, ahi, blo, bhi);
+}
+
+/// result = positions i with Op(param1[i], param2[i]); E, U as above.
+template <typename T, template <typename> class Op, Emit E, unsigned U>
+pos_t sel_col_col_v(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   static_assert(U == 1 || U == 2, "unroll must be 1 or 2");
+   const __m512i step = _mm512_set1_epi32(16);
+   __m512i ids = lane_ids();
+   size_t found = 0, i = 0;
+   if constexpr (U == 2) {
+      const __m512i step2 = _mm512_set1_epi32(32);
+      for (; i + 32 <= n; i += 32) {
+         const __mmask16 m0 = cmp_colcol_full<T, Op>(param1, param2, i);
+         const __mmask16 m1 = cmp_colcol_full<T, Op>(param1, param2, i + 16);
+         found += emit_as<E>(result + found, m0, ids);
+         found += emit_as<E>(result + found, m1, _mm512_add_epi32(ids, step));
+         ids = _mm512_add_epi32(ids, step2);
+      }
+   }
+   for (; i + 16 <= n; i += 16) {
+      found += emit_as<E>(result + found,
+                          cmp_colcol_full<T, Op>(param1, param2, i), ids);
+      ids = _mm512_add_epi32(ids, step);
+   }
+   if (i < n) {
+      const __mmask16 k = tail_mask(n - i);
+      found += emit_as<E>(result + found,
+                          cmp_colcol_tail<T, Op>(param1, param2, i, k), ids);
+   }
+   return found;
+}
+
+//--- 256-bit (ymm) contiguous kernels (VW_SIMD_SEL_WIDTH=256) ----------------
+// Same algorithm on ymm registers with AVX512VL: 8 lanes per compare and
+// compress. 512-bit instructions drop the core clock on Skylake/Cascade Lake
+// for a while after they run (AVX-512 license levels), which slows the scalar
+// rest of a query; 256-bit integer code mostly avoids that. Each loop
+// iteration still covers 16 elements (2 x 8).
+#ifdef VW_HAVE_SIMD_SEL_256
+
+/// Compress the lanes of `ids` selected by `m` (8 lanes) and store them.
+template <Emit E>
+inline size_t emit8(pos_t* RES out, __mmask8 m, __m256i ids) {
+   const unsigned cnt = __builtin_popcount((unsigned)m);
+#ifndef VW_POS_16
+   if constexpr (E == Emit::Mem) {
+      _mm256_mask_compressstoreu_epi32(out, m, ids);
+      return cnt;
+   }
+#endif
+   const __m256i packed = _mm256_maskz_compress_epi32(m, ids);
+   const __mmask8 st = (__mmask8)((1u << cnt) - 1);
+#ifdef VW_POS_16
+   _mm256_mask_cvtepi32_storeu_epi16(out, st, packed);
+#else
+   _mm256_mask_storeu_epi32(out, st, packed);
+#endif
+   return cnt;
+}
+
+template <typename T> inline __m256i broadcast256(const T& v) {
+   if constexpr (Width<T>::bits == 32)
+      return _mm256_set1_epi32(raw(v));
+   else
+      return _mm256_set1_epi64x(raw(v));
+}
+
+/// 8 elements a[i..i+8) (k = valid lanes) as two 4-lane (64-bit) or one
+/// 8-lane (32-bit) ymm, compared with b via cmp.
+template <typename T, template <typename> class Op>
+inline __mmask8 cmp8_val(const T* a, size_t i, __mmask8 k, __m256i c) {
+   constexpr int IMM = CmpImm<Op>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      const __m256i v = _mm256_maskz_loadu_epi32(k, a + i);
+      return _mm256_mask_cmp_epi32_mask(k, v, c, IMM);
+   } else {
+      const __mmask8 klo = k & 0xF, khi = k >> 4;
+      const __m256i lo = _mm256_maskz_loadu_epi64(klo, a + i);
+      const __m256i hi = _mm256_maskz_loadu_epi64(khi, a + i + 4);
+      const __mmask8 mlo = _mm256_mask_cmp_epi64_mask(klo, lo, c, IMM);
+      const __mmask8 mhi = _mm256_mask_cmp_epi64_mask(khi, hi, c, IMM);
+      return (__mmask8)(mlo | (mhi << 4));
+   }
+}
+
+template <typename T, template <typename> class Op>
+inline __mmask8 cmp8_col(const T* a, const T* b, size_t i, __mmask8 k) {
+   constexpr int IMM = CmpImm<Op>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      const __m256i va = _mm256_maskz_loadu_epi32(k, a + i);
+      const __m256i vb = _mm256_maskz_loadu_epi32(k, b + i);
+      return _mm256_mask_cmp_epi32_mask(k, va, vb, IMM);
+   } else {
+      const __mmask8 klo = k & 0xF, khi = k >> 4;
+      const __mmask8 mlo = _mm256_mask_cmp_epi64_mask(
+          klo, _mm256_maskz_loadu_epi64(klo, a + i),
+          _mm256_maskz_loadu_epi64(klo, b + i), IMM);
+      const __mmask8 mhi = _mm256_mask_cmp_epi64_mask(
+          khi, _mm256_maskz_loadu_epi64(khi, a + i + 4),
+          _mm256_maskz_loadu_epi64(khi, b + i + 4), IMM);
+      return (__mmask8)(mlo | (mhi << 4));
+   }
+}
+
+/// result = positions i with Op(param1[i], *param2), ymm only.
+template <typename T, template <typename> class Op, Emit E>
+pos_t sel_col_val_256(pos_t n, pos_t* RES result, T* RES param1,
+                      T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   const __m256i c = broadcast256(*param2);
+   const __m256i step8 = _mm256_set1_epi32(8), step16 = _mm256_set1_epi32(16);
+   __m256i ids = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16) {
+      const __mmask8 m0 = cmp8_val<T, Op>(param1, i, 0xFF, c);
+      const __mmask8 m1 = cmp8_val<T, Op>(param1, i + 8, 0xFF, c);
+      found += emit8<E>(result + found, m0, ids);
+      found += emit8<E>(result + found, m1, _mm256_add_epi32(ids, step8));
+      ids = _mm256_add_epi32(ids, step16);
+   }
+   for (; i < n; i += 8) {
+      const size_t r = (n - i < 8) ? n - i : 8;
+      const __mmask8 k = (__mmask8)((1u << r) - 1);
+      found += emit8<E>(result + found, cmp8_val<T, Op>(param1, i, k, c), ids);
+      ids = _mm256_add_epi32(ids, step8);
+   }
+   return found;
+}
+
+/// result = positions i with Op(param1[i], param2[i]), ymm only.
+template <typename T, template <typename> class Op, Emit E>
+pos_t sel_col_col_256(pos_t n, pos_t* RES result, T* RES param1,
+                      T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   const __m256i step8 = _mm256_set1_epi32(8), step16 = _mm256_set1_epi32(16);
+   __m256i ids = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16) {
+      const __mmask8 m0 = cmp8_col<T, Op>(param1, param2, i, 0xFF);
+      const __mmask8 m1 = cmp8_col<T, Op>(param1, param2, i + 8, 0xFF);
+      found += emit8<E>(result + found, m0, ids);
+      found += emit8<E>(result + found, m1, _mm256_add_epi32(ids, step8));
+      ids = _mm256_add_epi32(ids, step16);
+   }
+   for (; i < n; i += 8) {
+      const size_t r = (n - i < 8) ? n - i : 8;
+      const __mmask8 k = (__mmask8)((1u << r) - 1);
+      found += emit8<E>(result + found, cmp8_col<T, Op>(param1, param2, i, k),
+                        ids);
+      ids = _mm256_add_epi32(ids, step8);
+   }
+   return found;
+}
+#endif // VW_HAVE_SIMD_SEL_256
+
+/// The variants selected by VW_SIMD_SEL_WIDTH / VW_SIMD_SEL_COMPRESS /
+/// VW_SIMD_SEL_UNROLL; these are what the redirected primitive names point
+/// to. VW_SIMD_SEL_WIDTH=256 without AVX512VL falls back to 512-bit.
+template <typename T, template <typename> class Op>
+pos_t sel_col_val(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+#if defined(VW_SIMD_SEL_WIDTH_256) && defined(VW_HAVE_SIMD_SEL_256)
+   return sel_col_val_256<T, Op, kEmit>(n, result, param1, param2);
+#else
+   return sel_col_val_v<T, Op, kEmit, kUnroll>(n, result, param1, param2);
+#endif
+}
+template <typename T, template <typename> class Op>
+pos_t sel_col_col(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
+#if defined(VW_SIMD_SEL_WIDTH_256) && defined(VW_HAVE_SIMD_SEL_256)
+   return sel_col_col_256<T, Op, kEmit>(n, result, param1, param2);
+#else
+   return sel_col_col_v<T, Op, kEmit, kUnroll>(n, result, param1, param2);
+#endif
+}
+
+//--- gather -> compressed ----------------------------------------------------
+//
+// Two SIMD implementations of the gathered input, chosen with the CMake
+// option VW_SIMD_SEL_GATHER (scalar | scalarload | hwgather):
+//   *_scalarload: 16 scalar loads through inSel build a 16-bit match mask,
+//       followed by one register compress of the inSel lanes. Avoids vpgather*,
+//       which is slow under the Gather Data Sampling (GDS / Downfall)
+//       microcode mitigation on Skylake..Ice Lake parts.
+//   *_hwgather: vpgatherdd / vpgatherdq, for CPUs without that penalty.
+// With the default (scalar) the selsel primitive names keep the scalar _bf
+// templates: on dubliner (Cascade Lake, GDS mitigated) scalarload only ties
+// gcc's _bf and loses ~15% to clang's; hwgather loses 1.2-3.5x.
+// selsel_col_val / selsel_col_col below pick hwgather when requested, else
+// scalarload (tests and run_selbench call both variants directly).
+
+// Keep the per-group scalar loop scalar: vectorizing it would turn it back
+// into a hardware gather.
+#if defined(__clang__)
+#define VW_SEL_SCALAR_LOOP _Pragma("clang loop vectorize(disable) unroll(full)")
+#define VW_SEL_SCALAR_TAIL _Pragma("clang loop vectorize(disable)")
+#elif defined(__GNUC__) && __GNUC__ >= 14
+#define VW_SEL_SCALAR_LOOP _Pragma("GCC unroll 16") _Pragma("GCC novector")
+#define VW_SEL_SCALAR_TAIL _Pragma("GCC novector")
+#else
+#define VW_SEL_SCALAR_LOOP _Pragma("GCC unroll 16")
+#define VW_SEL_SCALAR_TAIL
+#endif
+
+// The loop pragmas only stop the loop vectorizer; clang's SLP vectorizer
+// still fuses the 16 unrolled loads into a vpgather, or the OR reduction of
+// the lane bits into vpinsrd chains. An empty asm that takes a value in a
+// register hides the dependency tree from it; it emits no instructions. It is
+// applied to each lane bit and to the running mask (two accumulators, so the
+// serial OR chain stays 8 steps long).
+#if defined(__GNUC__) || defined(__clang__)
+#define VW_SEL_OPAQUE(x) asm("" : "+r"(x))
+// the asm makes clang's inliner treat the mask helpers as expensive
+#define VW_SEL_INLINE inline __attribute__((always_inline))
+#else
+#define VW_SEL_OPAQUE(x) (void)0
+#define VW_SEL_INLINE inline
+#endif
+
+/// Match mask of Op(a[sel[j]], b(sel[j])) for j < 16 (full group).
+template <typename T, template <typename> class Op, typename B>
+VW_SEL_INLINE __mmask16 mask16_scalar(const pos_t* sel, const T* a, B b) {
+   unsigned m0 = 0, m1 = 0;
+   VW_SEL_SCALAR_LOOP
+   for (unsigned j = 0; j < 16; j += 2) {
+      const pos_t i0 = sel[j], i1 = sel[j + 1];
+      unsigned b0 = Op<T>()(a[i0], b(i0));
+      unsigned b1 = Op<T>()(a[i1], b(i1));
+      VW_SEL_OPAQUE(b0);
+      VW_SEL_OPAQUE(b1);
+      m0 |= b0 << j;
+      m1 |= b1 << (j + 1);
+      VW_SEL_OPAQUE(m0);
+      VW_SEL_OPAQUE(m1);
+   }
+   return (__mmask16)(m0 | m1);
+}
+
+/// Same for the last r < 16 entries.
+template <typename T, template <typename> class Op, typename B>
+VW_SEL_INLINE __mmask16 mask_tail_scalar(const pos_t* sel, size_t r, const T* a,
+                                  B b) {
+   unsigned m = 0;
+   VW_SEL_SCALAR_TAIL
+   for (unsigned j = 0; j < r; ++j) {
+      const pos_t idx = sel[j];
+      unsigned bit = Op<T>()(a[idx], b(idx));
+      VW_SEL_OPAQUE(bit);
+      m |= bit << j;
+      VW_SEL_OPAQUE(m);
+   }
+   return (__mmask16)m;
+}
+
+/// result = entries idx of inSel with Op(param1[idx], *param2)
+template <typename T, template <typename> class Op>
+pos_t selsel_col_val_scalarload(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                                T* RES param1, T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   const T con = *param2;
+   auto b = [con](pos_t) { return con; };
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16)
+      found += emit(result + found, mask16_scalar<T, Op>(inSel + i, param1, b),
+                    load_idx(inSel + i, 16));
+   if (i < n) {
+      const size_t r = n - i;
+      found += emit(result + found,
+                    mask_tail_scalar<T, Op>(inSel + i, r, param1, b),
+                    load_idx(inSel + i, r));
+   }
+   return found;
+}
+
+/// result = entries idx of inSel with Op(param1[idx], param2[idx])
+template <typename T, template <typename> class Op>
+pos_t selsel_col_col_scalarload(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                                T* RES param1, T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   const T* p2 = param2;
+   auto b = [p2](pos_t idx) { return p2[idx]; };
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16)
+      found += emit(result + found, mask16_scalar<T, Op>(inSel + i, param1, b),
+                    load_idx(inSel + i, 16));
+   if (i < n) {
+      const size_t r = n - i;
+      found += emit(result + found,
+                    mask_tail_scalar<T, Op>(inSel + i, r, param1, b),
+                    load_idx(inSel + i, r));
+   }
+   return found;
+}
+
+/// result = entries idx of inSel with Op(param1[idx], *param2), vpgather
+template <typename T, template <typename> class Op>
+pos_t selsel_col_val_hwgather(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                              T* RES param1, T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   const __m512i c = broadcast(*param2);
+   size_t found = 0;
+   for (size_t i = 0; i < n; i += 16) {
+      const size_t r = (n - i < 16) ? n - i : 16;
+      const __mmask16 k = tail_mask(r);
+      const __m512i idx = load_idx(inSel + i, r);
+      __m512i lo, hi = c;
+      gather(param1, idx, k, lo, hi);
+      found += emit(result + found, cmp_regs<T, Op>(k, lo, hi, c, c), idx);
+   }
+   return found;
+}
+
+/// result = entries idx of inSel with Op(param1[idx], param2[idx]), vpgather
+template <typename T, template <typename> class Op>
+pos_t selsel_col_col_hwgather(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                              T* RES param1, T* RES param2) {
+   static_assert(kernel_ok<T, Op>, "unsupported type/comparator");
+   size_t found = 0;
+   for (size_t i = 0; i < n; i += 16) {
+      const size_t r = (n - i < 16) ? n - i : 16;
+      const __mmask16 k = tail_mask(r);
+      const __m512i idx = load_idx(inSel + i, r);
+      __m512i alo, ahi, blo, bhi;
+      ahi = bhi = _mm512_setzero_si512();
+      gather(param1, idx, k, alo, ahi);
+      gather(param2, idx, k, blo, bhi);
+      found += emit(result + found, cmp_regs<T, Op>(k, alo, ahi, blo, bhi), idx);
+   }
+   return found;
+}
+
+/// Compile-time choice between the two gathered-input implementations.
+template <typename T, template <typename> class Op>
+pos_t selsel_col_val(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                     T* RES param1, T* RES param2) {
+#ifdef VW_SIMD_SEL_GATHER_HWGATHER
+   return selsel_col_val_hwgather<T, Op>(n, inSel, result, param1, param2);
+#else
+   return selsel_col_val_scalarload<T, Op>(n, inSel, result, param1, param2);
+#endif
+}
+
+template <typename T, template <typename> class Op>
+pos_t selsel_col_col(pos_t n, pos_t* RES inSel, pos_t* RES result,
+                     T* RES param1, T* RES param2) {
+#ifdef VW_SIMD_SEL_GATHER_HWGATHER
+   return selsel_col_col_hwgather<T, Op>(n, inSel, result, param1, param2);
+#else
+   return selsel_col_col_scalarload<T, Op>(n, inSel, result, param1, param2);
+#endif
+}
+
+//--- Char<N> == constant -----------------------------------------------------
+#ifdef VW_HAVE_SIMD_SEL_CHAR
+
+template <typename T> struct CharLen { static constexpr unsigned N = 0; };
+template <unsigned L> struct CharLen<types::Char<L>> {
+   static constexpr unsigned N = L;
+};
+
+/// Char<1> is a specialization without a length byte; it stays scalar.
+template <typename T, template <typename> class Op>
+constexpr bool char_kernel_ok =
+    std::is_same<Op<T>, std::equal_to<T>>::value && CharLen<T>::N > 1 &&
+    CharLen<T>::N + 1 <= 64;
+
+/// result = positions i with param1[i] == *param2, for Char<N> laid out as
+/// {uint8_t len; char value[N]} (stride N+1). One masked byte load per
+/// element, compared against {con.len, con.value[0..con.len)} under a mask of
+/// 1+con.len bytes; this is exactly `len == len && memcmp(len) == 0`, so the
+/// padding bytes beyond len never matter.
+template <unsigned N>
+pos_t sel_char_eq_col_val(pos_t n, pos_t* RES result,
+                          types::Char<N>* RES param1,
+                          types::Char<N>* RES param2) {
+   using C = types::Char<N>;
+   static_assert(N > 1 && N + 1 <= 64, "Char<N> must fit in one zmm");
+   static_assert(sizeof(C) == N + 1, "Char<N> must be {uint8 len; char[N]}");
+   static_assert(offsetof(C, value) == 1, "Char<N> length byte must be first");
+   constexpr __mmask64 load = (N + 1 == 64) ? ~0ull : ((1ull << (N + 1)) - 1);
+
+   const C& con = *param2;
+   const unsigned clen = con.len; // <= N
+   alignas(64) uint8_t pat[64] = {0};
+   pat[0] = (uint8_t)clen;
+   std::memcpy(pat + 1, con.value, clen);
+   const __m512i p = _mm512_load_si512(pat);
+   const __mmask64 cmpm =
+       (clen + 1 >= 64) ? ~0ull : ((1ull << (clen + 1)) - 1);
+
+   const char* base = reinterpret_cast<const char*>(param1);
+   const __m512i step = _mm512_set1_epi32(16);
+   __m512i ids = lane_ids();
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16) {
+      unsigned m = 0;
+      for (unsigned j = 0; j < 16; ++j) {
+         const __m512i v =
+             _mm512_maskz_loadu_epi8(load, base + (i + j) * (N + 1));
+         m |= (unsigned)(_mm512_mask_cmpneq_epi8_mask(cmpm, v, p) == 0) << j;
+      }
+      found += emit(result + found, (__mmask16)m, ids);
+      ids = _mm512_add_epi32(ids, step);
+   }
+   if (i < n) {
+      unsigned m = 0;
+      for (unsigned j = 0; i + j < n; ++j) {
+         const __m512i v =
+             _mm512_maskz_loadu_epi8(load, base + (i + j) * (N + 1));
+         m |= (unsigned)(_mm512_mask_cmpneq_epi8_mask(cmpm, v, p) == 0) << j;
+      }
+      found += emit(result + found, (__mmask16)m, ids);
+   }
+   return found;
+}
+#endif // VW_HAVE_SIMD_SEL_CHAR
+
+#endif // VW_HAVE_SIMD_SEL
+
+//--- pickers used by Selection.cpp -------------------------------------------
+// Each returns the SIMD kernel when its CMake option is on, the ISA is
+// available and the (type, comparator) is supported; otherwise `scalar`.
+// The return type is the scalar pointer type, which the SIMD kernels share.
+
+template <typename T, template <typename> class Op> constexpr bool use_simd() {
+#if defined(VW_SIMD_SEL) && defined(VW_HAVE_SIMD_SEL)
+   return kernel_ok<T, Op>;
+#else
+   return false;
+#endif
+}
+
+/// Gathered input (selsel_*) additionally needs VW_SIMD_SEL_GATHER != scalar.
+template <typename T, template <typename> class Op>
+constexpr bool use_simd_gather() {
+#if defined(VW_SIMD_SEL_GATHER_SCALARLOAD) || defined(VW_SIMD_SEL_GATHER_HWGATHER)
+   return use_simd<T, Op>();
+#else
+   return false;
+#endif
+}
+
+template <typename T, template <typename> class Op> constexpr bool use_char() {
+#if defined(VW_SIMD_SEL_CHAR) && defined(VW_HAVE_SIMD_SEL_CHAR)
+   return char_kernel_ok<T, Op>;
+#else
+   return false;
+#endif
+}
+
+template <typename T, template <typename> class Op, typename Fn>
+constexpr Fn pick_sel_col_val(Fn scalar) {
+#if defined(VW_HAVE_SIMD_SEL)
+   if constexpr (use_simd<T, Op>()) return &sel_col_val<T, Op>;
+#endif
+#if defined(VW_HAVE_SIMD_SEL_CHAR)
+   if constexpr (use_char<T, Op>())
+      return &sel_char_eq_col_val<CharLen<T>::N>;
+#endif
+   return scalar;
+}
+
+template <typename T, template <typename> class Op, typename Fn>
+constexpr Fn pick_sel_col_col(Fn scalar) {
+#if defined(VW_HAVE_SIMD_SEL)
+   if constexpr (use_simd<T, Op>()) return &sel_col_col<T, Op>;
+#endif
+   return scalar;
+}
+
+template <typename T, template <typename> class Op, typename Fn>
+constexpr Fn pick_selsel_col_val(Fn scalar) {
+#if defined(VW_HAVE_SIMD_SEL)
+   if constexpr (use_simd_gather<T, Op>()) return &selsel_col_val<T, Op>;
+#endif
+   return scalar;
+}
+
+template <typename T, template <typename> class Op, typename Fn>
+constexpr Fn pick_selsel_col_col(Fn scalar) {
+#if defined(VW_HAVE_SIMD_SEL)
+   if constexpr (use_simd_gather<T, Op>()) return &selsel_col_col<T, Op>;
+#endif
+   return scalar;
+}
+
+} // namespace simd
+} // namespace primitives
+} // namespace vectorwise
