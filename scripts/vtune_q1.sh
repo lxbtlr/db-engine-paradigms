@@ -26,6 +26,7 @@
 #                         the top-down (TMA) tree
 #   ua.functions.csv      uarch-exploration per function (TMA columns)
 #   ua.hwevents.csv       raw event counts per function
+#   ua.lines.csv / ua.addrs.csv  raw event counts per source line / instruction
 #   mem.summary.txt/.csv  memory-access summary (DRAM bandwidth), MEM_THREADS runs
 #   meta.env              build, query, engine, threads, reps, SF, tuples, defines, ...
 #   r_ua/ r_mem/          VTune result directories (open them in the GUI)
@@ -56,7 +57,10 @@
 #   TUPLES      lineitem rows; known for SF 1, 10, 30, 100
 #   QUERIES     1                 TPC-H queries to profile (run_tpch -q), e.g. "1 3 5 6 9 18";
 #                                 every one is normalised per lineitem row (TUPLES)
-#   THREADS     "1 all"           all = the physical cores of CPU's NUMA node
+#   DD_W        ""                run_tpch -w: Q1 with the data-dependency chain of
+#                                 this width (one W; needs QUERIES=1); labels get _w<W>
+#   DD_SHAPE    chained           run_tpch -k: chained | independent (label _w<W>i)
+#   THREADS    "1 all"           all = the physical cores of CPU's NUMA node
 #   CPU         0                 the 1-thread run's CPU; its node is "the socket"
 #   MIN_SECONDS 20                VTune reps are chosen so the measured window
 #                                 lasts at least this long (Cascade Lake
@@ -102,6 +106,8 @@ TARGET_ARCH=${TARGET_ARCH:-$DEF_ARCH}
 SF=${SF:-10}
 TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf$SF}
 QUERIES=${QUERIES:-1}
+DD_W=${DD_W:-}
+DD_SHAPE=${DD_SHAPE:-chained}
 THREADS=${THREADS:-"1 all"}
 CPU=${CPU:-0}
 MIN_SECONDS=${MIN_SECONDS:-20}
@@ -141,6 +147,16 @@ die() { log "$*"; exit 2; }
 [ -n "$TUPLES" ] || die "set TUPLES (lineitem rows) for SF=$SF"
 case "$TUPLES" in *[!0-9]*) die "TUPLES must be a number" ;; esac
 [ -d "/sys/devices/system/cpu/cpu$CPU" ] || die "CPU $CPU does not exist"
+# the dd chain: run_tpch -w/-k, and its result row is q1dd, not q1
+DD_ARGS=(); DD_SUFFIX=; QROW=
+if [ -n "$DD_W" ]; then
+  case "$DD_W" in *[!0-9]*) die "DD_W must be one width (1..64)" ;; esac
+  [ "$DD_W" -ge 1 ] && [ "$DD_W" -le 64 ] || die "DD_W must be 1..64"
+  [ "$QUERIES" = 1 ] || die "DD_W needs QUERIES=1"
+  case "$DD_SHAPE" in chained) DD_SUFFIX=_w$DD_W ;; independent) DD_SUFFIX=_w${DD_W}i ;;
+    *) die "DD_SHAPE must be chained or independent" ;; esac
+  DD_ARGS=(-w "$DD_W" -k "$DD_SHAPE"); QROW="dd"
+fi
 command -v numactl > /dev/null || die "numactl is required (pinning and memory binding)"
 if [ "$BUILD_ONLY" != 1 ]; then
   command -v "$VTUNE" > /dev/null || die "VTune not found (set VTUNE=, or source <oneapi>/vtune/latest/env/vars.sh)"
@@ -178,6 +194,7 @@ NCORES=$(tr ',' '\n' <<< "$NODE_CORES" | grep -c .)
   echo "COMPILER: $COMPILER $COMPILER_VERSION  TARGET_ARCH: $TARGET_ARCH  SF: $SF ($TPCH_PATH, $TUPLES lineitem rows)  VECTOR_SIZE: $VECTOR_SIZE"
   echo "CONFIGS: $CONFIGS"
   echo "THREADS: $THREADS  ANALYSES: $ANALYSES  MEM_THREADS: $MEM_THREADS  MIN_SECONDS: $MIN_SECONDS"
+  [ -n "$DD_W" ] && echo "DD_W: $DD_W  DD_SHAPE: $DD_SHAPE"
 } | tee "$OUT/machine.txt"
 p=$(cat /proc/sys/kernel/perf_event_paranoid 2> /dev/null || echo 0)
 [ "$p" -gt 0 ] && log "WARNING: perf_event_paranoid=$p; VTune's uncore (DRAM bandwidth) events need <= 0 or the sampling driver"
@@ -329,7 +346,7 @@ fi
 q0=${QUERIES%% *}
 # shellcheck disable=SC2046
 EXTERNALPROFILE=1 $(pin_for 1) "$BUILDS_DIR/${BUILDS[0]}/run_tpch" -p "$TPCH_PATH/" -e v -q "$q0" -t 1 \
-  -v "$VECTOR_SIZE" -s "$SETTLE" -r "$TIMING_REPS" > /dev/null 2>&1 || log "WARNING: warm-up run failed"
+  -v "$VECTOR_SIZE" -s "$SETTLE" -r "$TIMING_REPS" "${DD_ARGS[@]}" > /dev/null 2>&1 || log "WARNING: warm-up run failed"
 
 idx=0
 for b in "${BUILDS[@]}"; do
@@ -342,8 +359,8 @@ for b in "${BUILDS[@]}"; do
       T=$(nthreads "$t")
       [ "$T" -gt 1 ] && ! placement_ok "$b" "$T" && continue
       PIN=$(pin_for "$T")
-      label=${b}_q${q}_e${e}_t$T; D=$OUT/$label; mkdir -p "$D"
-      run=(-p "$TPCH_PATH/" -e "$e" -q "$q" -t "$T" -v "$VECTOR_SIZE" -s "$SETTLE")
+      label=${b}_q${q}_e${e}_t$T$DD_SUFFIX; D=$OUT/$label; mkdir -p "$D"
+      run=(-p "$TPCH_PATH/" -e "$e" -q "$q" -t "$T" -v "$VECTOR_SIZE" -s "$SETTLE" "${DD_ARGS[@]}")
       log "===== $label ($PIN)"
       # untraced timing; EXTERNALPROFILE: run_tpch opens no counters of its own,
       # so the timing runs with the PMU as idle as the VTune runs leave it
@@ -351,14 +368,15 @@ for b in "${BUILDS[@]}"; do
       if ! EXTERNALPROFILE=1 $PIN "$bin" "${run[@]}" -r "$TIMING_REPS" > "$D/timing.csv" 2> "$D/timing.err"; then
         fail "$label timing (see $D/timing.err)"; excerpt "$D/timing.err" 5; continue
       fi
-      ms=$(median_of "$D/timing.csv" "$q")
-      [ -n "$ms" ] || { fail "$label: no q$q row in timing.csv"; continue; }
+      ms=$(median_of "$D/timing.csv" "$q$QROW")
+      [ -n "$ms" ] || { fail "$label: no q$q$QROW row in timing.csv"; continue; }
       reps=$(awk -v ms="$ms" -v s="$MIN_SECONDS" 'BEGIN { r = int(s * 1000 / ms) + 1; if (r < 3) r = 3; if (r > 5000) r = 5000; print r }')
       log "$label: median $ms ms; VTune reps $reps (>= ${MIN_SECONDS}s measured)"
       {
         echo "label=$label"; echo "build=$b"; echo "query=$q"; echo "engine=$e"; echo "threads=$T"; echo "threads_req=$t"
         echo "ladder_index=$idx"; echo "configs=$CONFIGS"; echo "reps=$reps"; echo "timing_reps=$TIMING_REPS"
         echo "timing_median_ms=$ms"; echo "sf=$SF"; echo "tuples=$TUPLES"; echo "vector_size=$VECTOR_SIZE"
+        echo "dd_w=$DD_W"; echo "dd_shape=${DD_W:+$DD_SHAPE}"
         echo "machine=$MACHINE"; echo "host=$(hostname -s)"; echo "node=$NODE"; echo "pin=$PIN"
         echo "cpu_model=$(lscpu | sed -n 's/^Model name: *//p' | head -1)"
         echo "commit=$(git -C "$ROOT" rev-parse --short HEAD)"
@@ -387,6 +405,11 @@ for b in "${BUILDS[@]}"; do
             > "$D/ua.functions.csv" 2>> "$D/$a.report.err"
           "$VTUNE" -report hw-events -result-dir "$R" -group-by function -format csv -csv-delimiter comma \
             > "$D/ua.hwevents.csv" 2>> "$D/$a.report.err"
+          # where inside a function (builds have -g); best effort, errors go to the .err
+          for by in source-line:lines address:addrs; do
+            "$VTUNE" -report hw-events -result-dir "$R" -group-by "${by%%:*}" -format csv -csv-delimiter comma \
+              > "$D/ua.${by##*:}.csv" 2>> "$D/$a.report.err" || log "$label: no hw-events by ${by%%:*}"
+          done
         fi
         [ -s "$D/$a.summary.txt" ] || { fail "$label $coll: empty summary (see $D/$a.report.err)"; continue; }
         [ "$VTUNE_KEEP" = 1 ] || rm -rf "$R"
