@@ -174,6 +174,13 @@ inline size_t activeRegions(size_t nrThreads) {
    return n;
 }
 
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+/// Validate at startup that the compile-time topology constants match the
+/// hardware (libnuma node of every CPU; L3 sets for sub-socket regions).
+/// Aborts on a mismatch.
+void assertTopology();
+#endif
+
 class Worker;
 class WorkerGroup;
 
@@ -275,7 +282,22 @@ inline void WorkerGroup::run(std::function<void()> f) {
    this_worker->barrier = barriers.back();
    currentBarrier = 0;
    this_worker->worker_id = size - 1;
+#if (defined(NUMA_ALLOC) || defined(NUMA_SHARD)) && !defined(__APPLE__)
+   // NUMA builds: the calling thread runs worker size-1, so it reads that
+   // worker's region; pin it there like the spawned workers, and restore
+   // its previous affinity afterwards
+   cpu_set_t callerPrev, callerCpuset;
+   bool callerPinned = pthread_getaffinity_np(pthread_self(), sizeof(cpu_set_t),
+                                              &callerPrev) == 0;
+   CPU_ZERO(&callerCpuset);
+   CPU_SET(cpuOfThread(size - 1), &callerCpuset);
+   pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &callerCpuset);
+#endif
    f();
+#if (defined(NUMA_ALLOC) || defined(NUMA_SHARD)) && !defined(__APPLE__)
+   if (callerPinned)
+      pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &callerPrev);
+#endif
    this_worker->group = prevGroup;
    currentBarrier = prevBarrier;
    this_worker->barrier = prevBarrierPtr;
