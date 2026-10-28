@@ -67,8 +67,98 @@ Scan::Scan(Shared& s, size_t n, size_t v)
    size_t scanMorselSize = CFG_MORSEL_SIZE;
    if (vecSize < scanMorselSize) scanChunkSize = scanMorselSize / vecSize + 1;
    vecInChunk = scanChunkSize;
+#ifdef NUMA_SHARD
+   // Steal order from this worker's identity
+#ifdef NUMA_DEBUG
+   fprintf(stderr, "[SCAN_CTOR] this_worker=%p worker_id=%zu nrTuples=%zu vecSize=%zu\n",
+           (void*)runtime::this_worker,
+           runtime::this_worker ? runtime::this_worker->worker_id : 999999,
+           n, v);
+#endif
+   homeNode = runtime::regionOf(runtime::this_worker->worker_id);
+#ifdef NUMA_DEBUG
+   fprintf(stderr, "[SCAN_CTOR] homeNode=%zu\n", homeNode);
+#endif
+   constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+
+   // Intra-region rank: how many workers with lower worker_id map to the
+   // same region; staggers where each worker starts stealing
+   size_t rank = runtime::rankInRegion(runtime::this_worker->worker_id);
+
+   // ring[k] = (home + 1 + ((rank + k) % (N-1))) % N
+   stealOrder[0] = homeNode;
+   if constexpr (N > 1) {
+      for (size_t k = 0; k < N - 1; ++k)
+         stealOrder[k + 1] = (homeNode + 1 + ((rank + k) % (N - 1))) % N;
+   }
+   currentStealIdx = 0;
+#endif
 }
 
+#ifdef NUMA_SHARD
+void Scan::addConsumer(void** colPtr, size_t typeSize,
+                       std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases) {
+   Consumer c;
+   c.location = colPtr;
+   c.vecBytes = vecSize * typeSize;
+   c.elemSize = typeSize;
+   c.shardBases = shardBases;
+   consumers.push_back(c);
+}
+
+size_t Scan::next() {
+   constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+   size_t morselTuples = scanChunkSize * vecSize;
+
+   // Try to continue within current chunk (intra-chunk relative advance)
+   if (vecInChunk < scanChunkSize && currentStealIdx < N) {
+      size_t node = stealOrder[currentStealIdx];
+      size_t nodeTuples = shared.ranges[node].tupleEnd -
+                          shared.ranges[node].tupleBegin;
+      size_t nextLocalOffset = currentChunk * morselTuples + vecInChunk * vecSize;
+      if (nextLocalOffset < nodeTuples) {
+         auto nextBatchSize = std::min(nodeTuples - nextLocalOffset, vecSize);
+         for (auto& cons : consumers)
+            *cons.location =
+                (void*)(*(uint8_t**)cons.location + cons.vecBytes);
+         lastOffset = nextLocalOffset;
+         vecInChunk++;
+         return nextBatchSize;
+      }
+      // Chunk extends past shard end — fall through to get a new chunk
+      vecInChunk = scanChunkSize;
+   }
+
+   // Need a new chunk — try nodes in steal order
+   for (; currentStealIdx < N; ++currentStealIdx) {
+      size_t node = stealOrder[currentStealIdx];
+      size_t nodeTuples = shared.ranges[node].tupleEnd -
+                          shared.ranges[node].tupleBegin;
+      if (nodeTuples == 0) continue;
+
+      while (true) {
+         size_t chunk =
+             shared.nodePos[node].pos.fetch_add(1, std::memory_order_relaxed);
+         size_t localOffset = chunk * morselTuples;
+         if (localOffset >= nodeTuples) break;
+
+         currentChunk = chunk;
+         vecInChunk = 1;
+
+         size_t nextBatchSize =
+             std::min(nodeTuples - localOffset, vecSize);
+
+         for (auto& cons : consumers)
+            *cons.location = static_cast<char*>(cons.shardBases[node]) +
+                             localOffset * cons.elemSize;
+         lastOffset = localOffset;
+         return nextBatchSize;
+      }
+   }
+
+   return EndOfStream;
+}
+#else
 void Scan::addConsumer(void** colPtr, size_t typeSize) {
    consumers.emplace_back(colPtr, vecSize * typeSize);
 }
@@ -99,6 +189,7 @@ size_t Scan::next() {
    vecInChunk++;
    return nextBatchSize;
 }
+#endif // NUMA_SHARD
 
 ResultWriter::Input::Input(void* d, size_t size,
                            runtime::BlockRelation::Attribute attr)

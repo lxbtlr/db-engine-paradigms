@@ -8,6 +8,7 @@
 #include "common/runtime/PartitionedDeque.hpp"
 #include "common/runtime/Query.hpp"
 #include "vectorwise/Primitives.hpp"
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <deque>
@@ -140,10 +141,28 @@ template <typename PAYLOAD> class DebugOperator : public UnaryOperator {
 
 class Scan : public Operator {
  public:
+#ifdef NUMA_SHARD
+   /// NUMA_SHARD: each region's shard has its own morsel counter; a worker
+   /// takes morsels from its home region first, then steals from the others
+   struct Shared : public SharedState {
+      struct PaddedAtomic {
+         std::atomic<size_t> pos{0};
+         char pad_[64 - sizeof(std::atomic<size_t>)];
+      };
+      static_assert(sizeof(PaddedAtomic) == 64, "PaddedAtomic must be 64 bytes");
+      std::array<PaddedAtomic, runtime::NUM_NUMA_REGIONS> nodePos;
+      struct NodeRange {
+         size_t tupleBegin = 0;
+         size_t tupleEnd = 0;
+      };
+      std::array<NodeRange, runtime::NUM_NUMA_REGIONS> ranges;
+   };
+#else
    struct Shared : public SharedState {
       std::atomic<size_t> pos;
       Shared() : pos(0){};
    };
+#endif
 
  private:
    size_t scanChunkSize;
@@ -155,13 +174,33 @@ class Scan : public Operator {
    size_t nrTuples;
    size_t vecSize;
 
+#ifdef NUMA_SHARD
+   struct Consumer {
+      void** location;
+      size_t vecBytes;     // vecSize * typeSize
+      size_t elemSize;     // typeSize
+      std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases;
+   };
+   std::vector<Consumer> consumers;
+
+   // Per-worker steal order and state
+   size_t homeNode;
+   std::array<size_t, runtime::NUM_NUMA_REGIONS> stealOrder;
+   size_t currentStealIdx;  // index into stealOrder for current node
+#else
    std::vector<std::pair<void**, size_t>> consumers;
+#endif
 
  public:
    Scan(Shared& sm, size_t nrTuples, size_t vecSize);
+#ifdef NUMA_SHARD
+   void addConsumer(void** colPtr, size_t typeSize,
+                    std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases);
+#else
    /// Add consumer to scan operator, typeSize is size of
    /// type pointed to by colPtr
    void addConsumer(void** colPtr, size_t typeSize);
+#endif
    virtual size_t next() override;
 };
 

@@ -2,6 +2,9 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+#include "common/runtime/Concurrency.hpp"
+#endif
 
 using namespace std;
 
@@ -67,6 +70,29 @@ QueryBuilder::ScanBuilder QueryBuilder::Scan(std::string relation) {
    auto& rel = db[relation];
    auto nr = nextOpNr();
    auto& s = operatorState.get<Scan::Shared>(nr);
+#ifdef NUMA_SHARD
+#ifdef NUMA_DEBUG
+   fprintf(stderr, "[SCAN] relation=%s nr=%zu nrTuples=%zu this_worker=%p worker_id=%zu\n",
+           relation.c_str(), nr, rel.nrTuples,
+           (void*)runtime::this_worker,
+           runtime::this_worker ? runtime::this_worker->worker_id : 999999);
+   fprintf(stderr, "[SCAN] got Shared at %p hasNumaShards=%d\n",
+           (void*)&s, (int)rel.hasNumaShards);
+#endif
+   if (rel.hasNumaShards) {
+      for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
+         s.ranges[r].tupleBegin = rel.numaShards[r].tupleBegin;
+         s.ranges[r].tupleEnd = rel.numaShards[r].tupleEnd;
+      }
+   } else {
+      s.ranges[0].tupleBegin = 0;
+      s.ranges[0].tupleEnd = rel.nrTuples;
+      for (size_t r = 1; r < runtime::NUM_NUMA_REGIONS; ++r) {
+         s.ranges[r].tupleBegin = 0;
+         s.ranges[r].tupleEnd = 0;
+      }
+   }
+#endif
    auto scan = make_unique<class Scan>(s, rel.nrTuples, vecs.getVecSize());
    auto* res = scan.get();
    pushOperator(move(scan));
@@ -139,7 +165,47 @@ QueryBuilder::DS QueryBuilder::Column(ScanBuilder& scan,
    r.buf = DataStorage::BufferSpec::Column;
    auto& attr = scan.rel[attribute];
    r.dataSize = attr.type->rt_size();
+#ifdef NUMA_SHARD
+   {
+      void* base = attr.data();
+      if (scan.rel.hasNumaShards) {
+         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n) {
+            auto it = scan.rel.numaShards[n].columns.find(attribute);
+            r.shardBases[n] = (it != scan.rel.numaShards[n].columns.end())
+                                  ? it->second
+                                  : base; // inactive region — fallback to global
+         }
+         size_t home = runtime::regionOf(runtime::this_worker->worker_id);
+         r.data = r.shardBases[home];
+      } else {
+         // Non-sharded relation: all shardBases point to the single column
+         for (size_t n = 0; n < runtime::NUM_NUMA_REGIONS; ++n)
+            r.shardBases[n] = base;
+         r.data = base;
+      }
+#ifdef NUMA_DEBUG
+      fprintf(stderr, "worker %zu col %s shardBases=[",
+              runtime::this_worker->worker_id, attribute.c_str());
+      for (size_t i = 0; i < runtime::NUM_NUMA_REGIONS; ++i)
+         fprintf(stderr, "%s%p", i ? "," : "", r.shardBases[i]);
+      fprintf(stderr, "] data=%p\n", r.data);
+#endif
+   }
+#elif defined(NUMA_ALLOC)
+   if (scan.rel.hasNumaReplicas) {
+      size_t region = runtime::regionOf(runtime::this_worker->worker_id);
+      r.data = scan.rel.numaReplicas[region].columns.at(attribute);
+#ifdef NUMA_DEBUG
+      fprintf(stderr, "worker %zu region %zu col %s data=%p numa_replica=%p\n",
+              runtime::this_worker->worker_id, region,
+              attribute.c_str(), attr.data(), r.data);
+#endif
+   } else {
+      r.data = attr.data();
+   }
+#else
    r.data = attr.data();
+#endif
    r.scan = &scan.scan;
    r.attribute = attribute;
    r.rel = &scan.rel;
@@ -168,7 +234,11 @@ void QueryBuilder::DataStorage::registerDS(void** location) {
       assert(location);
       assert(scan);
       assert(dataSize);
+#ifdef NUMA_SHARD
+      scan->addConsumer(location, dataSize, shardBases);
+#else
       scan->addConsumer(location, dataSize);
+#endif
    }
 }
 

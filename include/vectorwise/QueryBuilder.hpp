@@ -37,6 +37,10 @@ class QueryBuilder {
       std::string attribute;
       /// Column: the relation it belongs to (declared keys, uniqueBuild)
       const runtime::Relation* rel = nullptr;
+#ifdef NUMA_SHARD
+      /// Column: the column's base in each region's shard
+      std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases = {};
+#endif
       void registerDS(void** location);
       void registerDS(pos_t** location);
       operator void*() const;
