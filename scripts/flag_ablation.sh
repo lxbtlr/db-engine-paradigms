@@ -144,7 +144,9 @@
 #   SIMDhash SIMDjoin SIMDsel SIMDproj  0|1, unset = built-in default:
 #              run-time SIMD primitive switches read by run_tpch and test_all
 #   VW_FLAGS   ""        extra CMake options on every config, "VW_X=ON VW_Y=8":
-#                        VW_* (and HUGE_2MB_MALLOC_HUGE, THREAD_PIN_PACKED)
+#                        VW_* (and HUGE_2MB_MALLOC_HUGE, THREAD_PIN_PACKED,
+#                        NUMA_SHARD, NUMA_ALLOC, NUMA_DEBUG, NUM_REGIONS,
+#                        CPU_LAYOUT_CONTIGUOUS)
 #                        only; configs are
 #                        named _x<hash>, vw_flags.txt maps the hash back
 #   CPU        (above)   also part of the name when not 0 (_cpu<N>)
@@ -289,7 +291,7 @@ VW_FLAGS=${VW_FLAGS:-}
 VW_FLAGS_D= VW_FLAGS_HASH=
 if [ -n "$VW_FLAGS" ]; then
   for kv in $VW_FLAGS; do
-    [[ $kv =~ ^(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE|THREAD_PIN_PACKED)=[A-Za-z0-9_.]+$ ]] ||
+    [[ $kv =~ ^(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE|THREAD_PIN_PACKED|NUMA_SHARD|NUMA_ALLOC|NUMA_DEBUG|NUM_REGIONS|CPU_LAYOUT_CONTIGUOUS)=[A-Za-z0-9_.]+$ ]] ||
       { echo "VW_FLAGS: $kv is not OPTION=VALUE with a VW_ option" >&2; exit 2; }
   done
   [ -n "$(tr ' ' '\n' <<< "$VW_FLAGS" | grep . | cut -d= -f1 | sort | uniq -d)" ] &&
@@ -614,7 +616,7 @@ for comp in $COMPILERS; do
       done
     fi
     # the effective defines, to confirm each config is what it claims
-    cat "$B/build.ninja" "$B/CMakeFiles/vectorwise.dir/flags.make" 2>/dev/null | grep -o -E -- '-D(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE)(=[^ ]*)?' | sort -u | tr '\n' ' ' > "$D/defines.txt"
+    cat "$B/build.ninja" "$B/CMakeFiles/vectorwise.dir/flags.make" 2>/dev/null | grep -o -E -- '-D(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE|THREAD_PIN_PACKED|NUMA_[A-Z]+|CFG_NUM_REGIONS|CPU_LAYOUT_CONTIGUOUS)(=[^ ]*)?' | sort -u | tr '\n' ' ' > "$D/defines.txt"
     log "$tag defines: $(cat "$D/defines.txt")"
     register_build "$tag" "$D" "$B" "$cfg$AV_SUFFIX" "${cmake_args[@]}"
     if [ -z "$TEST_FILTER" ]; then log "$tag: $BENCH_NAME tests skipped (TESTS=none)"

@@ -20,6 +20,9 @@
 #include "tbb/tbb.h"
 #include <tbb/global_control.h>
 #include <tbb/task_arena.h>
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+#include "common/runtime/NumaAlloc.hpp"
+#endif
 
 // NOTE: this was helpful for debuging, but breaks if we dont use the thread arg, disable for now
 // lets force this thing to use one thread
@@ -162,6 +165,53 @@ int main(int argc, char* argv[]) {
     }
     importTPCH(tpchPath, tpch);
 
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+    runtime::assertTopology();
+#endif
+
+#ifdef NUMA_ALLOC
+    runtime::numaReplicateRelation(tpch["lineitem"]);
+    fprintf(stderr, "NUMA replication: lineitem replicated to %zu regions\n",
+            runtime::NUM_NUMA_REGIONS);
+#ifdef NUMA_DEBUG
+    fprintf(stderr, "--- NUMA placement verification ---\n");
+    runtime::verifyNumaPlacement(tpch["lineitem"]);
+    fprintf(stderr, "--- end verification ---\n");
+#endif
+#endif
+
+#ifdef NUMA_SHARD
+    {
+       // Shard only across the regions the largest thread count uses
+       size_t maxThreads = *std::max_element(threadCounts.begin(), threadCounts.end());
+       size_t nActive = runtime::activeRegions(maxThreads);
+       const char* shardTables[] = {"lineitem", "orders", "customer",
+                                    "supplier", "part", "partsupp",
+                                    "nation", "region"};
+       for (auto& name : shardTables) {
+          if (!tpch.hasRelation(name)) continue;
+          runtime::numaShardRelation(tpch[name], nActive);
+          fprintf(stderr, "NUMA sharding: %s sharded across %zu of %zu regions\n",
+                  name, nActive, runtime::NUM_NUMA_REGIONS);
+          for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
+             auto& s = tpch[name].numaShards[r];
+             if (s.tupleEnd > s.tupleBegin)
+                fprintf(stderr, "  shard %zu: tuples [%zu, %zu)\n",
+                        r, s.tupleBegin, s.tupleEnd);
+          }
+       }
+#ifdef NUMA_DEBUG
+       fprintf(stderr, "--- NUMA placement verification ---\n");
+       for (auto& name : shardTables) {
+          if (!tpch.hasRelation(name)) continue;
+          fprintf(stderr, "  verifying %s...\n", name);
+          runtime::verifyNumaPlacement(tpch[name]);
+       }
+       fprintf(stderr, "--- end verification ---\n");
+#endif
+    }
+#endif
+
     // Settle: let THP compaction / khugepaged finish before measurement
     if (settleSeconds > 0) {
         fprintf(stderr, "Settling for %d seconds...\n", settleSeconds);
@@ -222,9 +272,24 @@ int main(int argc, char* argv[]) {
             if (i > 0) tcStr += ",";
             tcStr += std::to_string(threadCounts[i]);
         }
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+#ifdef NUMA_SHARD
+        const char* numaMode = "NUMA_SHARD";
+#else
+        const char* numaMode = "NUMA_ALLOC";
+#endif
+        fprintf(stderr, "Config: %s | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds"
+#ifdef NUMA_DEBUG
+                " | NUMA_DEBUG"
+#endif
+                "\n",
+                numaMode, selectedEngine.c_str(), selectedQuery.c_str(),
+                tcStr.c_str(), vectorSize, settleSeconds);
+#else
         fprintf(stderr, "Config: baseline | Engine: %s | Query: %s | Threads: %s | VectorSize: %zu | Settle: %ds\n",
                 selectedEngine.c_str(), selectedQuery.c_str(),
                 tcStr.c_str(), vectorSize, settleSeconds);
+#endif
     }
 
     if (auto v = std::getenv("SIMDhash")) conf.useSimdHash = atoi(v);

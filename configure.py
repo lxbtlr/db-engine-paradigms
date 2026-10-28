@@ -55,6 +55,9 @@ BOOL_OPTIONS = [
     ("VW_Q9_FIELD_ORDER",     "TPC-H Q9: ps_supplycost before n_name in partsupp join",    False),
     ("VW_CRC32_FAST",         "Bit-identical CRC32Hash speedups (needs VW_USE_CRC32)",     False),
     ("VW_CRC32_VPCLMUL",      "CRC32Hash with VPCLMULQDQ, 8 keys/zmm (needs VW_USE_CRC32)", False),
+    ("NUMA_SHARD",            "Shard base tables across NUMA regions (first touch)",      False),
+    ("NUMA_ALLOC",            "Replicate lineitem per NUMA region",                       False),
+    ("NUMA_DEBUG",            "NUMA debug logging and placement verification",            False),
 ]
 
 # VW_SIMD_SEL gathered-input (selsel) kernels
@@ -119,7 +122,16 @@ PRESETS = {
 # ── Validation ────────────────────────────────────────────────────────────
 
 def validate_options(opts):
-    return []
+    errors = []
+    if opts.get("NUMA_ALLOC") and opts.get("NUMA_SHARD"):
+        errors.append("NUMA_ALLOC and NUMA_SHARD are mutually exclusive")
+    regions = str(opts.get("NUM_REGIONS", "0"))
+    if regions not in ("", "0"):
+        if not regions.isdigit():
+            errors.append(f"NUM_REGIONS={regions} is not a number")
+        elif int(regions) > int(opts["SOCKETS_COUNT"]) and not opts.get("CPU_LAYOUT_CONTIGUOUS"):
+            errors.append("NUM_REGIONS > SOCKETS_COUNT needs CPU_LAYOUT_CONTIGUOUS")
+    return errors
 
 # ── Interactive configuration ─────────────────────────────────────────────
 
@@ -147,6 +159,7 @@ def configure():
     opts["CORES_PER_SOCKET"] = "22"
     opts["SMT_PER_CORE"] = "2"
     opts["CPU_LAYOUT_CONTIGUOUS"] = False
+    opts["NUM_REGIONS"] = "0"
     opts["BUILD_TYPE"] = "Release"
     opts["DATADIR"] = ""
     opts["BUILD_DIR"] = "build"
@@ -190,6 +203,12 @@ def configure():
                 "Hardware threads per core (SMT):", default=opts["SMT_PER_CORE"]).ask()
             opts["CPU_LAYOUT_CONTIGUOUS"] = questionary.confirm(
                 "Contiguous CPU numbering per node? (vs interleaved)", default=False).ask()
+        opts["NUM_REGIONS"] = questionary.text(
+            "NUMA_SHARD/NUMA_ALLOC regions (0 = one per socket; more splits sockets into CCDs):",
+            default=opts["NUM_REGIONS"]).ask()
+        if opts["NUM_REGIONS"] and opts["NUM_REGIONS"] != "0" and \
+                int(opts["NUM_REGIONS"]) > int(opts["SOCKETS_COUNT"]):
+            opts["CPU_LAYOUT_CONTIGUOUS"] = True
 
         # Target architecture (default from machine preset, overridable)
         opts["TARGET_ARCH"] = questionary.select(
@@ -322,6 +341,10 @@ def build_cmake_args(opts):
         args.append(f"-DSMT_PER_CORE={opts['SMT_PER_CORE']}")
         val = "ON" if opts.get("CPU_LAYOUT_CONTIGUOUS", False) else "OFF"
         args.append(f"-DCPU_LAYOUT_CONTIGUOUS={val}")
+    if opts.get("NUM_REGIONS") and opts["NUM_REGIONS"] != "0":
+        args.append(f"-DNUM_REGIONS={opts['NUM_REGIONS']}")
+        if opts["TARGET_MACHINE"] != "custom" and opts.get("CPU_LAYOUT_CONTIGUOUS"):
+            args.append("-DCPU_LAYOUT_CONTIGUOUS=ON")
     if opts["DATADIR"]:
         args.append(f"-DDATADIR={opts['DATADIR']}")
     for name, _, _ in BOOL_OPTIONS:
