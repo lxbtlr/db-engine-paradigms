@@ -26,6 +26,10 @@ class QueryBuilder {
    /// selection buffers that may list a row more than once (outputs of joins
    /// whose build side is not unique); other selections list rows once
    std::unordered_set<void*> repeatingSelections;
+   /// Scratch() buffer ids, and the scratch buffers whose last write a fused
+   /// compound pair kept in a register (nothing may read them until rewritten)
+   std::unordered_set<size_t> scratchBuffers;
+   std::unordered_set<void*> elidedScratch;
 
    struct DataStorage
    /// handle for data sources, e.g. base table columns or cache buffers
@@ -37,6 +41,8 @@ class QueryBuilder {
       std::string attribute;
       /// Column: the relation it belongs to (declared keys, uniqueBuild)
       const runtime::Relation* rel = nullptr;
+      /// Buffer from Scratch(): only the next op of the same expression reads it
+      bool scratch = false;
       void registerDS(void** location);
       void registerDS(pos_t** location);
       operator void*() const;
@@ -198,6 +204,13 @@ class QueryBuilder {
       void holdOrFuse(const HeldProjection& next);
       bool fuse(const HeldProjection& first, const HeldProjection& second);
       void flushHeld();
+      /// QueryBuilder::elidedScratch (null: an ExpressionBuilder made
+      /// elsewhere, no Scratch() checks)
+      std::unordered_set<void*>* elided = nullptr;
+      /// an op reads / writes d: refuse a read of a scratch buffer whose last
+      /// write was kept in a register; a write makes it readable again
+      void readDS(const DS& d) const;
+      void writeDS(const DS& d);
 #endif
    };
 
@@ -235,6 +248,12 @@ class QueryBuilder {
 
    DS Buffer(size_t nr, size_t entrySize);
    DS Buffer(size_t nr);
+   /// a buffer whose every write is read only by the op right after it in the
+   /// same Expression; with VW_PROJ_COMPOUND a fused pair then keeps it in a
+   /// register instead of storing it. Always referenced through Scratch()
+   /// (Buffer(nr) refuses it); plan building throws if an op reads it after
+   /// a fused pair skipped its store
+   DS Scratch(size_t nr, size_t entrySize);
    DS Column(ScanBuilder& scan, std::string attribute);
    DS Value(void*);
 

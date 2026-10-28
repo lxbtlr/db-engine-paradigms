@@ -5,9 +5,12 @@
 //    mid[i] = op1(a, b);   out[i] = op2(mid[i], c)  (or op2(c, mid[i]))
 // where a, b and c are each a dense column (Col), a column read through the
 // expression's selection vector (Sel) or a constant (Val). The selection is
-// loaded once per row; mid is still written, so the buffers hold what the
-// two separate primitives would have written. ExpressionBuilder finds the
-// chains at build time (QueryBuilder.cpp); one template body, instantiated
+// loaded once per row. mid is written, so the buffers hold what the two
+// separate primitives would have written, unless it is a Scratch buffer
+// (QueryBuilder::Scratch: read by nothing but the second op): then the
+// kernel keeps it in a register and stores only out (StoreMid = false).
+// ExpressionBuilder finds the chains at build time (QueryBuilder.cpp); one
+// template body, instantiated
 // for the canonical forms in Compound.cpp.
 #include <cstdint>
 #include <functional>
@@ -36,7 +39,8 @@ using Fn = pos_t (*)(pos_t n, const pos_t* sel, int64_t* mid, int64_t* out,
 /// the kernel for a canonical chain: a <= b (in Form order) if op1 is
 /// commutative, !cLeft if op2 is commutative, not both a and b Val;
 /// nullptr otherwise
-Fn kernel(Arith op1, Form a, Form b, Arith op2, Form c, bool cLeft);
+Fn kernel(Arith op1, Form a, Form b, Arith op2, Form c, bool cLeft,
+          bool storeMid);
 
 template <Arith> struct ArithOp;
 template <> struct ArithOp<Plus> { using T = std::plus<int64_t>; };
@@ -50,7 +54,8 @@ inline int64_t at(const int64_t* RES p, int64_t v, pos_t i, pos_t s) {
    else return v;
 }
 
-template <Arith Op1, Form A, Form B, Arith Op2, Form C, bool CLeft>
+template <Arith Op1, Form A, Form B, Arith Op2, Form C, bool CLeft,
+          bool StoreMid>
 pos_t compoundKernel(pos_t n, const pos_t* RES sel, int64_t* RES mid,
                      int64_t* RES out, const int64_t* RES a,
                      const int64_t* RES b, const int64_t* RES c) {
@@ -64,7 +69,7 @@ pos_t compoundKernel(pos_t n, const pos_t* RES sel, int64_t* RES mid,
       if constexpr (anySel) s = sel[i];
       const int64_t m = op1(at<A>(a, va, i, s), at<B>(b, vb, i, s));
       const int64_t x = at<C>(c, vc, i, s);
-      mid[i] = m;
+      if constexpr (StoreMid) mid[i] = m;
       out[i] = CLeft ? op2(x, m) : op2(m, x);
    }
    return n;

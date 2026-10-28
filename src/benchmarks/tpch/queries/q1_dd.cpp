@@ -224,30 +224,33 @@ std::unique_ptr<runtime::Query> q1_dd_hyper(runtime::Database& db,
 // result column so the harness escape keeps it live.
 // ---------------------------------------------------------------------------
 /// One stderr line per process: how many of the dd projection's ops run as
-/// compound primitives (VW_PROJ_COMPOUND), next to base Q1's own expressions.
+/// compound primitives (VW_PROJ_COMPOUND) and how many of those keep their
+/// Scratch intermediate in a register, next to base Q1's own expressions.
 static void reportDdCoverage(const vectorwise::Project& proj, int W,
                              dd::Shape shape) {
    static std::once_flag once;
    std::call_once(once, [&] {
       constexpr size_t baseExprs = 2; // base Q1's two projections come first
-      size_t ops[2] = {0, 0}, compound[2] = {0, 0};
+      size_t ops[2] = {0, 0}, compound[2] = {0, 0}, elided[2] = {0, 0};
       for (size_t e = 0; e < proj.expressions.size(); ++e) {
          const size_t part = e < baseExprs ? 0 : 1;
          for (auto& op : proj.expressions[e]->ops) {
             ++ops[part];
 #ifdef VW_PROJ_COMPOUND
-            if (dynamic_cast<const vectorwise::CompoundOp*>(op.get()))
+            if (auto* c = dynamic_cast<const vectorwise::CompoundOp*>(op.get())) {
                ++compound[part];
+               elided[part] += !c->storeMid;
+            }
 #else
             (void)op;
 #endif
          }
       }
       fprintf(stderr,
-              "[dd] W=%d shape=%s dd ops=%zu compound=%zu | base Q1 ops=%zu "
-              "compound=%zu\n",
+              "[dd] W=%d shape=%s dd ops=%zu compound=%zu mid-in-register=%zu | "
+              "base Q1 ops=%zu compound=%zu mid-in-register=%zu\n",
               W, shape == dd::Shape::Chained ? "chained" : "independent",
-              ops[1], compound[1], ops[0], compound[0]);
+              ops[1], compound[1], elided[1], ops[0], compound[0], elided[0]);
    });
 }
 
@@ -311,12 +314,12 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
          proj.addExpression(
              Expression()
                  .addOp(primitives::proj_sel_multiplies_int64_t_col_int64_t_val,
-                        Buffer(sel_date), Buffer(dd_scratch, sizeof(int64_t)),
+                        Buffer(sel_date), Scratch(dd_scratch, sizeof(int64_t)),
                         Column(lineitem, "l_extendedprice"), Value(&r->ddC[k]))
                  .addOp(primitives::proj_plus_int64_t_col_sel_int64_t_col,
                         Buffer(sel_date),
                         Buffer(dd_buf_base + k, sizeof(int64_t)),
-                        Buffer(dd_scratch, sizeof(int64_t)),
+                        Scratch(dd_scratch, sizeof(int64_t)),
                         Column(lineitem, "l_extendedprice")));
       }
    } else {
@@ -332,13 +335,13 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
          proj.addExpression(
              Expression()
                  .addOp(primitives::proj_multiplies_int64_t_col_int64_t_val,
-                        Buffer(dd_scratch, sizeof(int64_t)),
+                        Scratch(dd_scratch, sizeof(int64_t)),
                         Buffer(dd_buf_base + k - 1, sizeof(int64_t)),
                         Value(&r->ddC[k]))
                  .addOp(primitives::proj_plus_int64_t_col_sel_int64_t_col,
                         Buffer(sel_date),
                         Buffer(dd_buf_base + k, sizeof(int64_t)),
-                        Buffer(dd_scratch, sizeof(int64_t)),
+                        Scratch(dd_scratch, sizeof(int64_t)),
                         Column(lineitem, "l_extendedprice")));
       }
    }

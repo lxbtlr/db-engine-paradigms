@@ -107,18 +107,19 @@ TEST(Compound, KernelsMatchTwoSteps) {
          for (int b = 0; b < 3; ++b)
             for (int op2 = 0; op2 < 3; ++op2)
                for (int c = 0; c < 3; ++c)
-                  for (int cLeft = 0; cLeft < 2; ++cLeft) {
+                  for (int cLeft = 0; cLeft < 2; ++cLeft)
+                  for (int storeMid = 0; storeMid < 2; ++storeMid) {
                      const bool canonical =
                          !(a == Val && b == Val) &&
                          !(commutative(Arith(op1)) && a > b) &&
                          !(commutative(Arith(op2)) && cLeft);
                      Fn k = kernel(Arith(op1), Form(a), Form(b), Arith(op2),
-                                   Form(c), cLeft);
+                                   Form(c), cLeft, storeMid);
                      ASSERT_EQ(k != nullptr, canonical);
                      if (!k) continue;
                      const bool anySel = a == Sel || b == Sel || c == Sel;
                      const pos_t n = anySel ? pos_t(d.sel.size()) : kRows;
-                     std::vector<int64_t> mid(kRows), out(kRows);
+                     std::vector<int64_t> mid(kRows, -7), out(kRows);
                      k(n, d.sel.data(), mid.data(), out.data(),
                        arg(Form(a), d.x, d.vx), arg(Form(b), d.y, d.vy),
                        arg(Form(c), d.z, d.vz));
@@ -127,13 +128,13 @@ TEST(Compound, KernelsMatchTwoSteps) {
                             apply(Arith(op1), read(Form(a), d.x, d.vx, d.sel, i),
                                   read(Form(b), d.y, d.vy, d.sel, i));
                         const int64_t z = read(Form(c), d.z, d.vz, d.sel, i);
-                        ASSERT_EQ(mid[i], m);
+                        ASSERT_EQ(mid[i], storeMid ? m : -7); // -7: untouched
                         ASSERT_EQ(out[i], cLeft ? apply(Arith(op2), z, m)
                                                 : apply(Arith(op2), m, z));
                      }
                      ++checked;
                   }
-   EXPECT_EQ(checked, 216u);
+   EXPECT_EQ(checked, 432u);
 }
 
 namespace {
@@ -156,9 +157,15 @@ DS value(int64_t* p) {
    r.data = p;
    return r;
 }
-Exposed::ExpressionBuilder builder() {
+DS scratch(void* p) {
+   DS r = buffer(p);
+   r.scratch = true;
+   return r;
+}
+Exposed::ExpressionBuilder builder(std::unordered_set<void*>* elided = nullptr) {
    Exposed::ExpressionBuilder b;
    b.expression = std::make_unique<Expression>();
+   b.elided = elided;
    return b;
 }
 } // namespace
@@ -226,5 +233,48 @@ TEST(Compound, BuilderLeavesUnchainedAndAliasedOps) {
    e3->evaluate(kRows);
    for (pos_t i = 0; i < kRows; ++i)
       ASSERT_EQ(t3[i], (d.x[i] + one) * d.y[i] - d.z[i]);
+}
+
+TEST(Compound, ScratchMidStaysInRegister) {
+   Data d;
+   int64_t c = 3;
+   std::vector<int64_t> s(kRows, -7), out(kRows), late(kRows);
+   std::unordered_set<void*> elided;
+   // out = (x * c) + y[sel]: the Scratch product is never stored
+   auto b = builder(&elided);
+   b.addOp(proj_multiplies_int64_t_col_int64_t_val, scratch(s.data()),
+           buffer(d.x.data()), value(&c))
+       .addOp(proj_plus_int64_t_col_sel_int64_t_col, buffer(d.sel.data()),
+              buffer(out.data()), scratch(s.data()), buffer(d.y.data()));
+   std::unique_ptr<Expression> e = b;
+   ASSERT_EQ(e->ops.size(), 1u);
+   auto* op = dynamic_cast<CompoundOp*>(e->ops[0].get());
+   ASSERT_NE(op, nullptr);
+   EXPECT_FALSE(op->storeMid);
+   const pos_t n = pos_t(d.sel.size());
+   e->evaluate(n);
+   for (pos_t i = 0; i < n; ++i) {
+      ASSERT_EQ(out[i], d.x[i] * c + d.y[d.sel[i]]);
+      ASSERT_EQ(s[i], -7);
+   }
+   // a later read of the elided Scratch is refused at build time
+   auto b2 = builder(&elided);
+   EXPECT_THROW(b2.addOp(proj_plus_int64_t_col_int64_t_col, buffer(late.data()),
+                         scratch(s.data()), buffer(d.x.data()))
+                    .addOp(proj_plus_int64_t_col_int64_t_val, buffer(out.data()),
+                           buffer(d.y.data()), value(&c)),
+                std::runtime_error);
+   // once rewritten by an unfused op it is readable again
+   auto b3 = builder(&elided);
+   b3.addOp(proj_plus_int64_t_col_int64_t_val, scratch(s.data()),
+            buffer(d.x.data()), value(&c));
+   std::unique_ptr<Expression> e3 = b3;
+   auto b4 = builder(&elided);
+   EXPECT_NO_THROW(b4.addOp(proj_plus_int64_t_col_int64_t_col,
+                            buffer(late.data()), scratch(s.data()),
+                            buffer(d.y.data()))
+                       .addOp(proj_plus_int64_t_col_int64_t_val,
+                              buffer(out.data()), buffer(d.z.data()),
+                              value(&c)));
 }
 #endif

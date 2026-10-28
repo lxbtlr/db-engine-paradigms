@@ -113,6 +113,9 @@ QueryBuilder::ProjectionBuilder& QueryBuilder::ProjectionBuilder::addExpression(
 QueryBuilder::ExpressionBuilder QueryBuilder::Expression() {
    QueryBuilder::ExpressionBuilder b;
    b.expression = make_unique<class Expression>();
+#ifdef VW_PROJ_COMPOUND
+   b.elided = &elidedScratch;
+#endif
    return b;
 }
 
@@ -122,9 +125,25 @@ QueryBuilder::DS QueryBuilder::Buffer(size_t nr, size_t entrySize) {
    return Buffer(nr);
 }
 
+QueryBuilder::DS QueryBuilder::Scratch(size_t nr, size_t entrySize) {
+   if (buffers.find(nr) == buffers.end()) {
+      buffers.emplace(nr, make_pair(entrySize, vecs.get(entrySize)));
+      scratchBuffers.insert(nr);
+   } else if (!scratchBuffers.count(nr))
+      throw runtime_error("Buffer " + to_string(nr) + " is not a Scratch buffer");
+   scratchBuffers.erase(nr); // let Buffer(nr) build the handle
+   DS r = Buffer(nr);
+   scratchBuffers.insert(nr);
+   r.scratch = true;
+   return r;
+}
+
 QueryBuilder::DS QueryBuilder::Buffer(size_t nr) {
    if (buffers.find(nr) == buffers.end())
       throw runtime_error("Buffer " + to_string(nr) + " not found");
+   if (scratchBuffers.count(nr))
+      throw runtime_error("Buffer " + to_string(nr) +
+                          " is a Scratch buffer: use Scratch()");
    DS r;
    r.buf = DataStorage::BufferSpec::Buffer;
    auto& buf = buffers[nr];
@@ -185,6 +204,7 @@ QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F1 op, DS a) {
 #ifdef VW_PROJ_COMPOUND
    flushHeld();
+   readDS(a);
 #endif
    auto f1 = make_unique<F1_Op>(a, op);
    a.registerDS(&f1->input);
@@ -196,6 +216,8 @@ QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F2 op, DS a, DS b) {
 #ifdef VW_PROJ_COMPOUND
    flushHeld();
+   readDS(a);
+   readDS(b);
 #endif
    auto f2 = make_unique<F2_Op>(a, b, op);
    a.registerDS(&f2->input);
@@ -213,6 +235,9 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F3 op, DS a, DS b, DS c) {
       return *this;
    }
    flushHeld();
+   readDS(b);
+   readDS(c);
+   writeDS(a);
 #endif
    auto f3 = make_unique<F3_Op>(a, b, c, op);
    a.registerDS(&f3->outputSelectionV);
@@ -231,6 +256,10 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
       return *this;
    }
    flushHeld();
+   readDS(a);
+   readDS(c);
+   readDS(d);
+   writeDS(b);
 #endif
    auto f4 = make_unique<F4_Op>(a, b, c, d, op);
    a.registerDS(&f4->inputSelectionV);
@@ -259,9 +288,23 @@ operator std::unique_ptr<vectorwise::Aggregates>() {
 }
 
 #ifdef VW_PROJ_COMPOUND
+void QueryBuilder::ExpressionBuilder::readDS(const DS& d) const {
+   if (d.scratch && elided && elided->count(d.data))
+      throw runtime_error("a Scratch buffer is read after a compound pair kept "
+                          "its value in a register");
+}
+
+void QueryBuilder::ExpressionBuilder::writeDS(const DS& d) {
+   if (d.scratch && elided) elided->erase(d.data);
+}
+
 void QueryBuilder::ExpressionBuilder::flushHeld() {
    if (!held) return;
    auto& h = *held;
+   if (h.desc.selInput) readDS(h.sel);
+   readDS(h.p1);
+   readDS(h.p2);
+   writeDS(h.out);
    if (h.desc.selInput) {
       auto f4 = make_unique<F4_Op>(h.sel, h.out, h.p1, h.p2,
                                    (primitives::F4)h.prim);
@@ -328,12 +371,21 @@ bool QueryBuilder::ExpressionBuilder::fuse(const HeldProjection& first,
       std::swap(pa, pb);
    }
    if (commutative(second.desc.op)) cLeft = false;
-   auto k = kernel(first.desc.op, a, b, second.desc.op, cForm, cLeft);
+   // a Scratch mid is read by nothing but second: keep it in a register
+   const bool storeMid = !(mid.scratch && elided);
+   auto k = kernel(first.desc.op, a, b, second.desc.op, cForm, cLeft, storeMid);
    if (!k) return false;
+   if (first.desc.selInput || second.desc.selInput) readDS(sel);
+   readDS(pa);
+   readDS(pb);
+   readDS(c);
+   writeDS(second.out);
+   if (!storeMid) elided->insert(mid.data);
    auto op = make_unique<CompoundOp>();
    op->kernel = k;
    op->sel = sel.data;
    op->mid = mid.data;
+   op->storeMid = storeMid;
    op->out = second.out.data;
    op->a = pa.data;
    op->b = pb.data;

@@ -214,6 +214,7 @@ struct CompoundOp : public Op {
    void* a;
    void* b;
    void* c;
+   bool storeMid = true; // false: mid is a Scratch buffer, kept in a register
    primitives::compound::Fn kernel;
    virtual pos_t run(pos_t n) override;
 };

@@ -27,22 +27,24 @@ struct Entry {
        {(const void*)proj_sel_##op##_int64_t_col_int64_t_val,                  \
         {A, Sel, Val, true}},
 
-// kernel table: index ((((op1 * 3 + a) * 3 + b) * 3 + op2) * 3 + c) * 2 + cLeft;
-// only canonical chains are instantiated (216 of 486)
-constexpr size_t kChains = 3 * 3 * 3 * 3 * 3 * 2;
+// kernel table: index
+// (((((op1 * 3 + a) * 3 + b) * 3 + op2) * 3 + c) * 2 + cLeft) * 2 + storeMid;
+// only canonical chains are instantiated (432 of 972)
+constexpr size_t kChains = 3 * 3 * 3 * 3 * 3 * 2 * 2;
 constexpr Arith opAt(size_t i, size_t div) { return Arith(i / div % 3); }
 constexpr Form formAt(size_t i, size_t div) { return Form(i / div % 3); }
 constexpr bool canonical(size_t i) {
-   const Arith op1 = opAt(i, 162), op2 = opAt(i, 6);
-   const Form a = formAt(i, 54), b = formAt(i, 18);
-   const bool cLeft = i % 2;
+   const Arith op1 = opAt(i, 324), op2 = opAt(i, 12);
+   const Form a = formAt(i, 108), b = formAt(i, 36);
+   const bool cLeft = i / 2 % 2;
    return !(a == Val && b == Val) && !(op1 != Minus && a > b) &&
           !(op2 != Minus && cLeft);
 }
 template <size_t I> constexpr Fn entryFor() {
    if constexpr (canonical(I))
-      return &compoundKernel<opAt(I, 162), formAt(I, 54), formAt(I, 18),
-                             opAt(I, 6), formAt(I, 2), I % 2 == 1>;
+      return &compoundKernel<opAt(I, 324), formAt(I, 108), formAt(I, 36),
+                             opAt(I, 12), formAt(I, 4), I / 2 % 2 == 1,
+                             I % 2 == 1>;
    else
       return nullptr;
 }
@@ -73,8 +75,11 @@ bool describe(const void* primitive, Desc& d) {
 }
 #undef CP_FORMS
 
-Fn kernel(Arith op1, Form a, Form b, Arith op2, Form c, bool cLeft) {
-   return kernels[((((op1 * 3 + a) * 3 + b) * 3 + op2) * 3 + c) * 2 + cLeft];
+Fn kernel(Arith op1, Form a, Form b, Arith op2, Form c, bool cLeft,
+          bool storeMid) {
+   return kernels[(((((op1 * 3 + a) * 3 + b) * 3 + op2) * 3 + c) * 2 + cLeft) *
+                      2 +
+                  storeMid];
 }
 
 } // namespace compound
