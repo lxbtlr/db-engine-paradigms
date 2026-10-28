@@ -115,12 +115,12 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_dd_hyper_impl(
                 get<3>(group) += charge;
                 get<4>(group) += 1;
 
-                // Synthetic data-dependency work: W distinct scalar SSA locals
+                // Synthetic data-dependency work: the same W intermediates as
+                // the Tectorwise dd chain (DdKernel.hpp), kept in registers and
                 // reduced to a single value routed to the sink. The kernel
                 // shape (chained vs independent) is a compile-time template
                 // parameter.
-                localSink += Kernel::run(l_extendedprice[i].value,
-                                         l_discount[i].value);
+                localSink += Kernel::run(l_extendedprice[i].value);
              }
           }
           sink.fetch_add(localSink, std::memory_order_relaxed);
