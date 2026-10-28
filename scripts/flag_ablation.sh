@@ -501,6 +501,23 @@ config_flags() {
     safe_compound)       echo "$(config_flags safe_kinds) -DVW_PROJ_COMPOUND=ON" ;;
     safe_runheads)       echo "$(config_flags safe_compound) -DVW_GROUP_RUN_HEADS=ON" ;;
     beyond_bitmap)       echo "$(config_flags safe_runheads) -DVW_JOIN_SEMI_BITMAP=ON" ;;
+    # safe_gdisp split on the ladder base: safe_jdisp, then group dispatch's
+    # parts one at a time; gs_fused -> safe_gdisp is dispatch's own
+    # specialization (paths resolved per operator; it builds the same parts in)
+    gs_batch)            echo "$(config_flags safe_jdisp) -DVW_GROUP_BATCH_CREATE=ON" ;;
+    gs_global)           echo "$(config_flags gs_batch) -DVW_GROUP_GLOBAL_DIRECT=ON" ;;
+    gs_q18)              echo "$(config_flags gs_global) -DVW_GROUP_NO_CONCAT=ON -DVW_FUSE_HASH=ON -DVW_SPILL_WORD_COPY=ON" ;;
+    gs_fused)            echo "$(config_flags gs_q18) -DVW_AGGR_FUSED=ON" ;;
+    # second ladder order: run heads right after group dispatch, then kinds;
+    # compound after that has safe_runheads' defines
+    o2_runheads)         echo "$(config_flags safe_gdisp) -DVW_GROUP_RUN_HEADS=ON" ;;
+    o2_kinds)            echo "$(config_flags o2_runheads) -DVW_AGGR_FUSED_KINDS=ON" ;;
+    # jd_all_pc variants for one job with their base (dubliner's run-to-run
+    # drift rules out pairs across jobs): autovectorized, scalar selection,
+    # 512-bit selection (AVX-512 machines only)
+    jdpc_av)             echo "$(config_flags jd_all_pc) -DAUTOVECTORIZE=ON" ;;
+    jdpc_nosel)          echo "$(config_flags jd_all_pc) -DVW_SIMD_SEL=OFF" ;;
+    jdpc_sel512)         echo "$(config_flags jd_all_pc) -DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg" ;;
     #                         aggr aggr_sel pos16 crc32 huge2mb
     default)             flags OFF  OFF      OFF   OFF   OFF ;;
     add_group_aggr)      flags ON   OFF      OFF   OFF   OFF ;;
