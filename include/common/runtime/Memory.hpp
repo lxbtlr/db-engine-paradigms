@@ -5,6 +5,13 @@
 #include <sys/mman.h>
 #include <linux/mman.h>  // MAP_HUGE_2MB / MAP_HUGE_1GB (not pulled in by sys/mman.h)
 
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+#include <cerrno>
+#include <cstring>
+#include <numaif.h>
+#include <string>
+#endif
+
 namespace mem {
 inline void* malloc_huge(size_t size) {
 #if defined(HUGE_2MB_MALLOC_HUGE)
@@ -64,5 +71,33 @@ inline void populate_pages(void* p, size_t size) {
    (void)p; (void)size;
 #endif
 }
+
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+/// Allocate anonymous memory bound to a NUMA node (NUMA_SHARD / NUMA_ALLOC).
+/// Pages come from malloc_huge, so the hugepage options apply as for any
+/// other malloc_huge call; the mapping is bound to the node before any page
+/// is touched. With one socket there is nothing to bind.
+inline void* malloc_numa(size_t size, int node) {
+#ifndef CFG_SOCKETS_COUNT
+#define CFG_SOCKETS_COUNT 4
+#endif
+   void* p = malloc_huge(size);
+#if CFG_SOCKETS_COUNT == 1
+   (void)node;
+#else
+   unsigned long nodemask = 1UL << node;
+   int rc = mbind(p, malloc_huge_size(size), MPOL_BIND, &nodemask,
+                  sizeof(nodemask) * 8, MPOL_MF_STRICT);
+   if (rc != 0)
+      throw std::runtime_error("malloc_numa: mbind to node " +
+                               std::to_string(node) + " failed: " +
+                               std::string(std::strerror(errno)));
+#endif
+   return p;
+}
+
+/// The mmap size malloc_numa used, for munmap.
+inline size_t malloc_numa_size(size_t size) { return malloc_huge_size(size); }
+#endif // NUMA_ALLOC || NUMA_SHARD
 
 } // namespace mem

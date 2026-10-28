@@ -3,6 +3,7 @@
 #include "common/runtime/MemoryPool.hpp"
 #include "common/runtime/Mmap.hpp"
 #include "common/runtime/Util.hpp"
+#include <array>
 #include <deque>
 #include <exception>
 #include <memory>
@@ -59,6 +60,36 @@ struct Relation {
    std::vector<std::string> primaryKey;
    Attribute& operator[](std::string key);
    Attribute& insert(std::string name, std::unique_ptr<Type> t);
+
+#if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
+   // Use CFG_NUM_REGIONS from CMake; fallback matches Concurrency.hpp default
+#ifndef CFG_NUM_REGIONS
+#ifndef CFG_SOCKETS_COUNT
+#define CFG_SOCKETS_COUNT 4
+#endif
+#define CFG_NUM_REGIONS CFG_SOCKETS_COUNT
+#endif
+#endif
+
+#ifdef NUMA_ALLOC
+   struct NumaReplica {
+      std::unordered_map<std::string, void*> columns;
+      std::vector<std::pair<void*, size_t>> mmaps; // base, size for cleanup
+   };
+   std::array<NumaReplica, CFG_NUM_REGIONS> numaReplicas;
+   bool hasNumaReplicas = false;
+#endif
+
+#ifdef NUMA_SHARD
+   struct NumaShard {
+      std::unordered_map<std::string, void*> columns;
+      std::vector<std::pair<void*, size_t>> mmaps; // base, allocSize for cleanup
+      size_t tupleBegin = 0;
+      size_t tupleEnd = 0;
+   };
+   std::array<NumaShard, CFG_NUM_REGIONS> numaShards;
+   bool hasNumaShards = false;
+#endif
 };
 
 class BlockRelation {

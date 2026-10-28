@@ -51,6 +51,12 @@ OPTION(HARDWARE_BENCHMARKS OFF)
 OPTION(INTERPRET_SEPARATE OFF)
 OPTION(HASH_SIZE_32 OFF)
 OPTION(THREAD_PIN_PACKED "Pack threads per socket (vs spread round-robin)" OFF)
+OPTION(NUMA_ALLOC "Replicate base-table columns per NUMA region" OFF)
+OPTION(NUMA_SHARD "Shard base-table columns across NUMA regions" OFF)
+OPTION(NUMA_DEBUG "NUMA allocation debug logging and placement verification" OFF)
+IF(NUMA_ALLOC AND NUMA_SHARD)
+  message(FATAL_ERROR "NUMA_ALLOC and NUMA_SHARD are mutually exclusive. Pick one.")
+ENDIF()
 
 # ── Machine topology ─────────────────────────────────────────────────────
 # TARGET_MACHINE selects a preset for SOCKETS_COUNT, CORES_PER_SOCKET,
@@ -758,6 +764,20 @@ ELSE()
   ADD_DEFINITIONS(-DHASH_SIZE=64)
 ENDIF()
 
+IF(NUMA_ALLOC)
+  ADD_DEFINITIONS(-DNUMA_ALLOC)
+ENDIF()
+IF(NUMA_SHARD)
+  ADD_DEFINITIONS(-DNUMA_SHARD)
+ENDIF()
+IF(NUMA_DEBUG)
+  ADD_DEFINITIONS(-DNUMA_DEBUG)
+ENDIF()
+# libnuma (mbind, move_pages, numa_node_of_cpu) only for the NUMA builds
+IF(NUMA_ALLOC OR NUMA_SHARD)
+  set(NUMA_LIB numa)
+ENDIF()
+
 IF(THREAD_PIN_PACKED)
   ADD_DEFINITIONS(-DTHREAD_PIN_PACKED)
 ENDIF()
@@ -921,7 +941,7 @@ target_include_directories(common PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
-target_link_libraries(common)
+target_link_libraries(common ${NUMA_LIB})
 
 
 set(HYPER_TRANSLATORS
