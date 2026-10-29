@@ -194,7 +194,7 @@ JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloo
 GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
 # parity and safe ladders: not in the default CONFIGS, named here so
 # summaries recognise them (and their run-setting suffixes)
-SAFE_CONFIGS="par_crc32 par_semi par_having safe_fast safe_sel safe_jdisp safe_gdisp safe_kinds safe_compound"
+SAFE_CONFIGS="par_crc32 par_semi par_having safe_fast safe_sel safe_jdisp safe_gdisp safe_kinds safe_compound safe_compound_wl3"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 # config group: the TPC-valid join and group-by configs (see header)
 JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc join_all_valid grp_base grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
@@ -529,6 +529,9 @@ config_flags() {
     safe_gdisp)          echo "$(config_flags safe_jdisp) -DVW_GROUP_DISPATCH=ON" ;;
     safe_kinds)          echo "$(config_flags safe_gdisp) -DVW_AGGR_FUSED_KINDS=ON" ;;
     safe_compound)       echo "$(config_flags safe_kinds) -DVW_PROJ_COMPOUND=ON" ;;
+    # chains of up to 3 projections, kernels for the recorded workload only
+    # (src/vectorwise/primitives/compound_workload.txt)
+    safe_compound_wl3)   echo "$(config_flags safe_compound) -DVW_COMPOUND_DEPTH=3 -DVW_COMPOUND_SET=workload" ;;
     #                         aggr aggr_sel pos16 crc32 huge2mb
     default)             flags OFF  OFF      OFF   OFF   OFF ;;
     add_group_aggr)      flags ON   OFF      OFF   OFF   OFF ;;
