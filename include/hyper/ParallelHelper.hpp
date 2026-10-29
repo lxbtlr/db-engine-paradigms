@@ -89,6 +89,13 @@ template <typename T>
 std::array<const T*, runtime::NUM_NUMA_REGIONS>
 numaShardPtrs(const runtime::Relation& rel, const std::string& attr) {
    std::array<const T*, runtime::NUM_NUMA_REGIONS> ptrs;
+   if (!rel.hasNumaShards) {
+      // Unsharded relation (e.g. the tests' tables): region 0 holds it all.
+      ptrs.fill(nullptr);
+      ptrs[0] = const_cast<runtime::Attribute&>(rel.attributes.at(attr))
+                    .data<T>();
+      return ptrs;
+   }
    for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r) {
       auto it = rel.numaShards[r].columns.find(attr);
       ptrs[r] = (it != rel.numaShards[r].columns.end())
@@ -96,6 +103,21 @@ numaShardPtrs(const runtime::Relation& rel, const std::string& attr) {
                     : nullptr;
    }
    return ptrs;
+}
+
+/// Per-region tuple counts. An unsharded relation is one shard in region 0,
+/// matching the Vectorwise Scan fallback.
+inline std::array<size_t, runtime::NUM_NUMA_REGIONS>
+numaShardTuples(const runtime::Relation& rel) {
+   std::array<size_t, runtime::NUM_NUMA_REGIONS> t;
+   t.fill(0);
+   if (!rel.hasNumaShards) {
+      t[0] = rel.nrTuples;
+      return t;
+   }
+   for (size_t r = 0; r < runtime::NUM_NUMA_REGIONS; ++r)
+      t[r] = rel.numaShards[r].tupleEnd - rel.numaShards[r].tupleBegin;
+   return t;
 }
 
 /// Per-node morsel counter, cache-line padded to avoid false sharing.
@@ -113,9 +135,7 @@ void numa_parallel_scan(size_t nrThreads, const runtime::Relation& rel,
                         size_t morselSz, Body body) {
    constexpr size_t N = runtime::NUM_NUMA_REGIONS;
 
-   std::array<size_t, N> shardTuples;
-   for (size_t r = 0; r < N; ++r)
-      shardTuples[r] = rel.numaShards[r].tupleEnd - rel.numaShards[r].tupleBegin;
+   std::array<size_t, N> shardTuples = numaShardTuples(rel);
 
    std::array<PaddedAtomicPos, N> nodePos;
 
@@ -161,9 +181,7 @@ T numa_parallel_reduce(size_t nrThreads, const runtime::Relation& rel,
                        Combine combine) {
    constexpr size_t N = runtime::NUM_NUMA_REGIONS;
 
-   std::array<size_t, N> shardTuples;
-   for (size_t r = 0; r < N; ++r)
-      shardTuples[r] = rel.numaShards[r].tupleEnd - rel.numaShards[r].tupleBegin;
+   std::array<size_t, N> shardTuples = numaShardTuples(rel);
 
    std::array<PaddedAtomicPos, N> nodePos;
 
