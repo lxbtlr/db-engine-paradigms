@@ -39,7 +39,8 @@
 #                        plan derives as semi, as Hashset::contains)
 #   join_all             one config for every machine: join_fused + join_semi +
 #                        VW_GROUP_DISPATCH + VW_GROUP_RUN_HEADS
-#   join_dispatch        VW_JOIN_DISPATCH (study/JOIN_DISPATCH_STUDY.md): the semi /
+#   join_dispatch        VW_JOIN_DISPATCH + VW_JOIN_BLOOM + VW_JOIN_FUSED_PROBE
+#                        (study/JOIN_DISPATCH_STUDY.md): the semi /
 #                        Bloom / fused-probe choice resolved once per join from
 #                        plan facts and the build summary; also builds and runs
 #                        run_joindispatchbench (joindispatchbench.csv)
@@ -495,7 +496,8 @@ config_flags() {
     # engine structure outside the like-for-like ladder
     safe_fast)           echo "$(config_flags par_having) -DVW_CRC32_FAST=ON" ;;
     safe_sel)            echo "$(config_flags safe_fast) $SEL" ;;
-    safe_jdisp)          echo "$(config_flags safe_sel) -DVW_JOIN_DISPATCH=ON" ;;
+    # the Bloom filter and fused probe dispatch used to imply, now explicit
+    safe_jdisp)          echo "$(config_flags safe_sel) -DVW_JOIN_DISPATCH=ON -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
     safe_gdisp)          echo "$(config_flags safe_jdisp) -DVW_GROUP_DISPATCH=ON" ;;
     safe_kinds)          echo "$(config_flags safe_gdisp) -DVW_AGGR_FUSED_KINDS=ON" ;;
     safe_compound)       echo "$(config_flags safe_kinds) -DVW_PROJ_COMPOUND=ON" ;;
@@ -512,6 +514,20 @@ config_flags() {
     # compound after that has safe_runheads' defines
     o2_runheads)         echo "$(config_flags safe_gdisp) -DVW_GROUP_RUN_HEADS=ON" ;;
     o2_kinds)            echo "$(config_flags o2_runheads) -DVW_AGGR_FUSED_KINDS=ON" ;;
+    # fair ladder: the safe ladder without the options Typer's plans lack
+    # (Bloom filter, fused probe, run heads; the semi bitmap was never in
+    # it). fair_jdisp is dispatch alone, which then always takes the plain
+    # hash probe. fair_compound ends the fair pool; fair_bloom and
+    # fair_heads add the excluded options back one at a time, and both
+    # together (plus the fused probe) give safe_runheads' defines
+    fair_fast)           echo "$(config_flags par_having) -DVW_CRC32_FAST=ON" ;;
+    fair_sel)            echo "$(config_flags fair_fast) $SEL" ;;
+    fair_jdisp)          echo "$(config_flags fair_sel) -DVW_JOIN_DISPATCH=ON" ;;
+    fair_gdisp)          echo "$(config_flags fair_jdisp) -DVW_GROUP_DISPATCH=ON" ;;
+    fair_kinds)          echo "$(config_flags fair_gdisp) -DVW_AGGR_FUSED_KINDS=ON" ;;
+    fair_compound)       echo "$(config_flags fair_kinds) -DVW_PROJ_COMPOUND=ON" ;;
+    fair_bloom)          echo "$(config_flags fair_compound) -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
+    fair_heads)          echo "$(config_flags fair_compound) -DVW_GROUP_RUN_HEADS=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)
@@ -549,7 +565,7 @@ config_flags() {
     join_semi)           echo "$(config_flags join_base) -DVW_JOIN_SEMI=ON" ;;
     join_all)            echo "$(config_flags join_fused) -DVW_JOIN_SEMI=ON -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
     join_all_valid)      echo "$(config_flags join_fused) -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
-    join_dispatch)       echo "$(config_flags join_base) -DVW_JOIN_DISPATCH=ON" ;;
+    join_dispatch)       echo "$(config_flags join_base) -DVW_JOIN_DISPATCH=ON -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
     jd_all)              echo "$(config_flags join_dispatch) -DVW_GROUP_HAVING=ON -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
     jd_all_pc)           echo "$(config_flags jd_all) -DVW_AGGR_FUSED_KINDS=ON -DVW_PROJ_COMPOUND=ON" ;;
     jd_semi)             echo "$(config_flags jd_all) -DVW_JOIN_SEMI_BITMAP=ON" ;;
@@ -571,7 +587,7 @@ config_flags() {
   esac
 }
 # config_flags with AUTOVEC in front: configs that do not start from flags()
-# (cmake_defaults, the par_/safe_/gs_/o2_ ladders) would otherwise build
+# (cmake_defaults, the par_/safe_/gs_/o2_/fair_ ladders) would otherwise build
 # without it; a config's own -DAUTOVECTORIZE (jdpc_av) comes later and wins
 build_flags() { local f; f=$(config_flags "$1") || return; echo "-DAUTOVECTORIZE=$AUTOVEC $f"; }
 # PRINT_FLAGS=<config>: print that config's CMake options as this host would
