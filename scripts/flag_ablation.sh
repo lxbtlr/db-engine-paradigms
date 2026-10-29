@@ -479,7 +479,7 @@ flags() {
 config_flags() {
   case "$1" in
     # no option flags at all: every VW option at its CMakeLists.txt default
-    # (all OFF: MurMur hash, no SIMD selection, no autovectorization)
+    # (all OFF: MurMur hash, no SIMD selection); AUTOVEC still applies (build_flags)
     cmake_defaults)      ;;
     # parity ladder: cmake_defaults plus only the options that give VW what
     # Hyper's plans already have (PAPER_NARRATIVE.md, thrust 1), one per step
@@ -570,10 +570,14 @@ config_flags() {
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
+# config_flags with AUTOVEC in front: configs that do not start from flags()
+# (cmake_defaults, the par_/safe_/gs_/o2_ ladders) would otherwise build
+# without it; a config's own -DAUTOVECTORIZE (jdpc_av) comes later and wins
+build_flags() { local f; f=$(config_flags "$1") || return; echo "-DAUTOVECTORIZE=$AUTOVEC $f"; }
 # PRINT_FLAGS=<config>: print that config's CMake options as this host would
 # build them (SEL resolved for this CPU) and exit; scripts/vtune_q1.sh builds
 # its configs from these so both scripts share one definition
-if [ -n "${PRINT_FLAGS:-}" ]; then config_flags "$PRINT_FLAGS"; exit $?; fi
+if [ -n "${PRINT_FLAGS:-}" ]; then build_flags "$PRINT_FLAGS"; exit $?; fi
 bdir() { echo "$ROOT/build_flags/$BENCH_HOST/$1_$2$AV_SUFFIX"; }
 # reject unknown config names before building (exit inside $(config_flags)
 # only leaves the subshell)
@@ -619,7 +623,7 @@ for comp in $COMPILERS; do
     # shellcheck disable=SC2207
     cmake_args=(-S "$ROOT" -B "$B" -DCMAKE_BUILD_TYPE=Release -DCOMPILER="$comp"
       -DTARGET_MACHINE="$MACHINE" -DTARGET_ARCH= -DDATADIR="$DATADIR"
-      $(config_flags "$cfg") $VW_FLAGS_D)
+      $(build_flags "$cfg") $VW_FLAGS_D)
     if [ "$SKIP_BUILD" != 1 ]; then
       if ! cmake "${cmake_args[@]}" > "$D/cmake.log" 2>&1; then
         fail "$tag cmake (see $D/cmake.log)"; excerpt "$D/cmake.log"; continue
