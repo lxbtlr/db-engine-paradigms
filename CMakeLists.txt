@@ -265,11 +265,48 @@ endif()
 # VW_PROJ_COMPOUND: compound projection primitives (X100-style). Inside one
 # Project expression, an int64 +, -, * projection whose result feeds the
 # next one runs with it in one loop (CompoundPrimitives.hpp); chains are found
-# by ExpressionBuilder at build time, intermediate buffers are still written.
+# by ExpressionBuilder at build time, intermediate buffers are still written
+# (except Scratch buffers, kept in a register).
+# VW_COMPOUND_DEPTH: the longest chain fused into one kernel (2: pairs).
+# VW_COMPOUND_SET: which chain kernels are compiled; full = every canonical
+# chain (depth <= 3), workload = the chains recorded in
+# src/vectorwise/primitives/compound_workload.txt (scripts/compound_workload.sh).
+# Default: full at depth 2 (the pair table), workload above. Anything but
+# full at depth 2 compiles generic chain kernels (cmake/CompoundKernels.cmake).
 OPTION(VW_PROJ_COMPOUND "Compound int64 projection primitives in VectorWise expressions" OFF)
+set(VW_COMPOUND_DEPTH "2" CACHE STRING "VW_PROJ_COMPOUND: longest projection chain fused into one kernel (2..8)")
+set(VW_COMPOUND_SET "" CACHE STRING "VW_PROJ_COMPOUND: chain kernels compiled, full or workload (empty: full at depth 2, else workload)")
+set(COMPOUND_SOURCES "")
 if(VW_PROJ_COMPOUND)
   ADD_DEFINITIONS(-DVW_PROJ_COMPOUND=1)
-  message(STATUS "Building with VW_PROJ_COMPOUND")
+  if(NOT VW_COMPOUND_DEPTH MATCHES "^[2-8]$")
+    message(FATAL_ERROR "VW_COMPOUND_DEPTH must be 2..8, got '${VW_COMPOUND_DEPTH}'")
+  endif()
+  set(compound_set "${VW_COMPOUND_SET}")
+  if(compound_set STREQUAL "")
+    if(VW_COMPOUND_DEPTH EQUAL 2)
+      set(compound_set full)
+    else()
+      set(compound_set workload)
+    endif()
+  endif()
+  if(NOT compound_set MATCHES "^(full|workload)$")
+    message(FATAL_ERROR "VW_COMPOUND_SET must be full or workload, got '${VW_COMPOUND_SET}'")
+  endif()
+  if(compound_set STREQUAL "full" AND VW_COMPOUND_DEPTH GREATER 3)
+    message(FATAL_ERROR "VW_COMPOUND_SET=full is limited to VW_COMPOUND_DEPTH <= 3 "
+            "(depth 4: ~250k kernels, ~37 MB); use workload")
+  endif()
+  ADD_DEFINITIONS(-DVW_COMPOUND_DEPTH=${VW_COMPOUND_DEPTH})
+  if(NOT (compound_set STREQUAL "full" AND VW_COMPOUND_DEPTH EQUAL 2))
+    ADD_DEFINITIONS(-DVW_COMPOUND_CHAINS=1)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/CompoundKernels.cmake)
+    set(COMPOUND_SOURCES ${CMAKE_BINARY_DIR}/generated/CompoundKernels.cpp)
+    compound_kernels(${VW_COMPOUND_DEPTH} ${compound_set}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/src/vectorwise/primitives/compound_workload.txt
+                     ${COMPOUND_SOURCES})
+  endif()
+  message(STATUS "Building with VW_PROJ_COMPOUND (depth ${VW_COMPOUND_DEPTH}, set ${compound_set})")
 endif()
 
 OPTION(VW_GROUP_AGGR_SEL "Perform selection vector batching for VectorWise" OFF)
@@ -911,6 +948,7 @@ add_library(vectorwise
   src/vectorwise/Operations.cpp
   src/vectorwise/Operators.cpp
   ${PRIMITIVES}
+  ${COMPOUND_SOURCES}
   src/vectorwise/QueryBuilder.cpp
   )
 target_include_directories(vectorwise PUBLIC

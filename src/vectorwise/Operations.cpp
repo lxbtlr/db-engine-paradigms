@@ -129,6 +129,13 @@ pos_t CompoundOp::run(pos_t n) {
                  static_cast<int64_t*>(out), static_cast<const int64_t*>(a),
                  static_cast<const int64_t*>(b), static_cast<const int64_t*>(c));
 }
+#ifdef VW_COMPOUND_CHAINS
+pos_t ChainOp::run(pos_t n) {
+   return kernel(n, static_cast<const pos_t*>(sel), mid.data(),
+                 static_cast<int64_t*>(out),
+                 reinterpret_cast<const int64_t* const*>(in.data()));
+}
+#endif
 #endif
 
 pos_t ConcatOp::run(pos_t n) {

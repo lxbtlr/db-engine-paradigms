@@ -249,6 +249,12 @@ static void reportDdCoverage(const vectorwise::Project& proj, int W,
                ++compound[part];
                elided[part] += !c->storeMid;
             }
+#ifdef VW_COMPOUND_CHAINS
+            if (auto* c = dynamic_cast<const vectorwise::ChainOp*>(op.get())) {
+               ++compound[part];
+               elided[part] += c->inRegister;
+            }
+#endif
 #else
             (void)op;
 #endif

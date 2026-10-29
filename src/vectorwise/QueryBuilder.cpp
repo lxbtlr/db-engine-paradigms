@@ -2,6 +2,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <mutex>
 
 using namespace std;
 
@@ -298,9 +300,7 @@ void QueryBuilder::ExpressionBuilder::writeDS(const DS& d) {
    if (d.scratch && elided) elided->erase(d.data);
 }
 
-void QueryBuilder::ExpressionBuilder::flushHeld() {
-   if (!held) return;
-   auto& h = *held;
+void QueryBuilder::ExpressionBuilder::emitSingle(HeldProjection h) {
    if (h.desc.selInput) readDS(h.sel);
    readDS(h.p1);
    readDS(h.p2);
@@ -320,6 +320,12 @@ void QueryBuilder::ExpressionBuilder::flushHeld() {
       h.p2.registerDS(&f3->param2);
       expression->ops.push_back(move(f3));
    }
+}
+
+#ifndef VW_COMPOUND_CHAINS
+void QueryBuilder::ExpressionBuilder::flushHeld() {
+   if (!held) return;
+   emitSingle(*held);
    held.reset();
 }
 
@@ -396,6 +402,135 @@ bool QueryBuilder::ExpressionBuilder::fuse(const HeldProjection& first,
    expression->ops.push_back(move(op));
    return true;
 }
+#else
+namespace {
+// (a template: QueryBuilder::DataStorage is not accessible by name here)
+template <typename DS> bool sameDS(const DS& x, const DS& y) {
+   return x.buf != DS::BufferSpec::None && x.buf == y.buf && x.data == y.data;
+}
+} // namespace
+
+void QueryBuilder::ExpressionBuilder::flushHeld() {
+   if (chain.empty()) return;
+   if (chain.size() >= 2)
+      if (const char* path = getenv("VW_COMPOUND_RECORD")) {
+         // the chains plans build, for compound_workload.txt
+         static std::mutex m;
+         std::vector<DS> unused;
+         std::lock_guard<std::mutex> lock(m);
+         std::ofstream(path, std::ios::app)
+             << chainSig(0, chain.size(), unused).str() << "\n";
+      }
+   // greedy: the longest piece from each position that has a kernel
+   for (size_t i = 0; i < chain.size();) {
+      size_t len = chain.size() - i;
+      while (len >= 2 && !emitChain(i, len)) --len;
+      if (len < 2) {
+         emitSingle(chain[i]);
+         len = 1;
+      }
+      i += len;
+   }
+   chain.clear();
+}
+
+void QueryBuilder::ExpressionBuilder::holdOrFuse(const HeldProjection& next) {
+   if (!chain.empty() && extends(next)) {
+      chain.push_back(next);
+      if (chain.size() == size_t(VW_COMPOUND_DEPTH)) flushHeld();
+      return;
+   }
+   flushHeld();
+   chain.push_back(next);
+}
+
+/// next reads the last held result densely as exactly one operand, all
+/// selections in the chain are one Buffer, and no output aliases an input or
+/// an earlier output; decided from the plan only
+bool QueryBuilder::ExpressionBuilder::extends(const HeldProjection& next) const {
+   using namespace primitives::compound;
+   const DS& prev = chain.back().out;
+   if (prev.buf != DS::BufferSpec::Buffer ||
+       next.out.buf != DS::BufferSpec::Buffer)
+      return false;
+   const bool p1Prev = next.desc.a == Col && sameDS(next.p1, prev);
+   const bool p2Prev = next.desc.b == Col && sameDS(next.p2, prev);
+   if (p1Prev == p2Prev) return false; // does not chain, or reads it twice
+   const DS& other = p1Prev ? next.p2 : next.p1;
+   const DS* sel = next.desc.selInput ? &next.sel : nullptr;
+   for (auto& h : chain) {
+      if (h.desc.selInput) {
+         if (sel && !sameDS(*sel, h.sel)) return false;
+         sel = &h.sel;
+      }
+      for (const DS* in : {&h.p1, &h.p2, &h.out})
+         if (sameDS(*in, next.out)) return false;
+      if (sameDS(other, h.out)) return false;
+   }
+   return !sel || sel->buf == DS::BufferSpec::Buffer;
+}
+
+primitives::compound::ChainSig
+QueryBuilder::ExpressionBuilder::chainSig(size_t from, size_t len,
+                                          std::vector<DS>& operands) const {
+   using namespace primitives::compound;
+   const HeldProjection& f = chain[from];
+   ChainSig sig{f.desc.op, f.desc.a, f.desc.b, {}};
+   operands = {f.p1, f.p2};
+   // canonical operand order (the kernel lists hold only these)
+   if (commutative(sig.op0) && sig.a > sig.b) {
+      std::swap(sig.a, sig.b);
+      std::swap(operands[0], operands[1]);
+   }
+   for (size_t j = from + 1; j < from + len; ++j) {
+      const HeldProjection& h = chain[j];
+      const DS& prev = chain[j - 1].out;
+      const bool p2Prev = !(h.desc.a == Col && sameDS(h.p1, prev));
+      // a Scratch intermediate is read by nothing but this step
+      const bool store = !(prev.scratch && elided);
+      sig.steps.push_back({h.desc.op, p2Prev ? h.desc.a : h.desc.b,
+                           p2Prev && !commutative(h.desc.op), store});
+      operands.push_back(p2Prev ? h.p1 : h.p2);
+   }
+   return sig;
+}
+
+bool QueryBuilder::ExpressionBuilder::emitChain(size_t from, size_t len) {
+   using namespace primitives::compound;
+   std::vector<DS> operands;
+   const ChainSig sig = chainSig(from, len, operands);
+   const ChainFn k = findChain(sig);
+   if (!k) return false;
+   const DS* sel = nullptr;
+   for (size_t j = from; j < from + len; ++j)
+      if (chain[j].desc.selInput) sel = &chain[j].sel;
+   if (sel) readDS(*sel);
+   for (auto& o : operands) readDS(o);
+   auto op = make_unique<ChainOp>();
+   op->kernel = k;
+   op->sel = sel ? sel->data : nullptr;
+   op->out = chain[from + len - 1].out.data;
+   writeDS(chain[from + len - 1].out);
+   for (size_t s = 0; s < sig.steps.size(); ++s) {
+      const DS& mid = chain[from + s].out;
+      if (sig.steps[s].storePrev) {
+         writeDS(mid);
+         op->mid.push_back(static_cast<int64_t*>(mid.data));
+      } else {
+         elided->insert(mid.data);
+         op->mid.push_back(nullptr);
+         ++op->inRegister;
+      }
+   }
+   op->in.resize(operands.size());
+   for (size_t o = 0; o < operands.size(); ++o) {
+      op->in[o] = operands[o].data;
+      operands[o].registerDS(&op->in[o]);
+   }
+   expression->ops.push_back(move(op));
+   return true;
+}
+#endif
 #endif
 
 QueryBuilder::HashJoinBuilder::HashJoinBuilder(QueryBuilder& b) : base(b) {}

@@ -200,10 +200,26 @@ class QueryBuilder {
          const void* prim;
          DS sel, out, p1, p2; // sel: buf None for F3 primitives
       };
-      std::optional<HeldProjection> held;
       void holdOrFuse(const HeldProjection& next);
-      bool fuse(const HeldProjection& first, const HeldProjection& second);
       void flushHeld();
+      /// one projection as its own primitive
+      void emitSingle(HeldProjection h);
+#ifndef VW_COMPOUND_CHAINS
+      std::optional<HeldProjection> held;
+      bool fuse(const HeldProjection& first, const HeldProjection& second);
+#else
+      /// held projections, each reading the previous one's result densely
+      /// (at most VW_COMPOUND_DEPTH); emitted as the longest pieces with a
+      /// kernel in this build
+      std::vector<HeldProjection> chain;
+      bool extends(const HeldProjection& next) const;
+      /// chain[from, from + len) as a canonical signature, with its operands
+      /// in kernel order
+      primitives::compound::ChainSig chainSig(size_t from, size_t len,
+                                              std::vector<DS>& operands) const;
+      /// one ChainOp for chain[from, from + len); false if not compiled in
+      bool emitChain(size_t from, size_t len);
+#endif
       /// QueryBuilder::elidedScratch (null: an ExpressionBuilder made
       /// elsewhere, no Scratch() checks)
       std::unordered_set<void*>* elided = nullptr;

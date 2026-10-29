@@ -2,6 +2,8 @@
 #include "vectorwise/CompoundPrimitives.hpp"
 #include "vectorwise/Primitives.hpp"
 #include <array>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace vectorwise {
@@ -81,6 +83,30 @@ Fn kernel(Arith op1, Form a, Form b, Arith op2, Form c, bool cLeft,
                       2 +
                   storeMid];
 }
+
+#ifdef VW_COMPOUND_CHAINS
+std::string ChainSig::str() const {
+   static const char* ops[] = {"plus", "minus", "mul"};
+   static const char* forms[] = {"col", "sel", "val"};
+   std::string r = std::string(ops[op0]) + " " + forms[a] + " " + forms[b];
+   for (auto& s : steps)
+      r += std::string(" ; ") + (s.storePrev ? "keep " : "reg ") + ops[s.op] +
+           " " + forms[s.form] + (s.left ? " l" : " r");
+   return r;
+}
+
+ChainFn findChain(const ChainSig& sig) {
+   // built on first use (plan building)
+   static const auto byName = [] {
+      std::unordered_map<std::string_view, ChainFn> m;
+      for (size_t i = 0; i < chainEntryCount; ++i)
+         m.emplace(chainEntries[i].sig, chainEntries[i].fn);
+      return m;
+   }();
+   auto it = byName.find(sig.str());
+   return it == byName.end() ? nullptr : it->second;
+}
+#endif
 
 } // namespace compound
 } // namespace primitives

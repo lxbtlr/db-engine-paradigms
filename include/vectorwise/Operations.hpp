@@ -218,6 +218,19 @@ struct CompoundOp : public Op {
    primitives::compound::Fn kernel;
    virtual pos_t run(pos_t n) override;
 };
+#ifdef VW_COMPOUND_CHAINS
+/// VW_COMPOUND_CHAINS: up to VW_COMPOUND_DEPTH chained projections in one
+/// loop (chainKernel); in is sized before its slots are registered
+struct ChainOp : public Op {
+   void* sel = nullptr;
+   void* out;
+   std::vector<void*> in;     // a, b, then one operand per step
+   std::vector<int64_t*> mid; // per step: where its incoming value is stored
+   size_t inRegister = 0;     // intermediates kept in a register (coverage)
+   primitives::compound::ChainFn kernel;
+   virtual pos_t run(pos_t n) override;
+};
+#endif
 #endif
 
 /// Concatenate a single source column into an output buffer at a fixed offset.

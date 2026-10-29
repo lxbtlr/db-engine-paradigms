@@ -1,7 +1,8 @@
 // VW_PROJ_COMPOUND: differential tests for the compound projection
 // primitives. Every descriptor must match what its primitive computes, every
-// canonical kernel must match two separate scalar steps, and
-// ExpressionBuilder must fuse exactly the chains it may.
+// canonical kernel (and every chain kernel the build lists) must match
+// separate scalar steps, and ExpressionBuilder must fuse exactly the chains
+// it may.
 #ifdef VW_PROJ_COMPOUND
 #include "vectorwise/CompoundPrimitives.hpp"
 #include "vectorwise/Operations.hpp"
@@ -9,6 +10,7 @@
 #include "vectorwise/QueryBuilder.hpp"
 #include <gtest/gtest.h>
 #include <random>
+#include <sstream>
 #include <vector>
 
 using namespace vectorwise;
@@ -162,6 +164,20 @@ DS scratch(void* p) {
    r.scratch = true;
    return r;
 }
+/// a pair (CompoundOp) or, with VW_COMPOUND_CHAINS, a chain (ChainOp)
+bool fusedOp(Op* op) {
+#ifdef VW_COMPOUND_CHAINS
+   if (dynamic_cast<ChainOp*>(op)) return true;
+#endif
+   return dynamic_cast<CompoundOp*>(op) != nullptr;
+}
+size_t inRegister(Op* op) {
+#ifdef VW_COMPOUND_CHAINS
+   if (auto* c = dynamic_cast<ChainOp*>(op)) return c->inRegister;
+#endif
+   auto* c = dynamic_cast<CompoundOp*>(op);
+   return c && !c->storeMid;
+}
 Exposed::ExpressionBuilder builder(std::unordered_set<void*>* elided = nullptr) {
    Exposed::ExpressionBuilder b;
    b.expression = std::make_unique<Expression>();
@@ -184,7 +200,7 @@ TEST(Compound, BuilderFusesQ1Chain) {
               buffer(minus.data()));
    std::unique_ptr<Expression> e = b;
    ASSERT_EQ(e->ops.size(), 1u);
-   ASSERT_NE(dynamic_cast<CompoundOp*>(e->ops[0].get()), nullptr);
+   ASSERT_TRUE(fusedOp(e->ops[0].get()));
    const pos_t n = pos_t(d.sel.size());
    EXPECT_EQ(e->evaluate(n), n);
    for (pos_t i = 0; i < n; ++i) {
@@ -205,7 +221,7 @@ TEST(Compound, BuilderLeavesUnchainedAndAliasedOps) {
               buffer(d.y.data()), value(&one));
    std::unique_ptr<Expression> e = b;
    ASSERT_EQ(e->ops.size(), 2u);
-   EXPECT_EQ(dynamic_cast<CompoundOp*>(e->ops[0].get()), nullptr);
+   EXPECT_FALSE(fusedOp(e->ops[0].get()));
    // aliased: the second writes over the first's input
    std::vector<int64_t> in(d.x);
    auto b2 = builder();
@@ -228,8 +244,10 @@ TEST(Compound, BuilderLeavesUnchainedAndAliasedOps) {
        .addOp(proj_minus_int64_t_col_int64_t_col, buffer(t3.data()),
               buffer(t2.data()), buffer(d.z.data()));
    std::unique_ptr<Expression> e3 = b3;
+#ifndef VW_COMPOUND_CHAINS
    ASSERT_EQ(e3->ops.size(), 2u);
    EXPECT_NE(dynamic_cast<CompoundOp*>(e3->ops[0].get()), nullptr);
+#endif
    e3->evaluate(kRows);
    for (pos_t i = 0; i < kRows; ++i)
       ASSERT_EQ(t3[i], (d.x[i] + one) * d.y[i] - d.z[i]);
@@ -248,9 +266,8 @@ TEST(Compound, ScratchMidStaysInRegister) {
               buffer(out.data()), scratch(s.data()), buffer(d.y.data()));
    std::unique_ptr<Expression> e = b;
    ASSERT_EQ(e->ops.size(), 1u);
-   auto* op = dynamic_cast<CompoundOp*>(e->ops[0].get());
-   ASSERT_NE(op, nullptr);
-   EXPECT_FALSE(op->storeMid);
+   ASSERT_TRUE(fusedOp(e->ops[0].get()));
+   EXPECT_EQ(inRegister(e->ops[0].get()), 1u);
    const pos_t n = pos_t(d.sel.size());
    e->evaluate(n);
    for (pos_t i = 0; i < n; ++i) {
@@ -277,4 +294,92 @@ TEST(Compound, ScratchMidStaysInRegister) {
                               buffer(out.data()), buffer(d.z.data()),
                               value(&c)));
 }
+
+#ifdef VW_COMPOUND_CHAINS
+namespace {
+ChainSig parse(const std::string& s) {
+   auto op = [](const std::string& t) { return t == "plus" ? Plus : t == "minus" ? Minus : Mul; };
+   auto form = [](const std::string& t) { return t == "col" ? Col : t == "sel" ? Sel : Val; };
+   std::istringstream in(s);
+   std::string o, a, b, sep, keep, side;
+   in >> o >> a >> b;
+   ChainSig sig{op(o), form(a), form(b), {}};
+   while (in >> sep >> keep >> o >> a >> side)
+      sig.steps.push_back({op(o), form(a), side == "l", keep == "keep"});
+   return sig;
+}
+} // namespace
+
+TEST(Compound, ChainKernelsMatchSteps) {
+   Data d;
+   std::vector<int64_t> v(64, 5);
+   for (size_t e = 0; e < chainEntryCount; ++e) {
+      const ChainSig sig = parse(chainEntries[e].sig);
+      ASSERT_EQ(sig.str(), chainEntries[e].sig);
+      ASSERT_EQ(findChain(sig), chainEntries[e].fn);
+      // operand k: column x, y or z by k % 3, or a constant
+      const std::vector<int64_t>* cols[] = {&d.x, &d.y, &d.z};
+      std::vector<Form> forms = {sig.a, sig.b};
+      for (auto& s : sig.steps) forms.push_back(s.form);
+      std::vector<const int64_t*> in;
+      for (size_t k = 0; k < forms.size(); ++k) {
+         v[k] = int64_t(k) * 3 - 4;
+         in.push_back(arg(forms[k], *cols[k % 3], v[k]));
+      }
+      bool anySel = false;
+      for (auto f : forms) anySel |= f == Sel;
+      const pos_t n = anySel ? pos_t(d.sel.size()) : kRows;
+      std::vector<std::vector<int64_t>> mids(sig.steps.size(), std::vector<int64_t>(kRows, -7));
+      std::vector<int64_t*> mid;
+      for (auto& m : mids) mid.push_back(m.data());
+      std::vector<int64_t> out(kRows);
+      chainEntries[e].fn(n, d.sel.data(), mid.data(), out.data(), in.data());
+      for (pos_t i = 0; i < n; ++i) {
+         auto rd = [&](size_t k) { return read(forms[k], *cols[k % 3], v[k], d.sel, i); };
+         int64_t acc = apply(sig.op0, rd(0), rd(1));
+         for (size_t s = 0; s < sig.steps.size(); ++s) {
+            ASSERT_EQ(mids[s][i], sig.steps[s].storePrev ? acc : -7) << chainEntries[e].sig;
+            const int64_t x = rd(s + 2);
+            acc = sig.steps[s].left ? apply(sig.steps[s].op, x, acc) : apply(sig.steps[s].op, acc, x);
+         }
+         ASSERT_EQ(out[i], acc) << chainEntries[e].sig << " row " << i;
+      }
+   }
+}
+
+TEST(Compound, BuilderFusesChainsUpToDepth) {
+   // out = ((x * c) + y[sel]) - z through two Scratch intermediates: one
+   // ChainOp if this build has the three-step kernel and the depth allows
+   // it, else the longest compiled prefix and a primitive
+   Data d;
+   int64_t c = 3;
+   std::vector<int64_t> s1(kRows, -7), s2(kRows, -7), out(kRows);
+   std::unordered_set<void*> elided;
+   auto b = builder(&elided);
+   b.addOp(proj_multiplies_int64_t_col_int64_t_val, scratch(s1.data()),
+           buffer(d.x.data()), value(&c))
+       .addOp(proj_plus_int64_t_col_sel_int64_t_col, buffer(d.sel.data()),
+              scratch(s2.data()), scratch(s1.data()), buffer(d.y.data()))
+       .addOp(proj_minus_int64_t_col_int64_t_col, buffer(out.data()),
+              scratch(s2.data()), buffer(d.z.data()));
+   std::unique_ptr<Expression> e = b;
+   const ChainSig three{Mul, Col, Val, {{Plus, Sel, false, false}, {Minus, Col, false, false}}};
+   const ChainSig two{Mul, Col, Val, {{Plus, Sel, false, false}}};
+   if (VW_COMPOUND_DEPTH >= 3 && findChain(three)) {
+      ASSERT_EQ(e->ops.size(), 1u);
+      EXPECT_EQ(inRegister(e->ops[0].get()), 2u);
+   } else if (findChain(two)) {
+      ASSERT_EQ(e->ops.size(), 2u);
+      EXPECT_EQ(inRegister(e->ops[0].get()), 1u);
+   } else {
+      ASSERT_EQ(e->ops.size(), 3u);
+   }
+   const pos_t n = pos_t(d.sel.size());
+   e->evaluate(n);
+   for (pos_t i = 0; i < n; ++i) {
+      ASSERT_EQ(out[i], d.x[i] * c + d.y[d.sel[i]] - d.z[i]);
+      ASSERT_EQ(s1[i], -7);
+   }
+}
+#endif
 #endif
