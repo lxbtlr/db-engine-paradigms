@@ -11,7 +11,10 @@
 ///   chained:      v0 = ep * C0,       vk = v(k-1) * Ck + ep
 ///   independent:  vk = ep * Ck + ep
 ///
-/// and returns sum_k vk (Tectorwise's dd_sink). Typer keeps the intermediates
+/// and returns sum_k vk (Tectorwise's dd_sink). With a group size D > 1
+/// (chained only) the sum takes only the last value of each group of D steps,
+/// vk with (k+1) % D == 0 or k == W-1: the values Tectorwise stores when it
+/// computes a group as one expression. Typer keeps the intermediates
 /// in registers; Tectorwise materializes each into its own vector buffer. W is
 /// a compile-time constant (integer-sequence unrolling, no runtime loop over
 /// W), so the machine code is straight-line.
@@ -35,15 +38,16 @@ inline uint64_t opaque(uint64_t v) {
 }
 
 /// Chained: a true dependency chain, vk needs v(k-1) (multiply + add latency
-/// per step); the running sum is a second, independent chain.
-template <int W>
+/// per step); the running sum is a second, independent chain that takes the
+/// group-final values (every value for D = 1).
+template <int W, int D = 1>
 struct DdKernel {
    template <int k>
    static inline void step(uint64_t ep, uint64_t& v, uint64_t& sum) {
       constexpr uint64_t c = (uint64_t)ddConstant(k);
       if constexpr (k == 0) v = opaque(ep * c);
       else v = opaque(opaque(v * c) + ep);
-      sum += v;
+      if constexpr ((k + 1) % D == 0 || k == W - 1) sum += v;
    }
 
    template <int... ks>
@@ -86,14 +90,14 @@ struct DdKernelIndep {
 // Kernel shape selector: pick the kernel type at compile time from a Shape.
 enum class Shape { Chained, Independent };
 
-template <int W, Shape S>
+template <int W, Shape S, int D = 1>
 struct Kernel;
-template <int W>
-struct Kernel<W, Shape::Chained> {
-   using type = DdKernel<W>;
+template <int W, int D>
+struct Kernel<W, Shape::Chained, D> {
+   using type = DdKernel<W, D>;
 };
 template <int W>
-struct Kernel<W, Shape::Independent> {
+struct Kernel<W, Shape::Independent, 1> {
    using type = DdKernelIndep<W>;
 };
 

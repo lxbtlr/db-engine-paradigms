@@ -33,7 +33,12 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
       dd_buf_base = 64,      // dd_buf_base + 0 .. +W-1 : the W intermediates
       dd_scratch = 64 + 64,  // scratch between multiply and add per step
       dd_sink = 64 + 65,     // running sum of all W intermediates (dense)
-      dd_sink_out = 64 + 66  // per-group aggregation of the sink (live-out)
+      dd_sink_out = 64 + 66, // per-group aggregation of the sink (live-out)
+      // group size D > 1: the inner values of a group, Scratch per position
+      // (a chain must not reuse a buffer); ids up to dd_group_val + 6 (D 8)
+      dd_group_mul = 64 + 67, // multiply result of step 1 .. D-1 of a group
+                              // (step 0 uses dd_scratch)
+      dd_group_val = 64 + 74  // value of step 0 .. D-2 of a group
    };
    struct Q1 {
       types::Numeric<12, 2> one = types::Numeric<12, 2>::castString("1.00");
@@ -51,8 +56,10 @@ struct Q1Builder : public Query, private vectorwise::QueryBuilder {
    /// Q1 pipeline with W synthetic data-dependency intermediates injected into
    /// the projection chain and routed to a dedicated (separate) escaped sink.
    /// `shape` selects chained vs independent intermediate structure (both W and
-   /// shape are runtime counts on the vectorized side).
-   std::unique_ptr<Q1> getQueryDd(int W, dd::Shape shape);
+   /// shape are runtime counts on the vectorized side). D (chained only): each
+   /// group of D steps is one expression whose inner values are Scratch, and
+   /// only the group-final values are stored and reach the sink.
+   std::unique_ptr<Q1> getQueryDd(int W, dd::Shape shape, int D = 1);
 };
 
 std::unique_ptr<runtime::Query>
@@ -65,19 +72,22 @@ q1_vectorwise(runtime::Database& db,
 // --- Data-dependency-width microbenchmark (Test 1 / Test 1b) ---
 /// Compile-time-W Typer (hyper) variant: W and the kernel shape are template
 /// constants so the W intermediates become distinct straight-line scalar SSA
-/// values (chained = short live ranges; independent = wide live set).
-template <int W, dd::Shape S>
+/// values (chained = short live ranges; independent = wide live set). D: the
+/// group size (chained only), only group-final values reach the sink.
+template <int W, dd::Shape S, int D = 1>
 std::unique_ptr<runtime::Query> q1_dd_hyper_impl(runtime::Database& db,
                                                  size_t nrThreads);
-/// Runtime dispatcher: maps a runtime W and shape to the correct compile-time
-/// instantiation. Unknown W or shape is a hard error (no silent fallback).
+/// Runtime dispatcher: maps a runtime W, shape and D to the correct
+/// compile-time instantiation. Unknown W, shape or D is a hard error (no
+/// silent fallback); D is 1, 2 or 4, and 1 for the independent shape.
 std::unique_ptr<runtime::Query>
-q1_dd_hyper(runtime::Database& db, size_t nrThreads, int W, dd::Shape shape);
-/// Vectorized (Tectorwise) variant: W and shape may be runtime counts (the
-/// vectorized engine materializes to buffers regardless).
+q1_dd_hyper(runtime::Database& db, size_t nrThreads, int W, dd::Shape shape,
+            int D = 1);
+/// Vectorized (Tectorwise) variant: W, shape and D (1..8, chained only for
+/// D > 1) may be runtime counts.
 std::unique_ptr<runtime::Query>
 q1_dd_vectorwise(runtime::Database& db, size_t nrThreads, size_t vectorSize,
-                 int W, dd::Shape shape);
+                 int W, dd::Shape shape, int D = 1);
 
 struct Q3Builder : private vectorwise::QueryBuilder {
    enum {

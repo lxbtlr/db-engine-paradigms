@@ -153,6 +153,9 @@
 #                        v (W 1..64) or h (W 2..48 even, 64)
 #   DD_SHAPE   chained   dd kernel shape (run_tpch -k): chained or independent
 #                        (_w<W>i)
+#   DD_GROUP   1         dd group size D (run_tpch -g), chained only: 1, 2, 4
+#                        or a comma list (1,2,4); each W x D is its own
+#                        invocation, named _w<W>g<D> (D 1 stays _w<W>)
 #   TESTS      all       TPCH/SSB tests: all, none, or a query list (1,6 or 11,21)
 #   PERF       ""        stat or record: one perf run per config x query after
 #                        the timing; <compiler>_<config>/perf_q<N>.txt
@@ -194,7 +197,7 @@ JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloo
 GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
 # parity and safe ladders: not in the default CONFIGS, named here so
 # summaries recognise them (and their run-setting suffixes)
-SAFE_CONFIGS="par_crc32 par_semi par_having safe_fast safe_sel safe_jdisp safe_gdisp safe_kinds safe_compound safe_compound_wl3"
+SAFE_CONFIGS="par_crc32 par_semi par_having safe_fast safe_sel safe_jdisp safe_gdisp safe_kinds safe_compound safe_compound_wl3 safe_compound_wl8"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 # config group: the TPC-valid join and group-by configs (see header)
 JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc join_all_valid grp_base grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
@@ -335,10 +338,24 @@ if [ -n "$DD_W" ]; then
 else
   [ "$DD_SHAPE" = chained ] || { echo "DD_SHAPE needs DD_W" >&2; exit 2; }
 fi
-DD_LIST=${DD_W:+${DD_W//,/ }}
-# dd_args W / dd_suffix W: run_tpch options and name suffix of width W ("" without DD_W)
-dd_args() { [ -n "$1" ] && echo "-w $1 -k $DD_SHAPE"; }
-dd_suffix() { [ -n "$1" ] && echo "_w$1$([ "$DD_SHAPE" = independent ] && echo i)"; }
+# DD_GROUP: dd group sizes D (run_tpch -g), each W x D one invocation
+DD_GROUP=${DD_GROUP:-1}
+case "$DD_GROUP" in *[!0-9,]*|,*|*,|*,,*) echo "DD_GROUP must be a group size or a comma list" >&2; exit 2 ;; esac
+[ -n "$(tr , '\n' <<< "$DD_GROUP" | sort | uniq -d)" ] && { echo "DD_GROUP repeats a size" >&2; exit 2; }
+for g in ${DD_GROUP//,/ }; do
+  # Typer D is a template constant: only the instantiated sizes (q1_dd.cpp q1_dd_hyper)
+  case "$g" in 1|2|4) ;; *) echo "DD_GROUP: $g is not 1, 2 or 4" >&2; exit 2 ;; esac
+done
+if [ "$DD_GROUP" != 1 ]; then
+  [ -n "$DD_W" ] || { echo "DD_GROUP needs DD_W" >&2; exit 2; }
+  [ "$DD_SHAPE" = chained ] || { echo "DD_GROUP needs DD_SHAPE=chained" >&2; exit 2; }
+fi
+# DD_LIST: one <W>:<D> item per invocation ("" without DD_W)
+DD_LIST=
+for w in ${DD_W//,/ }; do for g in ${DD_GROUP//,/ }; do DD_LIST+=" $w:$g"; done; done
+# dd_args W:D / dd_suffix W:D: run_tpch options and name suffix of one item
+dd_args() { [ -n "$1" ] && echo "-w ${1%:*} -k $DD_SHAPE$([ "${1#*:}" != 1 ] && echo " -g ${1#*:}")"; }
+dd_suffix() { [ -n "$1" ] && echo "_w${1%:*}$([ "$DD_SHAPE" = independent ] && echo i)$([ "${1#*:}" != 1 ] && echo "g${1#*:}")"; }
 # Every setting that differs from the default is part of the config name
 # (results, build dirs, database), so runs never collide:
 # <config>[_autovec][_x<VW_FLAGS hash>][_e<engine>][_t<threads>][_v<vector size>]
@@ -529,9 +546,10 @@ config_flags() {
     safe_gdisp)          echo "$(config_flags safe_jdisp) -DVW_GROUP_DISPATCH=ON" ;;
     safe_kinds)          echo "$(config_flags safe_gdisp) -DVW_AGGR_FUSED_KINDS=ON" ;;
     safe_compound)       echo "$(config_flags safe_kinds) -DVW_PROJ_COMPOUND=ON" ;;
-    # chains of up to 3 projections, kernels for the recorded workload only
+    # chains of up to 3 (8) projections, kernels for the recorded workload only
     # (src/vectorwise/primitives/compound_workload.txt)
     safe_compound_wl3)   echo "$(config_flags safe_compound) -DVW_COMPOUND_DEPTH=3 -DVW_COMPOUND_SET=workload" ;;
+    safe_compound_wl8)   echo "$(config_flags safe_compound) -DVW_COMPOUND_DEPTH=8 -DVW_COMPOUND_SET=workload" ;;
     #                         aggr aggr_sel pos16 crc32 huge2mb
     default)             flags OFF  OFF      OFF   OFF   OFF ;;
     add_group_aggr)      flags ON   OFF      OFF   OFF   OFF ;;
@@ -621,7 +639,7 @@ CONFIGS=$kept
   echo "BENCH: $BENCH ($RUNNER)  ENGINE: $ENGINE  THREADS: $THREADS  VECTOR_SIZE: $VECTOR_SIZE  SF: $SF ($DATA_PATH)  PIN: $PIN"
   echo "SIMDhash: ${SIMDhash:-}  SIMDjoin: ${SIMDjoin:-}  SIMDsel: ${SIMDsel:-}  SIMDproj: ${SIMDproj:-}  PERF_GROUP: ${PERF_GROUP:-none}  label suffix: ${RUN_SUFFIX:-none}"
   echo "VW_FLAGS: ${VW_FLAGS:-none}${VW_FLAGS_HASH:+ (x$VW_FLAGS_HASH)}  TESTS: $TESTS  PERF: ${PERF:-none}"
-  echo "DD_W: ${DD_W:-none}  DD_SHAPE: $DD_SHAPE"
+  echo "DD_W: ${DD_W:-none}  DD_SHAPE: $DD_SHAPE  DD_GROUP: $DD_GROUP"
 } | tee "$OUT/machine.txt"
 [ -n "$VW_FLAGS" ] && echo "x$VW_FLAGS_HASH $VW_FLAGS" > "$OUT/vw_flags.txt"
 [ "$MACHINE" = custom ] && log "WARNING: host $(hostname -s) is not a TARGET_MACHINE preset; building with MACHINE=custom (-march=native, default topology). Set MACHINE= to override."

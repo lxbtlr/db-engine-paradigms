@@ -10,6 +10,7 @@
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/QueryBuilder.hpp"
 #include "vectorwise/VectorAllocator.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -58,10 +59,10 @@ static void escape(void* p) { asm volatile("" : : "g"(p) : "memory"); }
 // accumulator sink that is escaped but entirely separate from the real Q1
 // aggregates, so Q1's reported answer is unchanged at every W.
 // ---------------------------------------------------------------------------
-template <int W, dd::Shape S>
+template <int W, dd::Shape S, int D>
 NOVECTORIZE std::unique_ptr<runtime::Query> q1_dd_hyper_impl(
     runtime::Database& db, size_t nrThreads) {
-   using Kernel = typename dd::Kernel<W, S>::type;
+   using Kernel = typename dd::Kernel<W, S, D>::type;
    using namespace types;
    using namespace std;
    types::Date c1 = types::Date::castString("1998-09-02");
@@ -172,35 +173,35 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q1_dd_hyper_impl(
    return move(resources.query);
 }
 
-template <dd::Shape S>
+template <dd::Shape S, int D>
 std::unique_ptr<runtime::Query> dispatchW(runtime::Database& db,
                                           size_t nrThreads, int W) {
    switch (W) {
-      case 2: return q1_dd_hyper_impl<2, S>(db, nrThreads);
-      case 4: return q1_dd_hyper_impl<4, S>(db, nrThreads);
-      case 6: return q1_dd_hyper_impl<6, S>(db, nrThreads);
-      case 8: return q1_dd_hyper_impl<8, S>(db, nrThreads);
-      case 10: return q1_dd_hyper_impl<10, S>(db, nrThreads);
-      case 12: return q1_dd_hyper_impl<12, S>(db, nrThreads);
-      case 14: return q1_dd_hyper_impl<14, S>(db, nrThreads);
-      case 16: return q1_dd_hyper_impl<16, S>(db, nrThreads);
-      case 18: return q1_dd_hyper_impl<18, S>(db, nrThreads);
-      case 20: return q1_dd_hyper_impl<20, S>(db, nrThreads);
-      case 22: return q1_dd_hyper_impl<22, S>(db, nrThreads);
-      case 24: return q1_dd_hyper_impl<24, S>(db, nrThreads);
-      case 26: return q1_dd_hyper_impl<26, S>(db, nrThreads);
-      case 28: return q1_dd_hyper_impl<28, S>(db, nrThreads);
-      case 30: return q1_dd_hyper_impl<30, S>(db, nrThreads);
-      case 32: return q1_dd_hyper_impl<32, S>(db, nrThreads);
-      case 34: return q1_dd_hyper_impl<34, S>(db, nrThreads);
-      case 36: return q1_dd_hyper_impl<36, S>(db, nrThreads);
-      case 38: return q1_dd_hyper_impl<38, S>(db, nrThreads);
-      case 40: return q1_dd_hyper_impl<40, S>(db, nrThreads);
-      case 42: return q1_dd_hyper_impl<42, S>(db, nrThreads);
-      case 44: return q1_dd_hyper_impl<44, S>(db, nrThreads);
-      case 46: return q1_dd_hyper_impl<46, S>(db, nrThreads);
-      case 48: return q1_dd_hyper_impl<48, S>(db, nrThreads);
-      case 64: return q1_dd_hyper_impl<64, S>(db, nrThreads);
+      case 2: return q1_dd_hyper_impl<2, S, D>(db, nrThreads);
+      case 4: return q1_dd_hyper_impl<4, S, D>(db, nrThreads);
+      case 6: return q1_dd_hyper_impl<6, S, D>(db, nrThreads);
+      case 8: return q1_dd_hyper_impl<8, S, D>(db, nrThreads);
+      case 10: return q1_dd_hyper_impl<10, S, D>(db, nrThreads);
+      case 12: return q1_dd_hyper_impl<12, S, D>(db, nrThreads);
+      case 14: return q1_dd_hyper_impl<14, S, D>(db, nrThreads);
+      case 16: return q1_dd_hyper_impl<16, S, D>(db, nrThreads);
+      case 18: return q1_dd_hyper_impl<18, S, D>(db, nrThreads);
+      case 20: return q1_dd_hyper_impl<20, S, D>(db, nrThreads);
+      case 22: return q1_dd_hyper_impl<22, S, D>(db, nrThreads);
+      case 24: return q1_dd_hyper_impl<24, S, D>(db, nrThreads);
+      case 26: return q1_dd_hyper_impl<26, S, D>(db, nrThreads);
+      case 28: return q1_dd_hyper_impl<28, S, D>(db, nrThreads);
+      case 30: return q1_dd_hyper_impl<30, S, D>(db, nrThreads);
+      case 32: return q1_dd_hyper_impl<32, S, D>(db, nrThreads);
+      case 34: return q1_dd_hyper_impl<34, S, D>(db, nrThreads);
+      case 36: return q1_dd_hyper_impl<36, S, D>(db, nrThreads);
+      case 38: return q1_dd_hyper_impl<38, S, D>(db, nrThreads);
+      case 40: return q1_dd_hyper_impl<40, S, D>(db, nrThreads);
+      case 42: return q1_dd_hyper_impl<42, S, D>(db, nrThreads);
+      case 44: return q1_dd_hyper_impl<44, S, D>(db, nrThreads);
+      case 46: return q1_dd_hyper_impl<46, S, D>(db, nrThreads);
+      case 48: return q1_dd_hyper_impl<48, S, D>(db, nrThreads);
+      case 64: return q1_dd_hyper_impl<64, S, D>(db, nrThreads);
       default:
          std::cerr << "q1_dd_hyper: unsupported W=" << W
                    << " (must be one of DD_WIDTHS)\n";
@@ -210,16 +211,17 @@ std::unique_ptr<runtime::Query> dispatchW(runtime::Database& db,
 
 std::unique_ptr<runtime::Query> q1_dd_hyper(runtime::Database& db,
                                             size_t nrThreads, int W,
-                                            dd::Shape shape) {
-   switch (shape) {
-      case dd::Shape::Chained:
-         return dispatchW<dd::Shape::Chained>(db, nrThreads, W);
-      case dd::Shape::Independent:
-         return dispatchW<dd::Shape::Independent>(db, nrThreads, W);
-      default:
-         std::cerr << "q1_dd_hyper: unsupported kernel shape\n";
-         exit(1);
-   }
+                                            dd::Shape shape, int D) {
+   if (shape == dd::Shape::Independent && D == 1)
+      return dispatchW<dd::Shape::Independent, 1>(db, nrThreads, W);
+   if (shape == dd::Shape::Chained) switch (D) {
+         case 1: return dispatchW<dd::Shape::Chained, 1>(db, nrThreads, W);
+         case 2: return dispatchW<dd::Shape::Chained, 2>(db, nrThreads, W);
+         case 4: return dispatchW<dd::Shape::Chained, 4>(db, nrThreads, W);
+      }
+   std::cerr << "q1_dd_hyper: unsupported kernel shape or D=" << D
+             << " (D is 1, 2 or 4, and 1 for the independent shape)\n";
+   exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +236,7 @@ std::unique_ptr<runtime::Query> q1_dd_hyper(runtime::Database& db,
 /// One stderr line per process: how many of the dd projection's ops run as
 /// compound primitives (VW_PROJ_COMPOUND) and how many of those keep their
 /// Scratch intermediate in a register, next to base Q1's own expressions.
-static void reportDdCoverage(const vectorwise::Project& proj, int W,
+static void reportDdCoverage(const vectorwise::Project& proj, int W, int D,
                              dd::Shape shape) {
    static std::once_flag once;
    std::call_once(once, [&] {
@@ -261,14 +263,15 @@ static void reportDdCoverage(const vectorwise::Project& proj, int W,
          }
       }
       fprintf(stderr,
-              "[dd] W=%d shape=%s dd ops=%zu compound=%zu mid-in-register=%zu | "
+              "[dd] W=%d D=%d shape=%s dd ops=%zu compound=%zu mid-in-register=%zu | "
               "base Q1 ops=%zu compound=%zu mid-in-register=%zu\n",
-              W, shape == dd::Shape::Chained ? "chained" : "independent",
+              W, D, shape == dd::Shape::Chained ? "chained" : "independent",
               ops[1], compound[1], elided[1], ops[0], compound[0], elided[0]);
    });
 }
 
-std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
+std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape,
+                                                     int D) {
    using namespace vectorwise;
    if (W < 1 || W > DD_WIDTHS_MAX) {
       std::cerr << "q1_dd_vectorwise: unsupported W=" << W
@@ -279,6 +282,13 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
       std::cerr << "q1_dd_vectorwise: unsupported kernel shape\n";
       exit(1);
    }
+   if (D < 1 || D > 8 || (D > 1 && shape != dd::Shape::Chained)) {
+      std::cerr << "q1_dd_vectorwise: unsupported D=" << D
+                << " (1..8, and 1 for the independent shape)\n";
+      exit(1);
+   }
+   // stored dd values: one per step, or (chained) one per group of D steps
+   const int groups = (W + D - 1) / D;
 
    auto result = Result();
    previous = result.resultWriter.shared.result->participate();
@@ -337,35 +347,46 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
                         Column(lineitem, "l_extendedprice")));
       }
    } else {
-      // Chained DAG (unchanged from Test 1): buf[0] = ep*C0;
-      // buf[k] = buf[k-1] * Ck + extendedprice (reads the previous buffer).
-      // buf[0] = extendedprice * C0                       (col * val)
-      proj.addExpression(
-          Expression()
-              .addOp(primitives::proj_sel_multiplies_int64_t_col_int64_t_val,
-                     Buffer(sel_date), Buffer(dd_buf_base + 0, sizeof(int64_t)),
-                     Column(lineitem, "l_extendedprice"), Value(&r->ddC[0])));
-      for (int k = 1; k < W; ++k) {
-         proj.addExpression(
-             Expression()
-                 .addOp(primitives::proj_multiplies_int64_t_col_int64_t_val,
-                        Scratch(dd_scratch, sizeof(int64_t)),
-                        Buffer(dd_buf_base + k - 1, sizeof(int64_t)),
-                        Value(&r->ddC[k]))
-                 .addOp(primitives::proj_plus_int64_t_col_sel_int64_t_col,
-                        Buffer(sel_date),
-                        Buffer(dd_buf_base + k, sizeof(int64_t)),
-                        Scratch(dd_scratch, sizeof(int64_t)),
-                        Column(lineitem, "l_extendedprice")));
+      // Chained DAG: v0 = extendedprice * C0 (col * val);
+      // vk = v(k-1) * Ck + extendedprice. The steps go in groups of D, one
+      // expression per group: buf[g] = the group's last value, the values
+      // inside a group are Scratch (one per position, kept in registers when
+      // the group fuses). D = 1: one expression per step, buf[k] = vk.
+      for (int g = 0; g < groups; ++g) {
+         auto e = Expression();
+         const int first = g * D, end = std::min(W, first + D);
+         DS prev;
+         for (int k = first; k < end; ++k) {
+            const int j = k - first;
+            DS out = k == end - 1
+                         ? Buffer(dd_buf_base + g, sizeof(int64_t))
+                         : Scratch(dd_group_val + j, sizeof(int64_t));
+            if (k == 0) {
+               e.addOp(primitives::proj_sel_multiplies_int64_t_col_int64_t_val,
+                       Buffer(sel_date), out,
+                       Column(lineitem, "l_extendedprice"), Value(&r->ddC[0]));
+            } else {
+               DS mul = j == 0 ? Scratch(dd_scratch, sizeof(int64_t))
+                               : Scratch(dd_group_mul + j - 1, sizeof(int64_t));
+               e.addOp(primitives::proj_multiplies_int64_t_col_int64_t_val, mul,
+                       j == 0 ? Buffer(dd_buf_base + g - 1) : prev,
+                       Value(&r->ddC[k]))
+                   .addOp(primitives::proj_plus_int64_t_col_sel_int64_t_col,
+                          Buffer(sel_date), out, mul,
+                          Column(lineitem, "l_extendedprice"));
+            }
+            prev = out;
+         }
+         proj.addExpression(e);
       }
    }
-   // --- final: sink = sum of all W intermediates ---
+   // --- final: sink = sum of the stored values (all W, or one per group) ---
    proj.addExpression(
        Expression()
            .addOp(primitives::proj_plus_int64_t_col_int64_t_val,
                   Buffer(dd_sink, sizeof(int64_t)),
                   Buffer(dd_buf_base + 0, sizeof(int64_t)), Value(&r->ddZero)));
-   for (int k = 1; k < W; ++k) {
+   for (int k = 1; k < groups; ++k) {
       proj.addExpression(
           Expression()
               .addOp(primitives::proj_plus_int64_t_col_int64_t_col,
@@ -373,7 +394,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
                      Buffer(dd_sink, sizeof(int64_t)),
                      Buffer(dd_buf_base + k, sizeof(int64_t))));
    }
-   reportDdCoverage(proj.project, W, shape);
+   reportDdCoverage(proj.project, W, D, shape);
 
    HashGroup()
        .pushKeySelVec(Buffer(sel_date), Buffer(sel_date_grouped, sizeof(pos_t)))
@@ -454,7 +475,7 @@ std::unique_ptr<Q1Builder::Q1> Q1Builder::getQueryDd(int W, dd::Shape shape) {
 std::unique_ptr<runtime::Query> q1_dd_vectorwise(runtime::Database& db,
                                                  size_t nrThreads,
                                                  size_t vectorSize, int W,
-                                                 dd::Shape shape) {
+                                                 dd::Shape shape, int D) {
    using namespace vectorwise;
    WorkerGroup workers(nrThreads);
    vectorwise::SharedStateManager shared;
@@ -462,7 +483,7 @@ std::unique_ptr<runtime::Query> q1_dd_vectorwise(runtime::Database& db,
    std::unique_ptr<runtime::Query> result;
    workers.run([&]() {
       Q1Builder builder(db, shared, vectorSize);
-      auto query = builder.getQueryDd(W, shape);
+      auto query = builder.getQueryDd(W, shape, D);
       query->rootOp->next();
       auto leader = barrier();
       if (leader)

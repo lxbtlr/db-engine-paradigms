@@ -102,17 +102,19 @@ int main(int argc, char* argv[]) {
     int settleSeconds = 10;
     int w = 0;                    // data-dependency width (Test 1); 0 = disabled
     std::string kernelShape = "chained";  // dd kernel shape (Test 1b)
+    int ddGroup = 1;              // dd group size D (chained): steps per expression
     std::string selectedQuery = "";  // e.g., "1" or "1,3,6"
     std::string selectedEngine = ""; // e.g., "h" or "v"
 
     int opt;
 #ifdef CANARY_IN_BENCH
-    const char* optstring = "q:e:r:p:t:v:s:w:k:cC";
+    const char* optstring = "q:e:r:p:t:v:s:w:k:g:cC";
 #else
-    const char* optstring = "q:e:r:p:t:v:s:w:k:";
+    const char* optstring = "q:e:r:p:t:v:s:w:k:g:";
 #endif
     // q: query, e: engine, r: reps, p: path, t: threads, v: vectorSize, s: settle,
-    // w: data-dependency width (Test 1), k: dd kernel shape (chained|independent)
+    // w: data-dependency width (Test 1), k: dd kernel shape (chained|independent),
+    // g: dd group size D (chained only; only group-final values are stored)
     while ((opt = getopt(argc, argv, optstring)) != -1) {
         switch (opt) {
             case 'q': selectedQuery = optarg; break;
@@ -124,15 +126,16 @@ int main(int argc, char* argv[]) {
             case 's': settleSeconds = atoi(optarg); break;
             case 'w': w = atoi(optarg); break;
             case 'k': kernelShape = optarg; break;
+            case 'g': ddGroup = atoi(optarg); break;
 #ifdef CANARY_IN_BENCH
             case 'c': canary::g_enabled = true; break;
             case 'C': canaryOnly = true; break;
 #endif
             default:
 #ifdef CANARY_IN_BENCH
-                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-w W] [-k chained|independent] [-c canary] [-C canary-only]\n";
+                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-w W] [-k chained|independent] [-g D] [-c canary] [-C canary-only]\n";
 #else
-                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-w W] [-k chained|independent]\n";
+                std::cerr << "Usage: " << argv[0] << " -p <path> [-q query] [-e engine] [-r reps] [-t threads] [-v vSize] [-s settleSeconds] [-w W] [-k chained|independent] [-g D]\n";
 #endif
                 exit(1);
         }
@@ -152,6 +155,13 @@ int main(int argc, char* argv[]) {
                   << "' (must be 'chained' or 'independent').\n";
         exit(1);
     }
+    if (ddGroup < 1 || (ddGroup > 1 && shape != dd::Shape::Chained)) {
+        std::cerr << "Error: dd group size " << ddGroup
+                  << " (must be >= 1, and 1 for the independent shape).\n";
+        exit(1);
+    }
+    // the label names D only when it is not 1, so D = 1 labels are unchanged
+    const std::string groupTag = ddGroup > 1 ? " D" + std::to_string(ddGroup) : "";
 
     // Parse comma-separated thread counts (e.g. "1,4,12,44" or just "44")
     std::vector<size_t> threadCounts;
@@ -279,13 +289,13 @@ int main(int argc, char* argv[]) {
    }
    if (q.count("1v") && w > 0) {
       char wlabel[64];
-      snprintf(wlabel, sizeof(wlabel), "q1dd v %s W%d V%d ", shapeTag.c_str(),
-               w, (int)vectorSize);
+      snprintf(wlabel, sizeof(wlabel), "q1dd v %s W%d%s V%d ", shapeTag.c_str(),
+               w, groupTag.c_str(), (int)vectorSize);
       e.timeAndProfile(label(wlabel, nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           auto result =
-                              q1_dd_vectorwise(tpch, nrThreads, vectorSize, w, shape);
+                              q1_dd_vectorwise(tpch, nrThreads, vectorSize, w, shape, ddGroup);
                           escape(&result);
                        },
                        repetitions);
@@ -363,13 +373,13 @@ int main(int argc, char* argv[]) {
    }
    if (q.count("1h") && w > 0) {
       char wlabel[64];
-      snprintf(wlabel, sizeof(wlabel), "q1dd h %s W%d V%d ", shapeTag.c_str(),
-               w, (int)vectorSize);
+      snprintf(wlabel, sizeof(wlabel), "q1dd h %s W%d%s V%d ", shapeTag.c_str(),
+               w, groupTag.c_str(), (int)vectorSize);
       e.timeAndProfile(label(wlabel, nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
-                             auto result = q1_dd_hyper(tpch, nrThreads, w, shape);
+                             auto result = q1_dd_hyper(tpch, nrThreads, w, shape, ddGroup);
                              escape(&result);
                           });
                        },
