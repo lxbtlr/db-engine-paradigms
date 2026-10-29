@@ -372,9 +372,15 @@ class Hashjoin : public BinaryOperator {
    void (Hashjoin::*probeStep)(size_t n) = nullptr;
    void resolvePaths();
    void stepHash(size_t n);
+#ifdef VW_JOIN_BLOOM
    void stepHashBloom(size_t n);
+#endif
+#if defined(VW_JOIN_BLOOM) && defined(VW_JOIN_FUSED_PROBE)
    void stepFusedBloom(size_t n);
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
    void stepFusedNew(size_t n);
+#endif
 
  public:
 #endif

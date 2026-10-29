@@ -1618,27 +1618,52 @@ pos_t Hashjoin::joinBoncz() {
 // The filter stays on for the whole operator: no data-dependent switch.
 // semiActive (VW_JOIN_SEMI_BITMAP: the bitmap path) and semiHash (the
 // existence probe) are decided by the build, as without dispatch.
+// The filter and the fused probe are opt-in (VW_JOIN_BLOOM,
+// VW_JOIN_FUSED_PROBE): Typer's plans have neither, so dispatch alone
+// (the fair ladder) always takes stepHash.
 void Hashjoin::resolvePaths() {
+#ifdef VW_JOIN_BLOOM
    bloomOn = false;
-   fusedCompute = false;
    const bool bloom = shared.bloom != nullptr;
+   const bool keysSelected = buildKeysSelected;
+#else
+   const bool bloom = false, keysSelected = false;
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
    // fused hashing only where it hashes 8 keys in registers (kFusedWide)
    const bool fused = kFusedWide && fusedReady();
+#else
+   const bool fused = false;
+#endif
 #ifdef VW_NEW_JOIN
    const bool newJoin = join == &Hashjoin::joinAllNew || join == &Hashjoin::joinSelNew;
 #else
    const bool newJoin = false;
 #endif
+   // lowest priority first; a later match overrides
+   probeStep = &Hashjoin::stepHash;
+   const char* stepName = "hash";
+#ifdef VW_JOIN_BLOOM
+   if (bloom) {
+      probeStep = &Hashjoin::stepHashBloom;
+      stepName = "hash+bloom";
+   }
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
+   if (fused && newJoin && !semiHash) { // joinSemi reads probeHashes
+      probeStep = &Hashjoin::stepFusedNew;
+      stepName = "fused+newjoin";
+   }
+#endif
+#if defined(VW_JOIN_BLOOM) && defined(VW_JOIN_FUSED_PROBE)
    if (fused && bloom) {
       probeStep = &Hashjoin::stepFusedBloom;
-   } else if (fused && newJoin && !semiHash) { // joinSemi reads probeHashes
-      probeStep = &Hashjoin::stepFusedNew;
-      fusedCompute = true;
-   } else if (bloom) {
-      probeStep = &Hashjoin::stepHashBloom;
-   } else {
-      probeStep = &Hashjoin::stepHash;
+      stepName = "fused+bloom";
    }
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
+   fusedCompute = probeStep == &Hashjoin::stepFusedNew;
+#endif
    // VW_DISPATCH_TRACE=1: one line per join (worker 0) with what was chosen
    static const bool trace = std::getenv("VW_DISPATCH_TRACE") != nullptr;
    if (trace && runtime::this_worker->worker_id == 0)
@@ -1648,25 +1673,27 @@ void Hashjoin::resolvePaths() {
                    static_cast<void*>(this), size_t(shared.found.load()),
                    size_t(shared.ht.mask + 1) * sizeof(void*) / 1024,
                    runtime::cacheBytes(1) / 1024,
-                   int(buildKeysSelected), int(semiJoin), int(semiHash),
+                   int(keysSelected), int(semiJoin), int(semiHash),
 #ifdef VW_JOIN_SEMI_BITMAP
                    int(semiActive),
 #else
                    0,
 #endif
-                   int(bloom), int(fused), int(newJoin),
-                   probeStep == &Hashjoin::stepFusedBloom  ? "fused+bloom"
-                   : probeStep == &Hashjoin::stepFusedNew  ? "fused+newjoin"
-                   : probeStep == &Hashjoin::stepHashBloom ? "hash+bloom"
-                                                           : "hash");
+                   int(bloom), int(fused), int(newJoin), stepName);
 }
 void Hashjoin::stepHash(size_t n) { probeHash.evaluate(n); }
+#ifdef VW_JOIN_BLOOM
 void Hashjoin::stepHashBloom(size_t n) {
    probeHash.evaluate(n);
    bloomFilter(n);
 }
+#endif
+#if defined(VW_JOIN_BLOOM) && defined(VW_JOIN_FUSED_PROBE)
 void Hashjoin::stepFusedBloom(size_t n) { fusedHashFilter(n); }
+#endif
+#ifdef VW_JOIN_FUSED_PROBE
 void Hashjoin::stepFusedNew(size_t) {}
+#endif
 #endif
 
 size_t Hashjoin::next() {

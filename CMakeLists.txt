@@ -511,9 +511,13 @@ endif()
 # end of the build, from plan facts (semi marker, key count and types, build
 # keys read through a selection, single int32 probe key) and the build
 # summary (row count, key range), then runs one member-function pointer per
-# probe vector instead of today's per-vector checks. It compiles in and
-# chooses between the paths VW_JOIN_SEMI, VW_JOIN_BLOOM and
-# VW_JOIN_FUSED_PROBE add separately (see study/JOIN_DISPATCH_STUDY.md):
+# probe vector instead of today's per-vector checks. It compiles in
+# VW_JOIN_SEMI and chooses between the paths VW_JOIN_SEMI, VW_JOIN_BLOOM and
+# VW_JOIN_FUSED_PROBE add (see study/JOIN_DISPATCH_STUDY.md). The filter and
+# the fused probe are opt-in: Typer's plans have no such structure, so they
+# are outside the like-for-like (fair) ladder. Without them dispatch always
+# takes the plain hash probe; old configs pass -DVW_JOIN_BLOOM=ON
+# -DVW_JOIN_FUSED_PROBE=ON to keep what dispatch used to imply:
 #   semi         derived semi join, one int32 key per side: the existence
 #                probe on the hash path (VW_JOIN_SEMI), after the filter if
 #                one is chosen; with VW_JOIN_SEMI_BITMAP the bitmap instead
@@ -523,18 +527,15 @@ endif()
 #                keys are read through a selection (a filtered build side);
 #                fixed for the operator (no per-vector adaptive switch)
 #   fused hash   one int32 probe key, with the filter or VW_NEW_JOIN
-OPTION(VW_JOIN_DISPATCH "Plan-resolved probe path per VectorWise Hashjoin (compiles in VW_JOIN_SEMI, VW_JOIN_BLOOM, VW_JOIN_FUSED_PROBE)" OFF)
+OPTION(VW_JOIN_DISPATCH "Plan-resolved probe path per VectorWise Hashjoin (compiles in VW_JOIN_SEMI; VW_JOIN_BLOOM and VW_JOIN_FUSED_PROBE opt-in)" OFF)
 if(VW_JOIN_DISPATCH)
   if(HASH_SIZE_32)
     message(FATAL_ERROR "VW_JOIN_DISPATCH needs 64-bit hashes (HASH_SIZE_32 is ON)")
   endif()
   if(VW_JOIN_TWOPHASE OR VW_JOIN_SIMD OR VW_JOIN_PREFETCH)
-    message(FATAL_ERROR "VW_JOIN_DISPATCH compiles in VW_JOIN_BLOOM; disable VW_JOIN_TWOPHASE, VW_JOIN_SIMD and VW_JOIN_PREFETCH")
+    message(FATAL_ERROR "VW_JOIN_DISPATCH supports the default join and VW_NEW_JOIN; disable VW_JOIN_TWOPHASE, VW_JOIN_SIMD and VW_JOIN_PREFETCH")
   endif()
-  ADD_DEFINITIONS(-DVW_JOIN_DISPATCH=1 -DVW_JOIN_SEMI=1 -DVW_JOIN_BLOOM=1
-                  -DVW_JOIN_BLOOM_BITS=${VW_JOIN_BLOOM_BITS}
-                  -DVW_JOIN_BLOOM_MIN_KEYS=${VW_JOIN_BLOOM_MIN_KEYS}
-                  -DVW_JOIN_FUSED_PROBE=1)
+  ADD_DEFINITIONS(-DVW_JOIN_DISPATCH=1 -DVW_JOIN_SEMI=1)
   message(STATUS "Building with VW_JOIN_DISPATCH")
 endif()
 # VW_JOIN_SEMI_BITMAP (above): its own block, so the dispatch block's
