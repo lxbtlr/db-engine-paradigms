@@ -2168,7 +2168,7 @@ bool HashGroup::updateGroupsDirect(pos_t n) {
    EntryHeader* const* touched = idTouched.data();
    // sized for the most groups the kernels are instantiated for (8), not
    // kMaxGroups, which a test build may lower
-   int64_t acc[8], cnt[8];
+   int64_t cnt[8];
    auto addTo = [&](const int64_t* v, size_t off) {
       for (uint32_t g = 0; g < t; ++g)
          *reinterpret_cast<int64_t*>(reinterpret_cast<char*>(touched[g]) +
@@ -2177,6 +2177,38 @@ bool HashGroup::updateGroupsDirect(pos_t n) {
    // COUNT(*) comes from the first dense column's compares (no extra pass)
    bool counted = directCount.empty();
    std::fill(cnt, cnt + t, 0);
+#ifdef VW_AGGR_KINDS
+   // VW_AGGR_KINDS: the aggregates of one index space in one pass per block
+   // of at most kMultiMax columns: the group masks are computed once per
+   // block of rows and applied to every column (dense columns over the
+   // selected rows with lid; columns read through the selection over the
+   // row positions with gidr)
+   int64_t accs[ad::kMultiMax * 8];
+   auto multi = [&](const std::vector<size_t>& aggs, const uint16_t* ids,
+                    size_t rows, bool dense) {
+      const int64_t* cols[ad::kMultiMax];
+      for (size_t first = 0; first < aggs.size(); first += ad::kMultiMax) {
+         const unsigned k =
+             unsigned(std::min<size_t>(ad::kMultiMax, aggs.size() - first));
+         for (unsigned j = 0; j < k; ++j) {
+            auto& fa = simpleAggrs[aggs[first + j]];
+            cols[j] = dense ? static_cast<const int64_t*>(
+                                  static_cast<FAggrOp*>(fa.op)->get<1>())
+                            : static_cast<const int64_t*>(
+                                  static_cast<FAggrSelOp*>(fa.op)->get<2>());
+         }
+         std::fill(accs, accs + ad::kMultiMax * 8, 0);
+         const bool count = dense && !counted;
+         ad::sumMultiN(t, k, count, ids, rows, cols, accs, cnt);
+         counted |= count;
+         for (unsigned j = 0; j < k; ++j)
+            addTo(accs + j * 8, simpleAggrs[aggs[first + j]].offset);
+      }
+   };
+   multi(directDense, lid, n, true);
+   multi(directSel, gidr, positions, false);
+#else
+   int64_t acc[8];
    for (size_t d : directDense) {
       auto& fa = simpleAggrs[d];
       auto* col =
@@ -2198,6 +2230,7 @@ bool HashGroup::updateGroupsDirect(pos_t n) {
                acc);
       addTo(acc, fa.offset);
    }
+#endif
    if (!counted) ad::countN(t, lid, n, cnt); // no dense column
    for (size_t c : directCount) addTo(cnt, simpleAggrs[c].offset);
    return true;
@@ -2244,8 +2277,8 @@ void aggrFusedBlock(pos_t n, runtime::Hashmap::EntryHeader** RES entries,
    }
 }
 
-#ifdef VW_AGGR_FUSED_KINDS
-// VW_AGGR_FUSED_KINDS: aggrFusedBlock reads every aggregate as col[sel[i]],
+#ifdef VW_AGGR_KINDS
+// VW_AGGR_KINDS: aggrFusedBlock reads every aggregate as col[sel[i]],
 // so a dense column costs an extra load through the identity selection,
 // COUNT(*) loads a column of ones, and aggregates sharing one selection
 // vector each load sel[i] (Q1's 5 aggregates: 16 loads per row). Here the
@@ -2435,7 +2468,7 @@ bool HashGroup::updateGroupsBucket(pos_t n) {
 }
 #endif
 
-#ifdef VW_AGGR_FUSED_KINDS
+#ifdef VW_AGGR_KINDS
 bool HashGroup::updateGroupsKinds(pos_t n) {
    if (!kindsResolved) {
       // the kinds and the selection Buffers are fixed by the plan: choose
@@ -2492,7 +2525,7 @@ void HashGroup::updateGroupsFused(pos_t n) {
 #ifdef VW_AGGR_FUSED_BUCKET
    if (updateGroupsBucket(n)) return;
 #endif
-#ifdef VW_AGGR_FUSED_KINDS
+#ifdef VW_AGGR_KINDS
    if (updateGroupsKinds(n)) return;
 #endif
    if (identitySel.size() < n) {

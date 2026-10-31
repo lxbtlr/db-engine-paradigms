@@ -1127,7 +1127,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    if (aggr == primitives::aggr_sel_plus_int64_t_col) {
       op.simpleAggrs.push_back(
           {HashGroup::SimpleAggr::SelCol, aggr_op.get(), entryOffset});
-#ifdef VW_AGGR_FUSED_KINDS
+#ifdef VW_AGGR_KINDS
       // the selection vector's identity, fixed by the plan (a Buffer's
       // address is set at build time; only Column pointers move per morsel)
       op.simpleAggrs.back().sel =

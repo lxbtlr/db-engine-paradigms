@@ -41,3 +41,39 @@ TEST(AggrDirect, SumAndCountMatchReference) {
          }
       }
 }
+
+TEST(AggrDirect, SumMultiMatchesReference) {
+   std::mt19937_64 rng(7);
+   for (unsigned groups = 1; groups <= 8; ++groups)
+      for (unsigned columns = 1; columns <= 4; ++columns)
+         for (bool count : {false, true})
+            for (size_t n : {0, 1, 3, 4, 7, 8, 9, 17, 1023, 1024}) {
+               std::vector<uint16_t> ids(n);
+               std::vector<std::vector<int64_t>> col(columns, std::vector<int64_t>(n));
+               for (size_t r = 0; r < n; ++r) {
+                  ids[r] = rng() % 8 == 0 ? kNone : uint16_t(rng() % groups);
+                  for (auto& c : col) c[r] = int64_t(rng() % 2000001) - 1000000;
+               }
+               const int64_t* cols[4];
+               for (unsigned k = 0; k < columns; ++k) cols[k] = col[k].data();
+               // the kernel adds into acc ([column][8 groups]) and cnt
+               std::vector<int64_t> acc(4 * 8, 11), cnt(8, 13);
+               sumMultiN(groups, columns, count, ids.data(), n, cols, acc.data(),
+                         cnt.data());
+               for (unsigned g = 0; g < groups; ++g) {
+                  int64_t refCnt = 0;
+                  for (size_t r = 0; r < n; ++r) refCnt += ids[r] == g;
+                  EXPECT_EQ(cnt[g], count ? refCnt + 13 : 13)
+                      << kIsa << " groups=" << groups << " columns=" << columns
+                      << " n=" << n;
+                  for (unsigned k = 0; k < columns; ++k) {
+                     int64_t ref = 0;
+                     for (size_t r = 0; r < n; ++r)
+                        if (ids[r] == g) ref += col[k][r];
+                     EXPECT_EQ(acc[k * 8 + g], ref + 11)
+                         << kIsa << " groups=" << groups << " columns=" << columns
+                         << " n=" << n << " g=" << g << " k=" << k;
+                  }
+               }
+            }
+}

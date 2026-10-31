@@ -520,7 +520,7 @@ class HashGroup : public UnaryOperator {
       enum Kind : uint8_t { Col, SelCol, Count } kind;
       Op* op;
       size_t offset;
-#ifdef VW_AGGR_FUSED_KINDS
+#ifdef VW_AGGR_KINDS
       /// SelCol: the selection Buffer, recorded at build time (nullptr: not a
       /// Buffer, so not known to be shared)
       const void* sel = nullptr;
@@ -539,8 +539,8 @@ class HashGroup : public UnaryOperator {
    std::vector<pos_t> identitySel;
    std::vector<int64_t> ones;
    void updateGroupsFused(pos_t n);
-#ifdef VW_AGGR_FUSED_KINDS
-   /// VW_AGGR_FUSED_KINDS: simpleAggrs split by kind once (dense columns,
+#ifdef VW_AGGR_KINDS
+   /// VW_AGGR_KINDS: simpleAggrs split by kind once (dense columns,
    /// columns read through a selection vector, COUNT(*)), so the fused pass
    /// reads dense columns directly, loads a shared selection once per row
    /// and counts with += 1. The kernel is chosen once from the plan; false

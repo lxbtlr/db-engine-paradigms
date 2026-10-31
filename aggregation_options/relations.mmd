@@ -10,6 +10,9 @@ flowchart LR
     end
     AB["VW_AGGR_FUSED_BUCKET<br/>phase 1 aggregate update:<br/>sort rows by group<br/>+ cache: _MAX_GROUPS (256)"]
     INT["interpreted passes<br/>(always compiled)"]
+    AK["VW_AGGR_KINDS<br/>by aggregate kind:<br/>fused per-row kernel, or<br/>direct one pass per index space"]
+    AK ==>|"requires one of (build)"| AF
+    AK ==>|"requires one of (build)"| AD
 
     AB ==>|"requires (build)"| AF
     AD -.->|"run-time fallback:<br/>first one compiled in"| AB
@@ -19,4 +22,4 @@ flowchart LR
     classDef free fill:#f1f5f9,stroke:#334155,color:#111
     classDef upd fill:#fef3c7,stroke:#b45309,color:#111
     class DI,BC,GD,HV,INT free
-    class AF,AB,AD upd
+    class AF,AB,AD,AK upd

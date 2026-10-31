@@ -15,7 +15,9 @@
 //===----------------------------------------------------------------------===//
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <cstring>
+#include <utility>
 
 #if defined(VW_AGGR_DIRECT_ISA_SCALAR)
 #define VW_AGGR_DIRECT_SCALAR 1
@@ -207,6 +209,118 @@ inline void countN(unsigned groups, const uint16_t* ids, size_t n,
    case 7: count<7>(ids, n, cnt); break;
    default: count<8>(ids, n, cnt); break;
    }
+}
+
+//--- VW_AGGR_KINDS: several aggregates of one index space in one pass -------
+// The group masks of a block of rows are computed once and applied to the K
+// columns that share the ids (all dense columns over the selected rows, or
+// all columns read through the selection over the row positions), with
+// G x K register accumulators; with Count also the rows per group. Columns
+// are processed in blocks of at most kMultiMax, so the accumulators stay in
+// registers (AVX-512: 32 vector registers and separate mask registers;
+// AVX2: 16 vector registers that also hold the masks; scalar: 16 integer
+// registers).
+#if defined(VW_AGGR_DIRECT_AVX512)
+constexpr unsigned kMultiMax = 4;
+#else
+constexpr unsigned kMultiMax = 2;
+#endif
+
+/// acc[k * 8 + g] += sum of cols[k][r] over rows r < n with ids[r] == g,
+/// for k < K; with Count also cnt[g] += number of those rows
+template <unsigned G, unsigned K, bool Count>
+inline void sumMultiImpl(const uint16_t* __restrict__ ids, size_t n,
+                         const int64_t* const* cols, int64_t* __restrict__ acc,
+                         int64_t* __restrict__ cnt) {
+   static_assert(G >= 1 && G <= 8 && K >= 1 && K <= 4, "few groups, few columns");
+   const int64_t* __restrict__ c[K];
+   for (unsigned k = 0; k < K; ++k) c[k] = cols[k];
+   int64_t cn[G] = {};
+   size_t r = 0;
+#if defined(VW_AGGR_DIRECT_AVX512)
+   __m512i a[K][G];
+   for (unsigned k = 0; k < K; ++k)
+      for (unsigned g = 0; g < G; ++g) a[k][g] = _mm512_setzero_si512();
+   for (; r + 8 <= n; r += 8) {
+      const __m512i id = _mm512_cvtepu16_epi64(
+          _mm_loadu_si128(reinterpret_cast<const __m128i*>(ids + r)));
+      __mmask8 m[G];
+      for (unsigned g = 0; g < G; ++g) {
+         m[g] = _mm512_cmpeq_epi64_mask(id, _mm512_set1_epi64(g));
+         if constexpr (Count) cn[g] += __builtin_popcount(m[g]);
+      }
+      for (unsigned k = 0; k < K; ++k) {
+         const __m512i v = _mm512_loadu_si512(c[k] + r);
+         for (unsigned g = 0; g < G; ++g)
+            a[k][g] = _mm512_mask_add_epi64(a[k][g], m[g], a[k][g], v);
+      }
+   }
+   for (unsigned k = 0; k < K; ++k)
+      for (unsigned g = 0; g < G; ++g)
+         acc[k * 8 + g] += _mm512_reduce_add_epi64(a[k][g]);
+#elif defined(VW_AGGR_DIRECT_AVX2)
+   __m256i a[K][G];
+   for (unsigned k = 0; k < K; ++k)
+      for (unsigned g = 0; g < G; ++g) a[k][g] = _mm256_setzero_si256();
+   for (; r + 4 <= n; r += 4) {
+      const __m256i id = _mm256_cvtepu16_epi64(
+          _mm_loadl_epi64(reinterpret_cast<const __m128i*>(ids + r)));
+      __m256i m[G];
+      for (unsigned g = 0; g < G; ++g) {
+         m[g] = _mm256_cmpeq_epi64(id, _mm256_set1_epi64x(g));
+         if constexpr (Count)
+            cn[g] += __builtin_popcount(
+                _mm256_movemask_pd(_mm256_castsi256_pd(m[g])));
+      }
+      for (unsigned k = 0; k < K; ++k) {
+         const __m256i v =
+             _mm256_loadu_si256(reinterpret_cast<const __m256i*>(c[k] + r));
+         for (unsigned g = 0; g < G; ++g)
+            a[k][g] = _mm256_add_epi64(a[k][g], _mm256_and_si256(m[g], v));
+      }
+   }
+   for (unsigned k = 0; k < K; ++k)
+      for (unsigned g = 0; g < G; ++g) {
+         alignas(32) int64_t l[4];
+         _mm256_store_si256(reinterpret_cast<__m256i*>(l), a[k][g]);
+         acc[k * 8 + g] += l[0] + l[1] + l[2] + l[3];
+      }
+#endif
+   // scalar rows (all of them for the scalar ISA, else the tail): one
+   // compare per group, its 0/-1 mask applied to every column
+   int64_t s[K][G] = {};
+   for (; r < n; ++r) {
+      const uint16_t id = ids[r];
+      for (unsigned g = 0; g < G; ++g) {
+         const int64_t mask = -int64_t(id == g);
+         if constexpr (Count) cn[g] -= mask;
+         for (unsigned k = 0; k < K; ++k) s[k][g] += c[k][r] & mask;
+      }
+   }
+   for (unsigned k = 0; k < K; ++k)
+      for (unsigned g = 0; g < G; ++g) acc[k * 8 + g] += s[k][g];
+   if constexpr (Count)
+      for (unsigned g = 0; g < G; ++g) cnt[g] += cn[g];
+}
+
+using SumMultiFn = void (*)(const uint16_t*, size_t, const int64_t* const*,
+                            int64_t*, int64_t*);
+// index ((G - 1) * 4 + (K - 1)) * 2 + Count
+template <size_t... I>
+constexpr std::array<SumMultiFn, sizeof...(I)>
+sumMultiTable(std::index_sequence<I...>) {
+   return {&sumMultiImpl<I / 2 / 4 + 1, I / 2 % 4 + 1, I % 2 == 1>...};
+}
+inline constexpr auto sumMultiFns =
+    sumMultiTable(std::make_index_sequence<8 * 4 * 2>());
+
+/// sumMultiImpl dispatched on run-time groups (1..8) and columns (1..4);
+/// acc is laid out [column][8 groups]; cnt may be null without count
+inline void sumMultiN(unsigned groups, unsigned columns, bool count,
+                      const uint16_t* ids, size_t n, const int64_t* const* cols,
+                      int64_t* acc, int64_t* cnt) {
+   sumMultiFns[((groups - 1) * 4 + (columns - 1)) * 2 + (count ? 1 : 0)](
+       ids, n, cols, acc, cnt);
 }
 
 } // namespace aggr_direct

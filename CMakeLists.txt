@@ -163,10 +163,12 @@ endif()
 #   VW_AGGR_FUSED_BUCKET    phase 1: aggregate update (needs VW_AGGR_FUSED)
 #   VW_AGGR_DIRECT          phase 1: aggregate update, few groups (falls back
 #                           to bucket, else fused, else interpreted)
+#   VW_AGGR_KINDS           phase 1: aggregate update by kind, in the fused
+#                           and direct paths (needs one of them)
 #   VW_GROUP_GLOBAL_DIRECT  phase 2: global find-or-create
 #   VW_GROUP_DISPATCH       phase 1: plan-resolved key loop (implies nothing)
 # The code of earlier options (VW_GROUP_AGGR, _SEL, VW_FUSE_HASH,
-# VW_GROUP_NO_CONCAT, VW_GROUP_RUN_HEADS, VW_AGGR_FUSED_KINDS) is still in the
+# VW_GROUP_NO_CONCAT, VW_GROUP_RUN_HEADS) is still in the
 # sources but has no CMake option; VW_SPILL_WORD_COPY was removed.
 
 # VW_GROUP_BATCH_CREATE: HashGroup pre-aggregation creates a vector's new
@@ -257,6 +259,24 @@ if(VW_AGGR_DIRECT)
     message(FATAL_ERROR "VW_AGGR_DIRECT_ISA must be auto, avx512, avx2 or scalar (got '${VW_AGGR_DIRECT_ISA}')")
   endif()
   message(STATUS "Building with VW_AGGR_DIRECT (ISA ${VW_AGGR_DIRECT_ISA})")
+endif()
+
+# VW_AGGR_KINDS: the aggregate update specialized by aggregate kind (dense
+# column, column read through a selection, COUNT(*)), decided once from the
+# plan, in whichever update paths are compiled in:
+#   VW_AGGR_FUSED  the per-row fused pass (aggrKindsBlock): dense columns
+#                  read directly, a shared selection loaded once per row,
+#                  COUNT(*) as += 1; other shapes keep the generic kernel
+#   VW_AGGR_DIRECT the aggregates of one index space summed in one pass: the
+#                  group masks of a block of rows computed once and applied to
+#                  every column (blocks of 4 columns with AVX-512, 2 else)
+OPTION(VW_AGGR_KINDS "Aggregate update specialized by kind in VectorWise HashGroup (fused and direct paths)" OFF)
+if(VW_AGGR_KINDS)
+  if(NOT VW_AGGR_FUSED AND NOT VW_AGGR_DIRECT)
+    message(FATAL_ERROR "VW_AGGR_KINDS specializes the fused or direct aggregate update; enable VW_AGGR_FUSED or VW_AGGR_DIRECT")
+  endif()
+  ADD_DEFINITIONS(-DVW_AGGR_KINDS=1)
+  message(STATUS "Building with VW_AGGR_KINDS")
 endif()
 
 # VW_PROJ_COMPOUND: compound projection primitives (X100-style). Inside one

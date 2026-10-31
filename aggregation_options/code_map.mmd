@@ -14,6 +14,8 @@ flowchart TB
             U0["default: one interpreted<br/>pass per aggregate"] -.- AF["VW_AGGR_FUSED<br/>per-row pass,<br/>all aggregates"]:::upd
             AF -.- AB["VW_AGGR_FUSED_BUCKET<br/>pass 1 ids, sort rows by group,<br/>per-group register sums"]:::upd
             U0 -.- AD["VW_AGGR_DIRECT<br/>pass 1 ids, one SIMD pass per<br/>aggregate, register per group<br/>(falls back to bucket / fused /<br/>interpreted)"]:::upd
+            AF -.- AK["VW_AGGR_KINDS<br/>by kind: fused per-row kernel;<br/>direct: one pass per index space"]:::upd
+            AD -.- AK
         end
         subgraph S4["4. Flush at maxFill (1433 entries)"]
             F0["memcpy each entry<br/>to its partition (no option)"]

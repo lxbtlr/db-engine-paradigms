@@ -24,6 +24,7 @@ Render: `.claude/skills/writeup/wenv mmdc -i <f>.mmd -o <f>.png -s 2`.
 | `VW_AGGR_FUSED` | 1 / aggregate update | one per-row pass updates all aggregates of the row's entry | — |
 | `VW_AGGR_FUSED_BUCKET` | 1 / aggregate update | ids per touched group, rows counting-sorted by group, per-group register sums | `VW_AGGR_FUSED` |
 | `VW_AGGR_FUSED_BUCKET_MAX_GROUPS` (cache, 256) | — | groups per vector above which bucketing switches off for good | (bucket) |
+| `VW_AGGR_KINDS` | 1 / aggregate update | by aggregate kind, decided once from the plan: in the fused path the per-row kinds kernel (dense columns read directly, the shared selection loaded once per row, COUNT as +1); in the direct path one pass per index space for all its aggregates (masks computed once per block of rows, blocks of 4 columns with AVX-512, 2 otherwise) | `VW_AGGR_FUSED` or `VW_AGGR_DIRECT` |
 | `VW_GROUP_GLOBAL_DIRECT` | 2 / find or create | one-pass find-or-create on a tagged directory | — |
 | `VW_GROUP_HAVING` | 2 / output | HAVING evaluated before the output gather | — |
 
@@ -41,8 +42,10 @@ without the others. `VW_GROUP_DISPATCH` turns on nothing else; its key loop
 batches creation only under `VW_GROUP_BATCH_CREATE`, and its aggregate step
 uses whichever update options are compiled in.
 
-The only build dependency left is `VW_AGGR_FUSED_BUCKET` → `VW_AGGR_FUSED`:
-the bucket path is a branch at the top of `updateGroupsFused`.
+Two build dependencies are left: `VW_AGGR_FUSED_BUCKET` → `VW_AGGR_FUSED`
+(the bucket path is a branch at the top of `updateGroupsFused`), and
+`VW_AGGR_KINDS` → `VW_AGGR_FUSED` or `VW_AGGR_DIRECT` (it specializes
+whichever of the two is compiled in; with both, both).
 
 `VW_AGGR_DIRECT` sits beside `VW_AGGR_FUSED`. Both read the operator's
 aggregate list, which `QueryBuilder::addValue` records whenever either is
@@ -123,6 +126,10 @@ Q18 66.20 / 65.78 / 65.90 ms in three builds with the minimum at 1, against
 | `grp_direct_only` | dispatch + batch + global + direct, no fused (falls back to interpreted) |
 | `grp_direct_bucket` | `grp_bucket` + direct (falls back to bucket) |
 | `direct_pc` | `grp_direct` + `VW_PROJ_COMPOUND` |
+| `grp_kinds` | `grp_dispatch` + kinds (the per-row kinds kernel) |
+| `proj_compound` | `grp_kinds` + `VW_PROJ_COMPOUND` (same options as before the branch, minus the word-copy spill) |
+| `grp_direct_kinds` | `grp_direct` + kinds (direct by index space; falls back to the kinds kernel) |
+| `direct_kinds_pc` | `grp_direct_kinds` + `VW_PROJ_COMPOUND` |
 
 Force the direct kernels' ISA with `VW_FLAGS="VW_AGGR_DIRECT_ISA=avx2"`.
 
@@ -130,36 +137,46 @@ Force the direct kernels' ISA with `VW_FLAGS="VW_AGGR_DIRECT_ISA=avx2"`.
 
 gcc 16, Ryzen 7 7840U (Zen 4) laptop, locally generated SF1, 1 thread on core
 4, 5 interleaved rounds of 25 repetitions with Hyper in the same rounds
-(2026-10-31). Run-to-run noise between runs was up to ~1.8 ms.
+(2026-10-31). Run-to-run noise between runs was up to ~1.8 ms; the table
+below is from one run.
 
-| Build | Q1 (ms) | vs Hyper (32.7) |
+| Build | Q1 (ms) | vs Hyper (32.5) |
 |---|---|---|
-| `proj_compound` at `16fbc54` (previous best: dispatch + `FUSED_KINDS` + compound) | 30.7 | 0.94 |
-| `grp_dispatch` (per-row fused) | 36.8 | 1.12 |
-| `grp_direct` | 33.9 | 1.04 |
-| `grp_direct_only` | 33.0 | 1.01 |
-| `direct_pc` | 31.9 | 0.97 |
-| `grp_bucket` (earlier run) | 41.9 | 1.28 |
-| direct with AVX2 / scalar kernels (earlier run, direct then under bucket) | 35.9 / 55.8 | 1.10 / 1.71 |
+| `proj_compound` at `16fbc54` (previous best) | 30.3 | 0.93 |
+| `proj_compound` (kinds + compound) | 30.7 | 0.95 |
+| `grp_kinds` | 32.4 | 1.00 |
+| `grp_direct` | 33.5 | 1.03 |
+| `grp_direct_kinds` | 31.4 | 0.97 |
+| `direct_pc` | 31.4 | 0.97 |
+| `direct_kinds_pc` | **29.5** | **0.91** |
+| `grp_direct_kinds`, AVX2 kernels | 33.1 | 1.02 |
 
-These Q1 runs had the minimum at 1, which does not change Q1 (5 aggregates).
-The scalar direct kernels are for correctness on machines without AVX2 /
-AVX-512; there the option should stay off. All other queries were within
-noise of `grp_dispatch` with the minimum at 2.
+Earlier runs: `grp_dispatch` 36.8, `grp_bucket` 41.9, direct with the AVX2 /
+scalar kernels (per aggregate) 35.9 / 55.8 ms. The scalar direct kernels are
+for correctness on machines without AVX2 / AVX-512; there the option should
+stay off.
+
+On the cluster (2026-10-31, before VW_AGGR_KINDS): the per-aggregate direct
+path beat the per-row fused pass on manchego, dubliner and roquefort but not
+the kinds kernel; on dubliner its AVX-512 kernels lowered the clock for all of
+Q1 (2.45 against 2.75 GHz). Runs `2026-10-31-aggr-{base,hyper,direct,pc}`.
 
 ## Tested
 
 All builds pass the TPC-H result tests (`TPCH.*`: Q1, Q3, Q5, Q6, Q9, Q18 at
-SF1) and the kernel test `AggrDirect.*` (every group count 1..8, lengths on
-and off a SIMD block, rows of no group, `sum`, `count`, `sumCount`), with no
+SF1) and the kernel tests `AggrDirect.*` (every group count 1..8, lengths on
+and off a SIMD block, rows of no group, `sum`, `count`, `sumCount`, and the
+multi-column kernel for 1..4 columns with and without counting), with no
 new compiler warnings: `grp_dispatch`, `grp_bucket`, `grp_direct` (minimum
 1 and 2), `grp_direct_only`, `grp_direct_bucket`, `direct_pc`, direct with
-the avx2 and scalar kernels, and `VW_AGGR_DIRECT` alone without dispatch.
-Forced fallbacks (`-DVW_AGGR_DIRECT_MAX_GROUPS=2`) to each next step: direct
-→ interpreted (no fused; with and without dispatch), direct → fused, direct
-→ bucket, and direct → bucket → fused (bucket max 3); `grp_bucket` with
-bucket max 2 for bucket → fused. `perf record` confirmed each build runs
-the path the decision diagram predicts.
+the avx2 and scalar kernels, `VW_AGGR_DIRECT` alone without dispatch,
+`grp_kinds`, `proj_compound`, `grp_direct_kinds` (each ISA),
+`direct_kinds_pc`, and direct + kinds without fused. Forced fallbacks
+(`-DVW_AGGR_DIRECT_MAX_GROUPS=2`) to each next step: direct → interpreted
+(no fused; with and without dispatch), direct → fused, direct → bucket,
+direct → bucket → fused (bucket max 3), direct + kinds → the per-row kinds
+kernel; `grp_bucket` with bucket max 2 for bucket → fused. `perf record`
+confirmed each build runs the path the decision diagram predicts.
 
 ## Removed on this branch
 
@@ -169,7 +186,8 @@ path's pass 1 inside the dispatch key loop and made Q1 slower (44.1 ms
 against 40.1 for `grp_bucket`, same laptop setup), from register spills
 and the id loads waiting on the chain walk. `VW_AGGR_FUSED_DIRECT` was
 renamed `VW_AGGR_DIRECT` when it stopped depending on the fused and bucket
-options. `VW_GROUP_RUN_HEADS`, `VW_AGGR_FUSED_KINDS`, `VW_FUSE_HASH`,
+options. `VW_AGGR_FUSED_KINDS` came back as `VW_AGGR_KINDS`, which also
+specializes the direct path. `VW_GROUP_RUN_HEADS`, `VW_FUSE_HASH`,
 `VW_GROUP_NO_CONCAT`, `VW_GROUP_AGGR` and `VW_GROUP_AGGR_SEL` lost their
 CMake options; their code is still in the sources under its `#ifdef` but is
 unreachable through CMake.

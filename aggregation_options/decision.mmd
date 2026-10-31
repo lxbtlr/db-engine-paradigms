@@ -14,7 +14,7 @@ flowchart TB
     VS -- "no (this vector only)" --> BF
     VS -- yes --> P1D["pass 1: ids per touched group<br/>(+ id per row position)"] --> VT
     VT{"VECTOR: groups touched t <= 8?"}
-    VT -- yes --> DIRECT["direct kernels:<br/>one SIMD pass per aggregate,<br/>register per group, COUNT from masks"]
+    VT -- yes --> DIRECT["direct kernels: register per group,<br/>COUNT from masks; one SIMD pass per<br/>aggregate, or with VW_AGGR_KINDS one<br/>per index space for all its aggregates"]
     VT -- "no" --> OFFD["direct OFF for good"] --> BF
 
     BF{"BUILD: VW_AGGR_FUSED?"}
@@ -24,7 +24,7 @@ flowchart TB
     OF -- no --> INT
     OF -- yes --> BB
     BB{"BUILD: VW_AGGR_FUSED_BUCKET?"}
-    BB -- off --> FUSED["per-row fused pass"]
+    BB -- off --> FUSED["per-row fused pass<br/>(kinds kernel with VW_AGGR_KINDS<br/>if the shape fits)"]
     BB -- on --> OB
     OB{"PLAN, once:<br/><= 4 dense and <= 4 selected?"}
     OB -- no --> FUSED
