@@ -1,0 +1,22 @@
+flowchart LR
+    subgraph IND["Independent: each builds alone, with any other"]
+        direction TB
+        DI["VW_GROUP_DISPATCH<br/>phase 1 key loop"]
+        BC["VW_GROUP_BATCH_CREATE<br/>phase 1 group creation"]
+        GD["VW_GROUP_GLOBAL_DIRECT<br/>phase 2 find-or-create"]
+        HV["VW_GROUP_HAVING<br/>output filter"]
+        AF["VW_AGGR_FUSED<br/>phase 1 aggregate update:<br/>per-row pass, all aggregates"]
+        AD["VW_AGGR_DIRECT<br/>phase 1 aggregate update:<br/>register per group, <= 8 groups<br/>+ cache: _ISA (auto|avx512|avx2|scalar)"]
+    end
+    AB["VW_AGGR_FUSED_BUCKET<br/>phase 1 aggregate update:<br/>sort rows by group<br/>+ cache: _MAX_GROUPS (256)"]
+    INT["interpreted passes<br/>(always compiled)"]
+
+    AB ==>|"requires (build)"| AF
+    AD -.->|"run-time fallback:<br/>first one compiled in"| AB
+    AB -.->|fallback| AF
+    AF -.->|"fallback (not applicable)"| INT
+
+    classDef free fill:#f1f5f9,stroke:#334155,color:#111
+    classDef upd fill:#fef3c7,stroke:#b45309,color:#111
+    class DI,BC,GD,HV,INT free
+    class AF,AB,AD upd

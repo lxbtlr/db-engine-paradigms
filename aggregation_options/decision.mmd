@@ -1,0 +1,48 @@
+flowchart TB
+    START(["each vector: matches[i] = row's entry<br/>(from the key step)"]) --> BD
+
+    BD{"BUILD: VW_AGGR_DIRECT?"}
+    BD -- off --> BF
+    BD -- on --> OD
+    OD{"PLAN, once per operator:<br/>>= 2 aggregates, all int64<br/>SUM / COUNT(*)?"}
+    OD -- no --> BF
+    OD -- yes --> SD
+    SD{"STICKY: direct still on?"}
+    SD -- off --> BF
+    SD -- on --> VS
+    VS{"VECTOR: selected columns share<br/>one selection, and its span fits?"}
+    VS -- "no (this vector only)" --> BF
+    VS -- yes --> P1D["pass 1: ids per touched group<br/>(+ id per row position)"] --> VT
+    VT{"VECTOR: groups touched t <= 8?"}
+    VT -- yes --> DIRECT["direct kernels:<br/>one SIMD pass per aggregate,<br/>register per group, COUNT from masks"]
+    VT -- "no" --> OFFD["direct OFF for good"] --> BF
+
+    BF{"BUILD: VW_AGGR_FUSED?"}
+    BF -- off --> INT["interpreted passes<br/>(one per aggregate)"]
+    BF -- on --> OF
+    OF{"PLAN, once:<br/>>= 2 aggregates, all int64<br/>SUM / COUNT(*)?"}
+    OF -- no --> INT
+    OF -- yes --> BB
+    BB{"BUILD: VW_AGGR_FUSED_BUCKET?"}
+    BB -- off --> FUSED["per-row fused pass"]
+    BB -- on --> OB
+    OB{"PLAN, once:<br/><= 4 dense and <= 4 selected?"}
+    OB -- no --> FUSED
+    OB -- yes --> SB
+    SB{"STICKY: bucket still on?"}
+    SB -- off --> FUSED
+    SB -- on --> P1B["pass 1: ids per touched group<br/>+ row counts"] --> VB
+    VB{"VECTOR: groups touched t <= 256?"}
+    VB -- yes --> BUCKET["bucket: sort rows by group,<br/>per-group register sums"]
+    VB -- "no" --> OFFB["bucket OFF for good"] --> FUSED
+
+    classDef build fill:#dbeafe,stroke:#1d4ed8,color:#111
+    classDef plan fill:#dcfce7,stroke:#15803d,color:#111
+    classDef vec fill:#fef3c7,stroke:#b45309,color:#111
+    classDef sticky fill:#fee2e2,stroke:#b91c1c,color:#111
+    classDef path fill:#f1f5f9,stroke:#334155,color:#111
+    class BD,BF,BB build
+    class OD,OF,OB plan
+    class VS,VT,VB vec
+    class SD,SB,OFFD,OFFB sticky
+    class INT,FUSED,BUCKET,DIRECT,P1D,P1B path

@@ -10,6 +10,9 @@
 #ifdef VW_JOIN_BLOOM
 #include "vectorwise/BloomKernels.hpp"
 #endif
+#ifdef VW_AGGR_DIRECT
+#include "vectorwise/AggrDirect.hpp"
+#endif
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -1919,11 +1922,7 @@ size_t HashGroup::next() {
             for (auto entry = reinterpret_cast<header_t*>(alloc.first),
                       end = addBytes(entry, alloc.second * entry_size);
                  entry < end; entry = addBytes(entry, entry_size))
-#ifdef VW_SPILL_WORD_COPY
-               spill.push_back_words(&entry->hash, entry->hash);
-#else
                spill.push_back(&entry->hash, entry->hash);
-#endif
          }
          preAggregation.allocations.clear();
          preAggregation.clearHashtable(ht);
@@ -1977,12 +1976,11 @@ size_t HashGroup::next() {
 #endif
          Lookup(n);
 
-#ifdef VW_AGGR_FUSED
-         if (fusable && fusedAggrs.size() > 1)
-            updateGroupsFused(n);
-         else
-#endif
+#ifdef VW_AGGR_LIST
+         aggUpdate(n);
+#else
          updateGroups.evaluate(n);
+#endif
          if (preAggregation.entries_in_ht >= maxFill) flushAndClear();
       }
       flushAndClear();
@@ -2071,6 +2069,156 @@ size_t HashGroup::next() {
    return EndOfStream;
 }
 
+#ifdef VW_AGGR_GROUP_IDS
+void HashGroup::sizeGroupIds(uint32_t maxGroups) {
+   if (idTouched.size() < maxGroups) idTouched.resize(maxGroups);
+   if (idLid.size() < vecSize) idLid.resize(vecSize);
+}
+
+template <bool Count, bool Gid>
+bool HashGroup::assignGroupIds(pos_t n, uint32_t maxGroups, uint32_t& t,
+                               uint32_t* RES cnt, const pos_t* RES gsel,
+                               uint16_t* RES gidr) {
+#ifdef VW_AGGR_FUSED_BUCKET
+   constexpr uint32_t kSub = kBucketSub;
+#else
+   constexpr uint32_t kSub = 1;
+#endif
+   EntryHeader** RES entries = preAggregation.htMatches;
+   EntryHeader** RES touched = idTouched.data();
+   uint16_t* RES lid = idLid.data();
+   const size_t off = groupIdOffset;
+   t = 0;
+   for (pos_t i = 0; i < n; ++i) {
+      EntryHeader* e = entries[i];
+      auto* slot = reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(e) + off);
+      uint32_t l = *slot;
+      if (l >= t || touched[l] != e) {
+         if (t == maxGroups) return false;
+         l = t++;
+         touched[l] = e;
+         *slot = l;
+         if constexpr (Count)
+            for (uint32_t s = 0; s < kSub; ++s) cnt[l * kSub + s] = 0;
+      }
+      lid[i] = uint16_t(l);
+      if constexpr (Count) ++cnt[l * kSub + (i & (kSub - 1))];
+      if constexpr (Gid) gidr[gsel[i]] = uint16_t(l);
+   }
+   return true;
+}
+#endif
+
+#ifdef VW_AGGR_DIRECT
+void HashGroup::resolveDirect() {
+   // which aggregates qualify is fixed by the plan: decided once
+   directResolved = true;
+   if (!aggrsSimple || simpleAggrs.size() < kDirectMinAggrs ||
+       groupIdOffset == 0)
+      return;
+   for (size_t d = 0; d < simpleAggrs.size(); ++d)
+      switch (simpleAggrs[d].kind) {
+      case SimpleAggr::Col: directDense.push_back(d); break;
+      case SimpleAggr::SelCol: directSel.push_back(d); break;
+      case SimpleAggr::Count: directCount.push_back(d); break;
+      }
+   directOn = true;
+   sizeGroupIds(primitives::aggr_direct::kMaxGroups);
+   directGidR.resize(vecSize);
+}
+
+bool HashGroup::updateGroupsDirect(pos_t n) {
+   namespace ad = primitives::aggr_direct;
+   if (!directResolved) resolveDirect();
+   if (!directOn) return false;
+   // columns read through a selection: col[sel[i]] is summed as col[r] over
+   // the row positions r, each carrying its row's group id (kNone where the
+   // selection dropped the row; pass 1 writes the ids), so the column is
+   // read in order, with no gather. All such columns must share one
+   // selection (else this vector is left to the fallback); it is ascending,
+   // so its last entry bounds the positions.
+   const pos_t* sel = nullptr;
+   size_t positions = 0;
+   if (!directSel.empty()) {
+      sel = static_cast<FAggrSelOp*>(simpleAggrs[directSel[0]].op)->get<1>();
+      for (size_t d = 1; d < directSel.size(); ++d)
+         if (static_cast<FAggrSelOp*>(simpleAggrs[directSel[d]].op)->get<1>() != sel)
+            return false;
+      if (n) {
+         positions = size_t(sel[n - 1]) + 1;
+         if (positions > directGidR.size()) return false;
+         std::fill(directGidR.data(), directGidR.data() + positions, ad::kNone);
+      }
+   }
+   // pass 1: a local id per touched group (+ id per row position)
+   uint32_t t = 0;
+   const bool ok =
+       sel ? assignGroupIds<false, true>(n, ad::kMaxGroups, t, nullptr, sel,
+                                         directGidR.data())
+           : assignGroupIds<false, false>(n, ad::kMaxGroups, t, nullptr,
+                                          nullptr, nullptr);
+   if (!ok) {
+      // sticky: too many groups per vector; aggUpdate's fallback runs this
+      // vector and every later one
+      directOn = false;
+      return false;
+   }
+   const uint16_t* lid = idLid.data();
+   const uint16_t* gidr = directGidR.data();
+   EntryHeader* const* touched = idTouched.data();
+   // sized for the most groups the kernels are instantiated for (8), not
+   // kMaxGroups, which a test build may lower
+   int64_t acc[8], cnt[8];
+   auto addTo = [&](const int64_t* v, size_t off) {
+      for (uint32_t g = 0; g < t; ++g)
+         *reinterpret_cast<int64_t*>(reinterpret_cast<char*>(touched[g]) +
+                                     off) += v[g];
+   };
+   // COUNT(*) comes from the first dense column's compares (no extra pass)
+   bool counted = directCount.empty();
+   std::fill(cnt, cnt + t, 0);
+   for (size_t d : directDense) {
+      auto& fa = simpleAggrs[d];
+      auto* col =
+          static_cast<const int64_t*>(static_cast<FAggrOp*>(fa.op)->get<1>());
+      std::fill(acc, acc + t, 0);
+      if (!counted) {
+         ad::sumCountN(t, lid, n, col, acc, cnt);
+         counted = true;
+      } else {
+         ad::sumN(t, lid, n, col, acc);
+      }
+      addTo(acc, fa.offset);
+   }
+   for (size_t d : directSel) {
+      auto& fa = simpleAggrs[d];
+      std::fill(acc, acc + t, 0);
+      ad::sumN(t, gidr, positions,
+               static_cast<const int64_t*>(static_cast<FAggrSelOp*>(fa.op)->get<2>()),
+               acc);
+      addTo(acc, fa.offset);
+   }
+   if (!counted) ad::countN(t, lid, n, cnt); // no dense column
+   for (size_t c : directCount) addTo(cnt, simpleAggrs[c].offset);
+   return true;
+}
+#endif
+
+#ifdef VW_AGGR_LIST
+void HashGroup::aggUpdate(pos_t n) {
+#ifdef VW_AGGR_DIRECT
+   if (updateGroupsDirect(n)) return;
+#endif
+#ifdef VW_AGGR_FUSED
+   if (aggrsSimple && simpleAggrs.size() > 1) {
+      updateGroupsFused(n);
+      return;
+   }
+#endif
+   updateGroups.evaluate(n);
+}
+#endif
+
 #ifdef VW_AGGR_FUSED
 // Today every aggregate is its own pass over the vector, a read-modify-write
 // through entries[i] per row. With few groups (TPC-H Q1: 4) consecutive rows
@@ -2142,7 +2290,150 @@ aggrKindsTable(std::index_sequence<I...>) {
 constexpr auto aggrKindsFns = aggrKindsTable(
     std::make_index_sequence<(kKindsMax + 1) * (kKindsMax + 1) * 2>());
 #endif
+
+#ifdef VW_AGGR_FUSED_BUCKET
+// VW_AGGR_FUSED_BUCKET: the rows of each touched group are consecutive in
+// rows[begin[g] .. begin[g] + size[g]); KD dense columns read as col[r], KS
+// columns read through their selection as col[sel[r]], each group's sums
+// held in registers and stored once. COUNT(*) is added per group by the
+// caller (+= size[g]).
+constexpr size_t kBucketMax = 4; // per kind; larger shapes keep the fused pass
+template <size_t KD, size_t KS>
+void aggrBucketBlock(uint32_t groups,
+                     runtime::Hashmap::EntryHeader* const* RES touched,
+                     const uint32_t* RES begin, const uint32_t* RES size,
+                     const pos_t* RES rows, const int64_t* const* dcols,
+                     const size_t* doffs, const pos_t* const* ssels,
+                     const int64_t* const* scols, const size_t* soffs) {
+   const int64_t* dc[KD + 1];
+   size_t od[KD + 1];
+   const pos_t* ss[KS + 1];
+   const int64_t* sc[KS + 1];
+   size_t os[KS + 1];
+   for (size_t d = 0; d < KD; ++d) dc[d] = dcols[d], od[d] = doffs[d];
+   for (size_t d = 0; d < KS; ++d)
+      ss[d] = ssels[d], sc[d] = scols[d], os[d] = soffs[d];
+   for (uint32_t g = 0; g < groups; ++g) {
+      char* e = reinterpret_cast<char*>(touched[g]);
+      int64_t a[KD + 1], b[KS + 1];
+      for (size_t d = 0; d < KD; ++d)
+         a[d] = *reinterpret_cast<int64_t*>(e + od[d]);
+      for (size_t d = 0; d < KS; ++d)
+         b[d] = *reinterpret_cast<int64_t*>(e + os[d]);
+      for (uint32_t k = begin[g], end = k + size[g]; k < end; ++k) {
+         const pos_t r = rows[k];
+         for (size_t d = 0; d < KD; ++d) a[d] += dc[d][r];
+         for (size_t d = 0; d < KS; ++d) b[d] += sc[d][ss[d][r]];
+      }
+      for (size_t d = 0; d < KD; ++d)
+         *reinterpret_cast<int64_t*>(e + od[d]) = a[d];
+      for (size_t d = 0; d < KS; ++d)
+         *reinterpret_cast<int64_t*>(e + os[d]) = b[d];
+   }
+}
+using AggrBucketFn = void (*)(uint32_t, runtime::Hashmap::EntryHeader* const*,
+                              const uint32_t*, const uint32_t*, const pos_t*,
+                              const int64_t* const*, const size_t*,
+                              const pos_t* const*, const int64_t* const*,
+                              const size_t*);
+// index KD * (kBucketMax + 1) + KS
+template <size_t... I>
+constexpr std::array<AggrBucketFn, sizeof...(I)>
+aggrBucketTable(std::index_sequence<I...>) {
+   return {&aggrBucketBlock<I / (kBucketMax + 1), I % (kBucketMax + 1)>...};
+}
+constexpr auto aggrBucketFns = aggrBucketTable(
+    std::make_index_sequence<(kBucketMax + 1) * (kBucketMax + 1)>());
+#endif
 } // namespace
+
+#ifdef VW_AGGR_FUSED_BUCKET
+void HashGroup::resolveBucket() {
+   // the aggregate kinds are fixed by the plan: decided once
+   bucketResolved = true;
+   if (!aggrsSimple || simpleAggrs.size() < 2) return;
+   for (size_t d = 0; d < simpleAggrs.size(); ++d)
+      switch (simpleAggrs[d].kind) {
+      case SimpleAggr::Col: bucketDense.push_back(d); break;
+      case SimpleAggr::SelCol: bucketSel.push_back(d); break;
+      case SimpleAggr::Count: bucketCount.push_back(d); break;
+      }
+   bucketOn = groupIdOffset != 0 && bucketDense.size() <= kBucketMax &&
+              bucketSel.size() <= kBucketMax;
+   if (bucketOn) {
+      sizeGroupIds(kBucketMaxGroups);
+      bucketCnt.resize(size_t(kBucketMaxGroups) * kBucketSub);
+      bucketStart.resize(size_t(kBucketMaxGroups) * kBucketSub);
+      bucketSize.resize(kBucketMaxGroups);
+      bucketBegin.resize(kBucketMaxGroups);
+      bucketRows.resize(vecSize);
+   }
+}
+
+bool HashGroup::updateGroupsBucket(pos_t n) {
+   constexpr uint32_t kSub = kBucketSub;
+   if (!bucketResolved) resolveBucket();
+   if (!bucketOn) return false;
+
+   EntryHeader** RES touched = idTouched.data();
+   uint16_t* RES lid = idLid.data();
+   uint32_t* RES cnt = bucketCnt.data();
+   uint32_t* RES start = bucketStart.data();
+   uint32_t* RES size = bucketSize.data();
+   uint32_t* RES begin = bucketBegin.data();
+   pos_t* RES rows = bucketRows.data();
+
+   // pass 1: a local id per touched group, rows counted per sub-counter
+   uint32_t t = 0;
+   if (!assignGroupIds<true, false>(n, kBucketMaxGroups, t, cnt, nullptr,
+                                    nullptr)) {
+      // sticky: too many groups per vector for bucketing to pay; the
+      // fused pass runs this vector and every later one
+      bucketOn = false;
+      return false;
+   }
+   // pass 2: bucket starts, per group and sub-counter
+   uint32_t pos = 0;
+   for (uint32_t g = 0; g < t; ++g) {
+      begin[g] = pos;
+      for (uint32_t s = 0; s < kSub; ++s) {
+         start[g * kSub + s] = pos;
+         pos += cnt[g * kSub + s];
+      }
+      size[g] = pos - begin[g];
+   }
+   // pass 3: counting sort of the rows by group
+   for (pos_t i = 0; i < n; ++i)
+      rows[start[lid[i] * kSub + (i & (kSub - 1))]++] = i;
+   // pass 4: per group, all aggregates in registers
+   const int64_t* dcols[kBucketMax];
+   size_t doffs[kBucketMax];
+   const pos_t* ssels[kBucketMax];
+   const int64_t* scols[kBucketMax];
+   size_t soffs[kBucketMax];
+   for (size_t d = 0; d < bucketDense.size(); ++d) {
+      auto& fa = simpleAggrs[bucketDense[d]];
+      dcols[d] = static_cast<const int64_t*>(static_cast<FAggrOp*>(fa.op)->get<1>());
+      doffs[d] = fa.offset;
+   }
+   for (size_t d = 0; d < bucketSel.size(); ++d) {
+      auto& fa = simpleAggrs[bucketSel[d]];
+      ssels[d] = static_cast<FAggrSelOp*>(fa.op)->get<1>();
+      scols[d] = static_cast<const int64_t*>(
+          static_cast<FAggrSelOp*>(fa.op)->get<2>());
+      soffs[d] = fa.offset;
+   }
+   aggrBucketFns[bucketDense.size() * (kBucketMax + 1) + bucketSel.size()](
+       t, touched, begin, size, rows, dcols, doffs, ssels, scols, soffs);
+   for (size_t c : bucketCount) {
+      const size_t off = simpleAggrs[c].offset;
+      for (uint32_t g = 0; g < t; ++g)
+         *reinterpret_cast<int64_t*>(reinterpret_cast<char*>(touched[g]) + off) +=
+             int64_t(size[g]);
+   }
+   return true;
+}
+#endif
 
 #ifdef VW_AGGR_FUSED_KINDS
 bool HashGroup::updateGroupsKinds(pos_t n) {
@@ -2152,23 +2443,23 @@ bool HashGroup::updateGroupsKinds(pos_t n) {
       kindsResolved = true;
       size_t counts = 0;
       bool oneSel = true;
-      for (size_t d = 0; d < fusedAggrs.size(); ++d)
-         switch (fusedAggrs[d].kind) {
-         case FusedAggr::Col: kindsDense.push_back(d); break;
-         case FusedAggr::SelCol:
-            if (!fusedAggrs[d].sel ||
+      for (size_t d = 0; d < simpleAggrs.size(); ++d)
+         switch (simpleAggrs[d].kind) {
+         case SimpleAggr::Col: kindsDense.push_back(d); break;
+         case SimpleAggr::SelCol:
+            if (!simpleAggrs[d].sel ||
                 (!kindsSel.empty() &&
-                 fusedAggrs[d].sel != fusedAggrs[kindsSel.front()].sel))
+                 simpleAggrs[d].sel != simpleAggrs[kindsSel.front()].sel))
                oneSel = false;
             kindsSel.push_back(d);
             break;
-         case FusedAggr::Count: kindsCount = int(d); ++counts; break;
+         case SimpleAggr::Count: kindsCount = int(d); ++counts; break;
          }
       kindsSupported = oneSel && counts <= 1 &&
                        kindsDense.size() <= kKindsMax &&
                        kindsSel.size() <= kKindsMax;
       if (kindsSupported && !kindsSel.empty())
-         kindsSelVec = static_cast<const pos_t*>(fusedAggrs[kindsSel.front()].sel);
+         kindsSelVec = static_cast<const pos_t*>(simpleAggrs[kindsSel.front()].sel);
    }
    if (!kindsSupported) return false;
    const int64_t* dcols[kKindsMax];
@@ -2178,18 +2469,18 @@ bool HashGroup::updateGroupsKinds(pos_t n) {
    // per vector only the arguments are read (Column pointers move per
    // morsel); nothing is decided here
    for (size_t d = 0; d < kindsDense.size(); ++d) {
-      auto& fa = fusedAggrs[kindsDense[d]];
+      auto& fa = simpleAggrs[kindsDense[d]];
       dcols[d] = static_cast<const int64_t*>(static_cast<FAggrOp*>(fa.op)->get<1>());
       doffs[d] = fa.offset;
    }
    for (size_t d = 0; d < kindsSel.size(); ++d) {
-      auto& fa = fusedAggrs[kindsSel[d]];
+      auto& fa = simpleAggrs[kindsSel[d]];
       assert(static_cast<FAggrSelOp*>(fa.op)->get<1>() == kindsSelVec);
       scols[d] = static_cast<const int64_t*>(
           static_cast<FAggrSelOp*>(fa.op)->get<2>());
       soffs[d] = fa.offset;
    }
-   const size_t countOff = kindsCount >= 0 ? fusedAggrs[kindsCount].offset : 0;
+   const size_t countOff = kindsCount >= 0 ? simpleAggrs[kindsCount].offset : 0;
    aggrKindsFns[(kindsDense.size() * (kKindsMax + 1) + kindsSel.size()) * 2 +
                 (kindsCount >= 0)](n, preAggregation.htMatches, dcols, doffs,
                                    kindsSelVec, scols, soffs, countOff);
@@ -2198,6 +2489,9 @@ bool HashGroup::updateGroupsKinds(pos_t n) {
 #endif
 
 void HashGroup::updateGroupsFused(pos_t n) {
+#ifdef VW_AGGR_FUSED_BUCKET
+   if (updateGroupsBucket(n)) return;
+#endif
 #ifdef VW_AGGR_FUSED_KINDS
    if (updateGroupsKinds(n)) return;
 #endif
@@ -2211,23 +2505,23 @@ void HashGroup::updateGroupsFused(pos_t n) {
    const pos_t* sels[kMax];
    size_t offsets[kMax];
    auto entries = preAggregation.htMatches;
-   for (size_t first = 0; first < fusedAggrs.size(); first += kMax) {
-      const size_t k = std::min(kMax, fusedAggrs.size() - first);
+   for (size_t first = 0; first < simpleAggrs.size(); first += kMax) {
+      const size_t k = std::min(kMax, simpleAggrs.size() - first);
       for (size_t d = 0; d < k; ++d) {
-         auto& fa = fusedAggrs[first + d];
+         auto& fa = simpleAggrs[first + d];
          offsets[d] = fa.offset;
          switch (fa.kind) {
-         case FusedAggr::Col:
+         case SimpleAggr::Col:
             cols[d] = static_cast<const int64_t*>(
                 static_cast<FAggrOp*>(fa.op)->get<1>());
             sels[d] = identitySel.data();
             break;
-         case FusedAggr::SelCol:
+         case SimpleAggr::SelCol:
             sels[d] = static_cast<FAggrSelOp*>(fa.op)->get<1>();
             cols[d] = static_cast<const int64_t*>(
                 static_cast<FAggrSelOp*>(fa.op)->get<2>());
             break;
-         case FusedAggr::Count:
+         case SimpleAggr::Count:
             cols[d] = ones.data();
             sels[d] = identitySel.data();
             break;
@@ -2347,13 +2641,16 @@ void HashGroup::globalFindOrCreate(void* data, size_t n) {
 //     kSingleSel one key column read through its selection vector
 //     kPacked    compound keys, packed by per-column copy steps resolved once
 //   the loop hashes each key itself, walks the chain, and creates missing
-//   groups in one consecutive block with one buildScatter per vector
-//   (batched creation); with VW_GROUP_RUN_HEADS only the first row of each
-//   run of equal keys is looked up;
-//   aggregate step: all int64 SUM/COUNT in one pass (fused) when possible,
-//     else the aggregate expression list;
-//   global phase: one-pass find-or-create for memcmp-comparable keys;
-//   spill: inline word copy of rows.
+//   groups: in one consecutive block with one buildScatter per vector with
+//   VW_GROUP_BATCH_CREATE, else one allocation and buildScatter per group;
+//   with VW_GROUP_RUN_HEADS only the first row of each run of equal keys is
+//   looked up;
+//   aggregate step: with VW_AGGR_DIRECT, register accumulators per group
+//     while vectors touch few groups (aggUpdate); with VW_AGGR_FUSED, all
+//     int64 SUM/COUNT in one pass when possible; else the aggregate
+//     expression list.
+// Dispatch turns on no other option; the global phase and the spill are
+// the same as without it.
 void HashGroup::resolvePaths() {
    pathsResolved = true;
    const bool single = keyColumns.size() == 1;
@@ -2389,8 +2686,17 @@ void HashGroup::resolvePaths() {
    default: keyStep = VW_KEY_STEP(char*); break;
    }
 #undef VW_KEY_STEP
-   aggStep = (fusable && fusedAggrs.size() > 1) ? &HashGroup::updateGroupsFused
-                                                : &HashGroup::aggEvaluate;
+   // aggregate step: direct when it applies (its sticky fallback is inside
+   // aggUpdate), else fused, else the interpreted passes
+   aggStep = &HashGroup::aggEvaluate;
+#ifdef VW_AGGR_FUSED
+   if (aggrsSimple && simpleAggrs.size() > 1)
+      aggStep = &HashGroup::updateGroupsFused;
+#endif
+#ifdef VW_AGGR_DIRECT
+   if (aggrsSimple && simpleAggrs.size() >= kDirectMinAggrs && groupIdOffset)
+      aggStep = &HashGroup::aggUpdate;
+#endif
 }
 
 void HashGroup::concatResolved(pos_t n) {
@@ -2479,8 +2785,10 @@ void HashGroup::keyStepT(pos_t n) {
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
    EntryHeader** __restrict__ matches = preAggregation.htMatches;
    const size_t entrySize = preAggregation.ht_entry_size;
+#ifdef VW_GROUP_BATCH_CREATE
    pos_t created = 0;
    EntryHeader* firstNew = nullptr;
+#endif
    pos_t nLookups = n;
 #ifdef VW_GROUP_RUN_HEADS
    pos_t* __restrict__ heads = runHeads.data();
@@ -2535,6 +2843,7 @@ void HashGroup::keyStepT(pos_t n) {
              sameKey(reinterpret_cast<const char*>(entry + 1), kp))
             break;
       if (!entry) {
+#ifdef VW_GROUP_BATCH_CREATE
          if (newUsed == newCap) {
             newCap = maxFill + vecSize;
             newUsed = 0;
@@ -2551,6 +2860,17 @@ void HashGroup::keyStepT(pos_t n) {
          std::memcpy(reinterpret_cast<char*>(entry + 1), kp, keySize);
          hashes[i] = hash;
          preAggregation.groupRepresentatives[created++] = i;
+#else
+         // one allocation and one buildScatter per new group, as Lookup_T
+         auto alloc = groupStore.allocate(entrySize);
+         if (!alloc) throw std::runtime_error("malloc failed");
+         entry = reinterpret_cast<EntryHeader*>(alloc);
+         preAggregation.allocations.emplace_back(alloc, 1);
+         hashes[i] = hash;
+         preAggregation.groupRepresentatives[0] = i;
+         preAggregation.scatterStart = entry;
+         preAggregation.buildScatter.evaluate(1);
+#endif
          ht.insert<false>(entry, hash);
          ++preAggregation.entries_in_ht;
       }
@@ -2571,10 +2891,12 @@ void HashGroup::keyStepT(pos_t n) {
       }
    }
 #endif
+#ifdef VW_GROUP_BATCH_CREATE
    if (created) {
       preAggregation.scatterStart = firstNew;
       preAggregation.buildScatter.evaluate(created);
    }
+#endif
 }
 #endif // VW_GROUP_DISPATCH
 

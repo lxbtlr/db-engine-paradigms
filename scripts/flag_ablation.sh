@@ -9,11 +9,10 @@
 #   tuned                    all tuned flags
 #   drop_<flag>              tuned - that flag
 #
-# Flags: group_aggr (VW_GROUP_AGGR), group_aggr_sel (VW_GROUP_AGGR_SEL, only
-# active with VW_GROUP_AGGR, so add_group_aggr_sel = +both and
-# drop_group_aggr = -both), pos16 (VW_POS_16), crc32 (VW_USE_CRC32),
-# huge2mb (HUGE_2MB_MALLOC_HUGE). SEL (default: 256-bit SIMD selection) is
-# the same in every config.
+# Flags: pos16 (VW_POS_16), crc32 (VW_USE_CRC32), huge2mb
+# (HUGE_2MB_MALLOC_HUGE). SEL (default: 256-bit SIMD selection) is the same
+# in every config. (group_aggr / group_aggr_sel were dropped with
+# VW_GROUP_AGGR's CMake option on the aggregation branch.)
 #
 # Hash configs: the hash function on top of one base config (HASH_BASE):
 #   hash_murmur          default MurMurHash
@@ -38,20 +37,28 @@
 #   join_semi            VW_JOIN_SEMI (existence-only hash probe on joins the
 #                        plan derives as semi, as Hashset::contains)
 #   join_all             one config for every machine: join_fused + join_semi +
-#                        VW_GROUP_DISPATCH + VW_GROUP_RUN_HEADS
+#                        group dispatch (GDISP below)
 #   join_dispatch        VW_JOIN_DISPATCH + VW_JOIN_BLOOM + VW_JOIN_FUSED_PROBE
 #                        (study/JOIN_DISPATCH_STUDY.md): the semi /
 #                        Bloom / fused-probe choice resolved once per join from
 #                        plan facts and the build summary; also builds and runs
 #                        run_joindispatchbench (joindispatchbench.csv)
-#   jd_all               join_dispatch + VW_GROUP_HAVING + VW_GROUP_DISPATCH +
-#                        VW_GROUP_RUN_HEADS (compare with join_all_valid).
+#   jd_all               join_dispatch + VW_GROUP_HAVING + group dispatch
+#                        (compare with join_all_valid).
 #                        Dispatch compiles in VW_JOIN_SEMI; join_dispatch and
 #                        jd_all have no semi bitmap (a structure Typer lacks)
 #   jd_semi              jd_all + the semi bitmap (VW_JOIN_SEMI_BITMAP: when
 #                        the build key range fits in L2)
 #   join_all_valid       join_all without VW_JOIN_SEMI: join_fused +
-#                        VW_GROUP_DISPATCH + VW_GROUP_RUN_HEADS
+#                        group dispatch
+#
+# "Group dispatch" (GDISP) is VW_GROUP_DISPATCH + VW_GROUP_BATCH_CREATE +
+# VW_GROUP_GLOBAL_DIRECT + VW_AGGR_FUSED: what VW_GROUP_DISPATCH implied
+# before the aggregation branch, minus the removed VW_SPILL_WORD_COPY. On
+# that branch run heads, the kind-specialized fused pass, VW_FUSE_HASH,
+# VW_GROUP_NO_CONCAT and VW_GROUP_AGGR lost their CMake options, so jd_all,
+# join_all* no longer have run heads and jd_all_pc no longer has
+# VW_AGGR_FUSED_KINDS; results from before the branch are not comparable.
 #
 # CONFIGS may contain the group name join_valid, which expands to the configs
 # AUDIT_TPC_OPTIONS.md finds TPC-valid for every query (no VW_Q9_FIELD_ORDER;
@@ -60,28 +67,34 @@
 # asserted by the plans:
 #   join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom
 #   join_fused join_semi join_all join_dispatch jd_all join_all_valid
-#   grp_base grp_dispatch grp_kinds proj_compound pc_runheads pc_having
-#   grp_runheads grp_having jd_all_pc
+#   grp_base grp_dispatch proj_compound pc_having grp_having jd_all_pc
 #
 # Group-by configs (study/VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
 #   grp_base             today's HashGroup
 #   grp_batch            VW_GROUP_BATCH_CREATE
 #   grp_global           VW_GROUP_GLOBAL_DIRECT
-#   grp_q18              batch + global + VW_FUSE_HASH
-#                        + VW_GROUP_NO_CONCAT + VW_SPILL_WORD_COPY
+#   grp_q18              batch + global
 #   grp_all              grp_q18 + VW_AGGR_FUSED
-#   grp_dispatch         VW_GROUP_DISPATCH (plan-resolved paths: batch, global,
-#                        fused aggregates, spill copy, hash in the lookup)
-#   grp_kinds            grp_dispatch + VW_AGGR_FUSED_KINDS (fused aggregate
-#                        pass specialized by aggregate kind)
-#   proj_compound        grp_kinds + VW_PROJ_COMPOUND (compound int64
+#   grp_disp_only        VW_GROUP_DISPATCH alone (its key loop: hash in the
+#                        lookup, single keys in place; per-group creation,
+#                        interpreted aggregate passes)
+#   grp_dispatch         group dispatch (GDISP): dispatch + batch + global +
+#                        fused aggregates
+#   grp_bucket           grp_dispatch + VW_AGGR_FUSED_BUCKET (fused update by
+#                        group, sticky fallback to the fused pass)
+#   grp_direct           grp_dispatch + VW_AGGR_DIRECT (register accumulators
+#                        per group for vectors with <= 8 groups; falls back
+#                        to the fused pass; VW_FLAGS="VW_AGGR_DIRECT_ISA=avx2"
+#                        etc. forces the kernel ISA)
+#   grp_direct_only      dispatch + batch + global + VW_AGGR_DIRECT, no fused
+#                        update (falls back to the interpreted passes)
+#   grp_direct_bucket    grp_bucket + VW_AGGR_DIRECT (falls back to bucket)
+#   direct_pc            grp_direct + VW_PROJ_COMPOUND
+#   proj_compound        grp_dispatch + VW_PROJ_COMPOUND (compound int64
 #                        projection primitives inside one expression)
-#   pc_runheads          proj_compound + VW_GROUP_RUN_HEADS
-#   pc_having            pc_runheads + VW_GROUP_HAVING (jd_all's group-by
-#                        options plus the two above, no join options)
-#   grp_runheads         grp_dispatch + VW_GROUP_RUN_HEADS (branch-free run-head
-#                        lookup; AVX-512BW/VL run pass, scalar elsewhere)
-#   grp_having           grp_runheads + VW_GROUP_HAVING (TPC-H Q18: HAVING in
+#   pc_having            proj_compound + VW_GROUP_HAVING (jd_all's group-by
+#                        options plus compound, no join options)
+#   grp_having           grp_dispatch + VW_GROUP_HAVING (TPC-H Q18: HAVING in
 #                        the group-by instead of a Select over its output)
 # Configs whose ISA this CPU lacks are skipped (their builds would fall back
 # and duplicate another config).
@@ -106,10 +119,10 @@
 #
 # Environment (all optional):
 #   COMPILERS  "gcc clang"
-#   CONFIGS    all 12 flag configs + the 5 hash configs (see config_flags);
+#   CONFIGS    all 8 flag configs + the 5 hash configs (see config_flags);
 #              e.g. CONFIGS="$(echo hash_{murmur,simd,crc32,crc32_fast,crc32_vpclmul})"
 #   HASH_BASE  default   flag config the hash configs build on (e.g. tuned,
-#                        drop_group_aggr); its crc32 setting is overridden
+#                        drop_pos16); its crc32 setting is overridden
 #   SEL        by CPU: AVX-512VL "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg",
 #              AVX-512F only "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg",
 #              otherwise (Zen 3, ARM, ...) "-DVW_SIMD_SEL=OFF"
@@ -182,14 +195,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # over NFS, and must never write the same build tree
 BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
 COMPILERS=${COMPILERS:-"gcc clang"}
-FLAG_CONFIGS="cmake_defaults default add_group_aggr add_group_aggr_sel add_pos16 add_crc32 add_huge2mb
-             tuned drop_group_aggr drop_group_aggr_sel drop_pos16 drop_crc32 drop_huge2mb"
+FLAG_CONFIGS="cmake_defaults default add_pos16 add_crc32 add_huge2mb
+             tuned drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
 JOIN_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc jd_semi join_all_valid"
-GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
+GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_disp_only grp_dispatch grp_bucket grp_direct grp_direct_only grp_direct_bucket direct_pc proj_compound pc_having grp_having"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 # config group: the TPC-valid join and group-by configs (see header)
-JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc join_all_valid grp_base grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having"
+JOIN_VALID_CONFIGS="join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc join_all_valid grp_base grp_dispatch proj_compound pc_having grp_having"
 CONFIGS=$(for c in $CONFIGS; do if [ "$c" = join_valid ]; then printf "%s\n" $JOIN_VALID_CONFIGS; else echo "$c"; fi; done | awk '!seen[$0]++' | tr '\n' ' ')
 # PRINT_CONFIGS=1: print the expanded config list and exit (single_build.sh)
 if [ "${PRINT_CONFIGS:-0}" = 1 ]; then echo $CONFIGS; exit 0; fi
@@ -391,7 +404,7 @@ summarize() {
                           (k in cvs) ? sprintf("%.3f", median(cvs[k])) : "" > nf
       close(nf)
       # effects.csv: add_speedup = default / add_<flag>, drop_speedup = drop_<flag> / tuned
-      ef = out "/effects.body"; nfl = split("group_aggr group_aggr_sel pos16 crc32 huge2mb", fl, " ")
+      ef = out "/effects.body"; nfl = split("pos16 crc32 huge2mb", fl, " ")
       for (k in cqs) { split(k, p, SUBSEP); s = p[3]; cq = p[1] "," p[2]
         if (!((cq ",default" s) in m) && !((cq ",tuned" s) in m)) continue
         for (i = 1; i <= nfl; i++) { f = fl[i]
@@ -403,7 +416,7 @@ summarize() {
       family(out "/join.csv", "compiler,query,join_config,median_ms,speedup_vs_base",
              "join_base join_twophase join_simd nj_tag nj_occ join_bloom nj_bloom join_fused join_semi join_all join_dispatch jd_all jd_all_pc jd_semi join_all_valid", "join_base")
       family(out "/group.csv", "compiler,query,group_config,median_ms,speedup_vs_base",
-             "grp_base grp_batch grp_global grp_q18 grp_all grp_dispatch grp_kinds proj_compound pc_runheads pc_having grp_runheads grp_having", "grp_base")
+             "grp_base grp_batch grp_global grp_q18 grp_all grp_disp_only grp_dispatch grp_bucket grp_direct grp_direct_only grp_direct_bucket direct_pc proj_compound pc_having grp_having", "grp_base")
     }' $([ -f "$OUT/counters.csv" ] && echo "$OUT/counters.csv") "$OUT/timing.csv"
   { echo "compiler,query,config,median_ms,best_ms,speedup_vs_default,speedup_vs_tuned"
     sort -t, -k1,1 -k2,2V -k3,3 "$OUT/matrix.body"; } > "$OUT/matrix.csv"
@@ -462,21 +475,25 @@ register_build() {
 }
 tlimit() { if [ "$TIMEOUT" -gt 0 ]; then timeout --kill-after=30 "$TIMEOUT" "$@"; else "$@"; fi; }
 
-# flags <group_aggr> <group_aggr_sel> <pos16> <crc32> <huge2mb>
+# flags <pos16> <crc32> <huge2mb>
 # Every option is passed explicitly (CMake caches them), including the other
 # kernel options, so nothing leaks in from an earlier configure.
 flags() {
-  echo "-DVW_GROUP_AGGR=$1 -DVW_GROUP_AGGR_SEL=$2 -DVW_POS_16=$3 -DVW_USE_CRC32=$4 -DHUGE_2MB_MALLOC_HUGE=$5" \
+  echo "-DVW_POS_16=$1 -DVW_USE_CRC32=$2 -DHUGE_2MB_MALLOC_HUGE=$3" \
        "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg -DVW_SIMD_SEL_UNROLL=1" \
        "-DVW_SIMD_SEL_GATHER=scalar -DVW_SIMD_SEL_CHAR=OFF -DVW_SIMD_HASH=OFF -DVW_JOIN_PREFETCH=OFF" \
        "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF -DVW_JOIN_TWOPHASE=OFF -DVW_JOIN_SIMD=OFF" \
        "-DVW_NEW_JOIN=OFF -DVW_NEW_JOIN_FULL=tag -DVW_JOIN_BLOOM=OFF -DVW_JOIN_BLOOM_GATHER=scalar -DVW_SIMD_HASH_GATHER=insert" \
-       "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_FUSE_HASH=OFF" \
-       "-DVW_GROUP_NO_CONCAT=OFF -DVW_SPILL_WORD_COPY=OFF -DVW_AGGR_FUSED=OFF -DVW_AGGR_FUSED_KINDS=OFF -DVW_PROJ_COMPOUND=OFF" \
-       "-DVW_GROUP_DISPATCH=OFF -DVW_GROUP_RUN_HEADS=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
+       "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF" \
+       "-DVW_AGGR_FUSED=OFF -DVW_AGGR_FUSED_BUCKET=OFF -DVW_AGGR_DIRECT=OFF -DVW_AGGR_DIRECT_ISA=auto -DVW_PROJ_COMPOUND=OFF" \
+       "-DVW_GROUP_DISPATCH=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
        "-DVW_JOIN_DISPATCH=OFF -DVW_GROUP_HAVING=OFF -DVW_JOIN_SEMI_BITMAP=OFF" \
        "-DAUTOVECTORIZE=$AUTOVEC" "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
+# group dispatch with the parts it implied until the aggregation branch
+# (batch create, global direct, fused update); VW_GROUP_DISPATCH alone now
+# turns on nothing else. The word-copy spill it also implied was removed.
+GDISP="-DVW_GROUP_DISPATCH=ON -DVW_GROUP_BATCH_CREATE=ON -DVW_GROUP_GLOBAL_DIRECT=ON -DVW_AGGR_FUSED=ON"
 config_flags() {
   case "$1" in
     # no option flags at all: every VW option at its CMakeLists.txt default
@@ -488,65 +505,55 @@ config_flags() {
     par_semi)            echo "$(config_flags par_crc32) -DVW_JOIN_SEMI=ON" ;;
     par_having)          echo "$(config_flags par_semi) -DVW_GROUP_HAVING=ON" ;;
     # safe ladder: par_having plus jd_all_pc's engine options, one group per
-    # step; safe_runheads is the last step and has jd_all_pc's defines.
+    # step; safe_compound is the last step and has jd_all_pc's defines.
     # safe_jdisp is an enabling step (regression backstop, no speed claim);
     # par_semi's existence probe stays (dispatch compiles in VW_JOIN_SEMI).
     # safe_gdisp spans thrusts 2 and 3 (batch create: work; global direct,
     # fused aggregates: latency). beyond_bitmap adds the semi bitmap, an
-    # engine structure outside the like-for-like ladder
+    # engine structure outside the like-for-like ladder. (safe_kinds and
+    # safe_runheads were dropped with VW_AGGR_FUSED_KINDS and
+    # VW_GROUP_RUN_HEADS on the aggregation branch.)
     safe_fast)           echo "$(config_flags par_having) -DVW_CRC32_FAST=ON" ;;
     safe_sel)            echo "$(config_flags safe_fast) $SEL" ;;
     # the Bloom filter and fused probe dispatch used to imply, now explicit
     safe_jdisp)          echo "$(config_flags safe_sel) -DVW_JOIN_DISPATCH=ON -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
-    safe_gdisp)          echo "$(config_flags safe_jdisp) -DVW_GROUP_DISPATCH=ON" ;;
-    safe_kinds)          echo "$(config_flags safe_gdisp) -DVW_AGGR_FUSED_KINDS=ON" ;;
-    safe_compound)       echo "$(config_flags safe_kinds) -DVW_PROJ_COMPOUND=ON" ;;
-    safe_runheads)       echo "$(config_flags safe_compound) -DVW_GROUP_RUN_HEADS=ON" ;;
-    beyond_bitmap)       echo "$(config_flags safe_runheads) -DVW_JOIN_SEMI_BITMAP=ON" ;;
+    safe_gdisp)          echo "$(config_flags safe_jdisp) $GDISP" ;;
+    safe_compound)       echo "$(config_flags safe_gdisp) -DVW_PROJ_COMPOUND=ON" ;;
+    beyond_bitmap)       echo "$(config_flags safe_compound) -DVW_JOIN_SEMI_BITMAP=ON" ;;
     # safe_gdisp split on the ladder base: safe_jdisp, then group dispatch's
-    # parts one at a time; gs_fused -> safe_gdisp is dispatch's own
-    # specialization (paths resolved per operator; it builds the same parts in)
+    # parts one at a time; gs_fused -> safe_gdisp is dispatch's own key loop
+    # (gs_q18 was dropped with VW_GROUP_NO_CONCAT / VW_FUSE_HASH /
+    # VW_SPILL_WORD_COPY)
     gs_batch)            echo "$(config_flags safe_jdisp) -DVW_GROUP_BATCH_CREATE=ON" ;;
     gs_global)           echo "$(config_flags gs_batch) -DVW_GROUP_GLOBAL_DIRECT=ON" ;;
-    gs_q18)              echo "$(config_flags gs_global) -DVW_GROUP_NO_CONCAT=ON -DVW_FUSE_HASH=ON -DVW_SPILL_WORD_COPY=ON" ;;
-    gs_fused)            echo "$(config_flags gs_q18) -DVW_AGGR_FUSED=ON" ;;
-    # second ladder order: run heads right after group dispatch, then kinds;
-    # compound after that has safe_runheads' defines
-    o2_runheads)         echo "$(config_flags safe_gdisp) -DVW_GROUP_RUN_HEADS=ON" ;;
-    o2_kinds)            echo "$(config_flags o2_runheads) -DVW_AGGR_FUSED_KINDS=ON" ;;
+    gs_fused)            echo "$(config_flags gs_global) -DVW_AGGR_FUSED=ON" ;;
+    gs_bucket)           echo "$(config_flags gs_fused) -DVW_AGGR_FUSED_BUCKET=ON" ;;
     # fair ladder: the safe ladder without the options Typer's plans lack
-    # (Bloom filter, fused probe, run heads; the semi bitmap was never in
-    # it). fair_jdisp is dispatch alone, which then always takes the plain
-    # hash probe. fair_compound ends the fair pool; fair_bloom and
-    # fair_heads add the excluded options back one at a time, and both
-    # together (plus the fused probe) give safe_runheads' defines
+    # (Bloom filter, fused probe; the semi bitmap was never in it).
+    # fair_jdisp is dispatch alone, which then always takes the plain hash
+    # probe. fair_compound ends the fair pool; fair_bloom adds the excluded
+    # options back and has safe_compound's defines
     fair_fast)           echo "$(config_flags par_having) -DVW_CRC32_FAST=ON" ;;
     fair_sel)            echo "$(config_flags fair_fast) $SEL" ;;
     fair_jdisp)          echo "$(config_flags fair_sel) -DVW_JOIN_DISPATCH=ON" ;;
-    fair_gdisp)          echo "$(config_flags fair_jdisp) -DVW_GROUP_DISPATCH=ON" ;;
-    fair_kinds)          echo "$(config_flags fair_gdisp) -DVW_AGGR_FUSED_KINDS=ON" ;;
-    fair_compound)       echo "$(config_flags fair_kinds) -DVW_PROJ_COMPOUND=ON" ;;
+    fair_gdisp)          echo "$(config_flags fair_jdisp) $GDISP" ;;
+    fair_compound)       echo "$(config_flags fair_gdisp) -DVW_PROJ_COMPOUND=ON" ;;
     fair_bloom)          echo "$(config_flags fair_compound) -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
-    fair_heads)          echo "$(config_flags fair_compound) -DVW_GROUP_RUN_HEADS=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)
     jdpc_av)             echo "$(config_flags jd_all_pc) -DAUTOVECTORIZE=ON" ;;
     jdpc_nosel)          echo "$(config_flags jd_all_pc) -DVW_SIMD_SEL=OFF" ;;
     jdpc_sel512)         echo "$(config_flags jd_all_pc) -DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg" ;;
-    #                         aggr aggr_sel pos16 crc32 huge2mb
-    default)             flags OFF  OFF      OFF   OFF   OFF ;;
-    add_group_aggr)      flags ON   OFF      OFF   OFF   OFF ;;
-    add_group_aggr_sel)  flags ON   ON       OFF   OFF   OFF ;;
-    add_pos16)           flags OFF  OFF      ON    OFF   OFF ;;
-    add_crc32)           flags OFF  OFF      OFF   ON    OFF ;;
-    add_huge2mb)         flags OFF  OFF      OFF   OFF   ON  ;;
-    tuned)               flags ON   ON       ON    ON    ON  ;;
-    drop_group_aggr)     flags OFF  OFF      ON    ON    ON  ;;
-    drop_group_aggr_sel) flags ON   OFF      ON    ON    ON  ;;
-    drop_pos16)          flags ON   ON       OFF   ON    ON  ;;
-    drop_crc32)          flags ON   ON       ON    OFF   ON  ;;
-    drop_huge2mb)        flags ON   ON       ON    ON    OFF ;;
+    #                         pos16 crc32 huge2mb
+    default)             flags OFF   OFF   OFF ;;
+    add_pos16)           flags ON    OFF   OFF ;;
+    add_crc32)           flags OFF   ON    OFF ;;
+    add_huge2mb)         flags OFF   OFF   ON  ;;
+    tuned)               flags ON    ON    ON  ;;
+    drop_pos16)          flags OFF   ON    ON  ;;
+    drop_crc32)          flags ON    OFF   ON  ;;
+    drop_huge2mb)        flags ON    ON    OFF ;;
     # hash configs: HASH_BASE, then the hash options (last -D wins)
     hash_murmur)         echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=OFF -DVW_SIMD_HASH=OFF" ;;
     hash_simd)           echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=OFF -DVW_SIMD_HASH=ON" ;;
@@ -563,31 +570,33 @@ config_flags() {
     nj_bloom)            echo "$(config_flags join_base) -DVW_NEW_JOIN=ON -DVW_JOIN_BLOOM=ON" ;;
     join_fused)          echo "$(config_flags join_base) -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
     join_semi)           echo "$(config_flags join_base) -DVW_JOIN_SEMI=ON" ;;
-    join_all)            echo "$(config_flags join_fused) -DVW_JOIN_SEMI=ON -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
-    join_all_valid)      echo "$(config_flags join_fused) -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
+    join_all)            echo "$(config_flags join_fused) -DVW_JOIN_SEMI=ON $GDISP" ;;
+    join_all_valid)      echo "$(config_flags join_fused) $GDISP" ;;
     join_dispatch)       echo "$(config_flags join_base) -DVW_JOIN_DISPATCH=ON -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
-    jd_all)              echo "$(config_flags join_dispatch) -DVW_GROUP_HAVING=ON -DVW_GROUP_DISPATCH=ON -DVW_GROUP_RUN_HEADS=ON" ;;
-    jd_all_pc)           echo "$(config_flags jd_all) -DVW_AGGR_FUSED_KINDS=ON -DVW_PROJ_COMPOUND=ON" ;;
+    jd_all)              echo "$(config_flags join_dispatch) -DVW_GROUP_HAVING=ON $GDISP" ;;
+    jd_all_pc)           echo "$(config_flags jd_all) -DVW_PROJ_COMPOUND=ON" ;;
     jd_semi)             echo "$(config_flags jd_all) -DVW_JOIN_SEMI_BITMAP=ON" ;;
     # group-by configs: HASH_BASE + CRC32 + FAST, then the HashGroup options
     grp_base)            echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     grp_batch)           echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON" ;;
     grp_global)          echo "$(config_flags grp_base) -DVW_GROUP_GLOBAL_DIRECT=ON" ;;
-    grp_q18)             echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON -DVW_GROUP_GLOBAL_DIRECT=ON" \
-                              "-DVW_FUSE_HASH=ON -DVW_GROUP_NO_CONCAT=ON -DVW_SPILL_WORD_COPY=ON" ;;
+    grp_q18)             echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON -DVW_GROUP_GLOBAL_DIRECT=ON" ;;
     grp_all)             echo "$(config_flags grp_q18) -DVW_AGGR_FUSED=ON" ;;
-    grp_dispatch)        echo "$(config_flags grp_base) -DVW_GROUP_DISPATCH=ON" ;;
-    grp_kinds)           echo "$(config_flags grp_dispatch) -DVW_AGGR_FUSED_KINDS=ON" ;;
-    proj_compound)       echo "$(config_flags grp_kinds) -DVW_PROJ_COMPOUND=ON" ;;
-    pc_runheads)         echo "$(config_flags proj_compound) -DVW_GROUP_RUN_HEADS=ON" ;;
-    pc_having)           echo "$(config_flags pc_runheads) -DVW_GROUP_HAVING=ON" ;;
-    grp_runheads)        echo "$(config_flags grp_dispatch) -DVW_GROUP_RUN_HEADS=ON" ;;
-    grp_having)          echo "$(config_flags grp_runheads) -DVW_GROUP_HAVING=ON" ;;
+    grp_disp_only)       echo "$(config_flags grp_base) -DVW_GROUP_DISPATCH=ON" ;;
+    grp_dispatch)        echo "$(config_flags grp_base) $GDISP" ;;
+    grp_bucket)          echo "$(config_flags grp_dispatch) -DVW_AGGR_FUSED_BUCKET=ON" ;;
+    grp_direct)          echo "$(config_flags grp_dispatch) -DVW_AGGR_DIRECT=ON" ;;
+    grp_direct_only)     echo "$(config_flags grp_base) -DVW_GROUP_DISPATCH=ON -DVW_GROUP_BATCH_CREATE=ON -DVW_GROUP_GLOBAL_DIRECT=ON -DVW_AGGR_DIRECT=ON" ;;
+    grp_direct_bucket)   echo "$(config_flags grp_bucket) -DVW_AGGR_DIRECT=ON" ;;
+    direct_pc)           echo "$(config_flags grp_direct) -DVW_PROJ_COMPOUND=ON" ;;
+    proj_compound)       echo "$(config_flags grp_dispatch) -DVW_PROJ_COMPOUND=ON" ;;
+    pc_having)           echo "$(config_flags proj_compound) -DVW_GROUP_HAVING=ON" ;;
+    grp_having)          echo "$(config_flags grp_dispatch) -DVW_GROUP_HAVING=ON" ;;
     *) echo "unknown config $1" >&2; exit 2 ;;
   esac
 }
 # config_flags with AUTOVEC in front: configs that do not start from flags()
-# (cmake_defaults, the par_/safe_/gs_/o2_/fair_ ladders) would otherwise build
+# (cmake_defaults, the par_/safe_/gs_/fair_ ladders) would otherwise build
 # without it; a config's own -DAUTOVECTORIZE (jdpc_av) comes later and wins
 build_flags() { local f; f=$(config_flags "$1") || return; echo "-DAUTOVECTORIZE=$AUTOVEC $f"; }
 # PRINT_FLAGS=<config>: print that config's CMake options as this host would

@@ -837,6 +837,26 @@ QueryBuilder::HashGroupBuilder::~HashGroupBuilder() {
    global.partitionEndsOut = globalLookup.partitionEndsIn;
    global.partitionedRows = globalLookup.unpartitionedRows;
 
+#ifdef VW_AGGR_GROUP_IDS
+   // the bucket / direct paths' local group id, after the aggregates of
+   // local entries only, for operators either path applies to; spilled rows
+   // carry it, the global phase ignores it
+   {
+      bool ids = false;
+#ifdef VW_AGGR_FUSED_BUCKET
+      ids |= op.aggrsSimple && op.simpleAggrs.size() > 1;
+#endif
+#ifdef VW_AGGR_DIRECT
+      ids |= op.aggrsSimple &&
+             op.simpleAggrs.size() >= HashGroup::kDirectMinAggrs;
+#endif
+      if (ids) {
+         local.ht_entry_size += padding(local.ht_entry_size, 8);
+         op.groupIdOffset = local.ht_entry_size;
+         local.ht_entry_size += 8;
+      }
+   }
+#endif
    // round up ht_entry_size to next 8 aligned value
    local.ht_entry_size += padding(local.ht_entry_size, 8);
    global.ht_entry_size += padding(local.ht_entry_size, 8);
@@ -1046,15 +1066,15 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
    auto aggr_op = make_unique<FAggrOp>(
        aggr, reinterpret_cast<void**>(local.htMatches), col, entryOffset);
    col.registerDS(&aggr_op->get<1>());
-#ifdef VW_AGGR_FUSED
+#ifdef VW_AGGR_LIST
    if (aggr == primitives::aggr_plus_int64_t_col)
-      op.fusedAggrs.push_back(
-          {HashGroup::FusedAggr::Col, aggr_op.get(), entryOffset});
+      op.simpleAggrs.push_back(
+          {HashGroup::SimpleAggr::Col, aggr_op.get(), entryOffset});
    else if (aggr == primitives::aggr_count_star)
-      op.fusedAggrs.push_back(
-          {HashGroup::FusedAggr::Count, aggr_op.get(), entryOffset});
+      op.simpleAggrs.push_back(
+          {HashGroup::SimpleAggr::Count, aggr_op.get(), entryOffset});
    else
-      op.fusable = false;
+      op.aggrsSimple = false;
 #endif
    op.updateGroups += move(aggr_op);
 
@@ -1103,18 +1123,18 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
        aggr, reinterpret_cast<void**>(local.htMatches), sel, col, entryOffset);
    sel.registerDS(&aggr_op->get<1>());
    col.registerDS(&aggr_op->get<2>());
-#ifdef VW_AGGR_FUSED
+#ifdef VW_AGGR_LIST
    if (aggr == primitives::aggr_sel_plus_int64_t_col) {
-      op.fusedAggrs.push_back(
-          {HashGroup::FusedAggr::SelCol, aggr_op.get(), entryOffset});
+      op.simpleAggrs.push_back(
+          {HashGroup::SimpleAggr::SelCol, aggr_op.get(), entryOffset});
 #ifdef VW_AGGR_FUSED_KINDS
       // the selection vector's identity, fixed by the plan (a Buffer's
       // address is set at build time; only Column pointers move per morsel)
-      op.fusedAggrs.back().sel =
+      op.simpleAggrs.back().sel =
           sel.buf == DS::BufferSpec::Buffer ? sel.data : nullptr;
 #endif
    } else
-      op.fusable = false;
+      op.aggrsSimple = false;
 #endif
    op.updateGroups += move(aggr_op);
 

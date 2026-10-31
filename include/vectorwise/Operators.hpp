@@ -17,6 +17,16 @@
 #include <utility>
 #include <vector>
 
+// HashGroup's aggregate update: the aggregate list is recorded when any path
+// that reads it is compiled in; the per-vector group ids when the bucket or
+// direct path is
+#if defined(VW_AGGR_FUSED) || defined(VW_AGGR_DIRECT)
+#define VW_AGGR_LIST 1
+#endif
+#if defined(VW_AGGR_FUSED_BUCKET) || defined(VW_AGGR_DIRECT)
+#define VW_AGGR_GROUP_IDS 1
+#endif
+
 namespace vectorwise {
 
 const size_t EndOfStream = 0;
@@ -501,12 +511,12 @@ class HashGroup : public UnaryOperator {
    ColumnGroupLookup preAggregation;
    /// update aggregates
    Aggregates updateGroups;
-#ifdef VW_AGGR_FUSED
-   /// VW_AGGR_FUSED: updateGroups' ops when all are int64 SUM / COUNT(*)
-   /// (recorded by QueryBuilder::HashGroupBuilder::addValue). Their current
-   /// arguments are read at run time; updateGroupsFused then updates every
-   /// aggregate of a row's entry in one pass instead of one pass each.
-   struct FusedAggr {
+#ifdef VW_AGGR_LIST
+   /// updateGroups' ops, recorded by QueryBuilder::HashGroupBuilder::addValue
+   /// for the update paths that read them directly (VW_AGGR_FUSED,
+   /// VW_AGGR_DIRECT). aggrsSimple: every aggregate is int64 SUM or
+   /// COUNT(*); their current arguments are read at run time.
+   struct SimpleAggr {
       enum Kind : uint8_t { Col, SelCol, Count } kind;
       Op* op;
       size_t offset;
@@ -516,13 +526,21 @@ class HashGroup : public UnaryOperator {
       const void* sel = nullptr;
 #endif
    };
-   std::vector<FusedAggr> fusedAggrs;
-   bool fusable = true;
+   std::vector<SimpleAggr> simpleAggrs;
+   bool aggrsSimple = true;
+   /// the aggregate update after the plan-resolved choices: direct (sticky),
+   /// else fused, else the interpreted passes (whichever are compiled in and
+   /// apply to this operator)
+   void aggUpdate(pos_t n);
+#endif
+#ifdef VW_AGGR_FUSED
+   /// VW_AGGR_FUSED: updateGroupsFused updates every aggregate of a row's
+   /// entry in one pass instead of one pass each (>= 2 simple aggregates)
    std::vector<pos_t> identitySel;
    std::vector<int64_t> ones;
    void updateGroupsFused(pos_t n);
 #ifdef VW_AGGR_FUSED_KINDS
-   /// VW_AGGR_FUSED_KINDS: fusedAggrs split by kind once (dense columns,
+   /// VW_AGGR_FUSED_KINDS: simpleAggrs split by kind once (dense columns,
    /// columns read through a selection vector, COUNT(*)), so the fused pass
    /// reads dense columns directly, loads a shared selection once per row
    /// and counts with += 1. The kernel is chosen once from the plan; false
@@ -534,6 +552,68 @@ class HashGroup : public UnaryOperator {
    std::vector<size_t> kindsDense, kindsSel;
    int kindsCount = -1;
 #endif
+#ifdef VW_AGGR_FUSED_BUCKET
+   /// VW_AGGR_FUSED_BUCKET: the fused update by group instead of by row.
+   /// Per vector, the groups the vector touches get local ids
+   /// (assignGroupIds), the rows are counting-sorted by group, and each
+   /// group's aggregates are summed in registers and stored once. Cost is
+   /// O(n + groups touched); no chain through memory per row. Sticky
+   /// fallback: the first vector touching more than
+   /// VW_AGGR_FUSED_BUCKET_MAX_GROUPS groups switches this operator to
+   /// the per-row fused pass for the rest of the query.
+   bool updateGroupsBucket(pos_t n);
+   void resolveBucket();
+   static constexpr uint32_t kBucketMaxGroups = VW_AGGR_FUSED_BUCKET_MAX_GROUPS;
+   /// row i counts and scatters through sub-counter i % kBucketSub, so rows
+   /// of one group form kBucketSub independent increment chains
+   static constexpr uint32_t kBucketSub = 4;
+   bool bucketResolved = false;
+   bool bucketOn = false;
+   std::vector<size_t> bucketDense, bucketSel, bucketCount;
+   std::vector<uint32_t> bucketCnt, bucketStart, bucketSize, bucketBegin;
+   std::vector<pos_t> bucketRows;
+#endif
+#endif
+#ifdef VW_AGGR_GROUP_IDS
+   /// per-vector local group ids, shared by the bucket and direct paths: the
+   /// id is kept in the entry at groupIdOffset and is valid only if it is
+   /// below the vector's group count and names the entry in idTouched, so
+   /// ids left from earlier vectors need no reset. groupIdOffset is set by
+   /// HashGroupBuilder for operators either path applies to (0: neither).
+   size_t groupIdOffset = 0;
+   std::vector<EntryHeader*> idTouched;
+   std::vector<uint16_t> idLid;
+   /// ids for the vector's rows into idLid, t = groups touched; false as
+   /// soon as more than maxGroups are touched. Count: also count rows per
+   /// group and sub-counter into cnt. Gid: also write each row's id at its
+   /// row position gsel[i] into gidr
+   template <bool Count, bool Gid>
+   bool assignGroupIds(pos_t n, uint32_t maxGroups, uint32_t& t, uint32_t* cnt,
+                       const pos_t* gsel, uint16_t* gidr);
+   void sizeGroupIds(uint32_t maxGroups);
+#endif
+#ifdef VW_AGGR_DIRECT
+   /// VW_AGGR_DIRECT: a vector touching at most aggr_direct::kMaxGroups
+   /// groups sums each aggregate in one pass with a register accumulator per
+   /// group (AggrDirect.hpp). Applies to operators with at least
+   /// kDirectMinAggrs simple aggregates. false: this vector was not done
+   /// here; sticky: the first vector touching more groups switches it off
+   /// for the rest of the query (aggUpdate then falls back).
+   bool updateGroupsDirect(pos_t n);
+   void resolveDirect();
+   /// 2: with 1 aggregate (TPC-H Q3, Q18) the path never applied (the
+   /// vectors touch many groups) and its entry field and first-vector try
+   /// cost 2-3% (2026-10-31, laptop); -DVW_AGGR_DIRECT_MIN_AGGRS=<n> overrides
+#ifdef VW_AGGR_DIRECT_MIN_AGGRS
+   static constexpr size_t kDirectMinAggrs = VW_AGGR_DIRECT_MIN_AGGRS;
+#else
+   static constexpr size_t kDirectMinAggrs = 2;
+#endif
+   bool directResolved = false;
+   bool directOn = false;
+   std::vector<size_t> directDense, directSel, directCount;
+   /// group id per row position, for columns read through the selection
+   std::vector<uint16_t> directGidR;
 #endif
 
    /// ------ phase 2: global aggregation

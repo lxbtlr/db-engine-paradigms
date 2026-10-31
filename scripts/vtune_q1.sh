@@ -37,8 +37,8 @@
 #   scripts/vtune_breakdown.py results/vtune_q1_dubliner_* results/vtune_q1_manchego_* --out q1_breakdown
 #
 # Environment (all optional):
-#   CONFIGS     "cmake_defaults default grp_base grp_dispatch grp_kinds
-#               proj_compound pc_runheads"   any flag_ablation.sh config names;
+#   CONFIGS     "cmake_defaults default grp_base grp_dispatch
+#               proj_compound"   any flag_ablation.sh config names;
 #               the order is the ladder the analysis steps through
 #   HASH_BASE   default           flag_ablation.sh base for its hash, join and group
 #               configs (e.g. add_huge2mb: HUGE_2MB_MALLOC_HUGE=ON); not cmake_defaults
@@ -81,7 +81,7 @@ set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BENCH_HOST=${BENCH_HOST:-$(hostname -s 2>/dev/null || hostname)}
-CONFIGS=${CONFIGS:-"cmake_defaults default grp_base grp_dispatch grp_kinds proj_compound pc_runheads"}
+CONFIGS=${CONFIGS:-"cmake_defaults default grp_base grp_dispatch proj_compound"}
 BASE_REF=${BASE_REF-origin/baseline}
 COMPILER=${COMPILER:-gcc}
 COMPILER_VERSION=${COMPILER_VERSION:-new}

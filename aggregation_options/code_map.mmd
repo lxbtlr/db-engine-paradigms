@@ -1,0 +1,41 @@
+flowchart TB
+    subgraph P1["PHASE 1: thread-local pre-aggregation, per vector"]
+        direction TB
+        subgraph S1["1. Key step: pack, hash, find entry -> matches[i]"]
+            direction LR
+            K0["default:<br/>Concat, Hash, Lookup_T"] -.- DI["VW_GROUP_DISPATCH<br/>keyStepT: one loop,<br/>hash in the lookup"]:::free
+        end
+        subgraph S2["2. Group creation (lookup miss)"]
+            direction LR
+            C0["default: allocate +<br/>buildScatter(1) per group"] -.- BC["VW_GROUP_BATCH_CREATE<br/>one block, one buildScatter<br/>per vector"]:::free
+        end
+        subgraph S3["3. Aggregate update"]
+            direction LR
+            U0["default: one interpreted<br/>pass per aggregate"] -.- AF["VW_AGGR_FUSED<br/>per-row pass,<br/>all aggregates"]:::upd
+            AF -.- AB["VW_AGGR_FUSED_BUCKET<br/>pass 1 ids, sort rows by group,<br/>per-group register sums"]:::upd
+            U0 -.- AD["VW_AGGR_DIRECT<br/>pass 1 ids, one SIMD pass per<br/>aggregate, register per group<br/>(falls back to bucket / fused /<br/>interpreted)"]:::upd
+        end
+        subgraph S4["4. Flush at maxFill (1433 entries)"]
+            F0["memcpy each entry<br/>to its partition (no option)"]
+        end
+        S1 --> S2 --> S3 --> S4
+    end
+    subgraph P2["PHASE 2: per partition, global aggregation"]
+        direction TB
+        subgraph S5["5. Find / create global group"]
+            direction LR
+            G0["default: findGroups +<br/>createMissingGroups"] -.- GD["VW_GROUP_GLOBAL_DIRECT<br/>one-pass find-or-create"]:::free
+        end
+        subgraph S6["6. Merge partials"]
+            M0["aggr_row per aggregate<br/>(no option)"]
+        end
+        subgraph S7["7. Output"]
+            direction LR
+            O0["gatherGroups"] -.- HV["VW_GROUP_HAVING<br/>filter before gather"]:::free
+        end
+        S5 --> S6 --> S7
+    end
+    S4 --> S5
+
+    classDef free fill:#f1f5f9,stroke:#334155,color:#111
+    classDef upd fill:#fef3c7,stroke:#b45309,color:#111

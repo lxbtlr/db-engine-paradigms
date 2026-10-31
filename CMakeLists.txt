@@ -156,24 +156,25 @@ if(VW_CRC32_VPCLMUL)
 endif()
 
 
-OPTION(VW_GROUP_AGGR "Perform group-wise GROUP BY aggregation for VectorWise" OFF)
-if(VW_GROUP_AGGR)
-  ADD_DEFINITIONS(-DVW_GROUP_AGGR=1)
-  message(STATUS "Building with VW_GROUP_AGGR")
-endif(VW_GROUP_AGGR)
+# HashGroup (GROUP BY) options. Each changes one part of the operator and can
+# be toggled on its own, with or without VW_GROUP_DISPATCH:
+#   VW_GROUP_BATCH_CREATE   phase 1: group creation
+#   VW_AGGR_FUSED           phase 1: aggregate update
+#   VW_AGGR_FUSED_BUCKET    phase 1: aggregate update (needs VW_AGGR_FUSED)
+#   VW_AGGR_DIRECT          phase 1: aggregate update, few groups (falls back
+#                           to bucket, else fused, else interpreted)
+#   VW_GROUP_GLOBAL_DIRECT  phase 2: global find-or-create
+#   VW_GROUP_DISPATCH       phase 1: plan-resolved key loop (implies nothing)
+# The code of earlier options (VW_GROUP_AGGR, _SEL, VW_FUSE_HASH,
+# VW_GROUP_NO_CONCAT, VW_GROUP_RUN_HEADS, VW_AGGR_FUSED_KINDS) is still in the
+# sources but has no CMake option; VW_SPILL_WORD_COPY was removed.
 
-# VW_AGGR_FUSED: HashGroup updates all int64 SUM / COUNT(*) aggregates of a
-# row's pre-aggregation entry in one pass instead of one pass per aggregate
-# (breaks the per-aggregate store-forwarding chains; TPC-H Q1). Group-bys
-# with any other aggregate, or a single one, keep updateGroups.
 # VW_GROUP_BATCH_CREATE: HashGroup pre-aggregation creates a vector's new
 # groups in one consecutive block and initializes them (buildScatter) once
-# per vector instead of once per group (TPC-H Q18: 1.5M groups).
+# per vector instead of once per group (TPC-H Q18: 1.5M groups). Applies to
+# the Lookup_T path and to VW_GROUP_DISPATCH's key loop.
 OPTION(VW_GROUP_BATCH_CREATE "Batched group creation in VectorWise HashGroup pre-aggregation" OFF)
 if(VW_GROUP_BATCH_CREATE)
-  if(VW_GROUP_AGGR)
-    message(FATAL_ERROR "VW_GROUP_BATCH_CREATE does not support VW_GROUP_AGGR's per-group Group records")
-  endif()
   ADD_DEFINITIONS(-DVW_GROUP_BATCH_CREATE=1)
   message(STATUS "Building with VW_GROUP_BATCH_CREATE")
 endif()
@@ -189,77 +190,73 @@ if(VW_GROUP_GLOBAL_DIRECT)
   message(STATUS "Building with VW_GROUP_GLOBAL_DIRECT")
 endif()
 
-# VW_GROUP_NO_CONCAT: a group-by on one dense 1/2/4/8-byte key hashes and
-# compares the key column in place instead of copying it into packed keys.
-OPTION(VW_GROUP_NO_CONCAT "Skip key packing for single dense keys in VectorWise HashGroup" OFF)
-if(VW_GROUP_NO_CONCAT)
-  ADD_DEFINITIONS(-DVW_GROUP_NO_CONCAT=1)
-  message(STATUS "Building with VW_GROUP_NO_CONCAT")
-endif()
-
-# VW_SPILL_WORD_COPY: VectorWise's HashGroup spills through
-# PartitionedDeque::push_back_words, which copies rows of <= 64 bytes inline
-# as 8-byte words instead of calling memcpy per row. Hyper's GroupBy keeps
-# push_back, so its code is the same with or without this option.
-OPTION(VW_SPILL_WORD_COPY "Inline word copy for spilled rows in PartitionedDeque" OFF)
-if(VW_SPILL_WORD_COPY)
-  ADD_DEFINITIONS(-DVW_SPILL_WORD_COPY=1)
-  message(STATUS "Building with VW_SPILL_WORD_COPY")
-endif()
-
-# VW_GROUP_DISPATCH: HashGroup resolves its code path once per operator from
-# plan-fixed facts (key columns, key width, selection, aggregates) and runs
-# specialized per-vector loops: no Concat for single keys, hash fused into
-# the lookup, batched group creation, fused SUM/COUNT update, one-pass global
-# find-or-create, inline spill copy. One switch for what
-# VW_GROUP_BATCH_CREATE, VW_FUSE_HASH, VW_GROUP_NO_CONCAT,
-# VW_GROUP_GLOBAL_DIRECT, VW_SPILL_WORD_COPY and VW_AGGR_FUSED do separately
-# (it compiles in their supporting code). Run reuse is VW_GROUP_RUN_HEADS.
+# VW_GROUP_DISPATCH: HashGroup resolves its phase 1 path once per operator
+# from plan-fixed facts (key columns, key width, selection) and runs one
+# specialized key loop: no Concat for single keys, hash computed inside the
+# lookup. It turns on no other option: group creation in that loop is
+# batched only with VW_GROUP_BATCH_CREATE, and the aggregate update is fused
+# only with VW_AGGR_FUSED.
 OPTION(VW_GROUP_DISPATCH "Plan-resolved specialized code paths in VectorWise HashGroup" OFF)
 if(VW_GROUP_DISPATCH)
-  if(VW_GROUP_AGGR)
-    message(FATAL_ERROR "VW_GROUP_DISPATCH does not support VW_GROUP_AGGR")
-  endif()
-  ADD_DEFINITIONS(-DVW_GROUP_DISPATCH=1 -DVW_GROUP_BATCH_CREATE=1
-                  -DVW_GROUP_GLOBAL_DIRECT=1 -DVW_SPILL_WORD_COPY=1
-                  -DVW_AGGR_FUSED=1)
+  ADD_DEFINITIONS(-DVW_GROUP_DISPATCH=1)
   message(STATUS "Building with VW_GROUP_DISPATCH")
 endif()
 
-# VW_GROUP_RUN_HEADS (needs VW_GROUP_DISPATCH): replaces last-match's
-# adaptive per-row check with a branch-free run pass: find the rows whose key
-# differs from the previous row's (AVX-512BW/VL: 16 keys per compare and
-# register compress; scalar otherwise), look up only those, copy each run's
-# entry to its rows. No adaptive threshold.
-OPTION(VW_GROUP_RUN_HEADS "Branch-free run-head lookup in VectorWise HashGroup (needs VW_GROUP_DISPATCH)" OFF)
-if(VW_GROUP_RUN_HEADS)
-  if(NOT VW_GROUP_DISPATCH)
-    message(FATAL_ERROR "VW_GROUP_RUN_HEADS replaces VW_GROUP_DISPATCH's key loop; enable VW_GROUP_DISPATCH")
-  endif()
-  ADD_DEFINITIONS(-DVW_GROUP_RUN_HEADS=1)
-  message(STATUS "Building with VW_GROUP_RUN_HEADS")
-endif()
-
+# VW_AGGR_FUSED: HashGroup updates all int64 SUM / COUNT(*) aggregates of a
+# row's pre-aggregation entry in one pass instead of one pass per aggregate
+# (breaks the per-aggregate store-forwarding chains; TPC-H Q1). Group-bys
+# with any other aggregate, or a single one, keep updateGroups.
 OPTION(VW_AGGR_FUSED "Fused multi-aggregate update in VectorWise HashGroup" OFF)
 if(VW_AGGR_FUSED)
-  if(VW_GROUP_AGGR)
-    message(FATAL_ERROR "VW_AGGR_FUSED and VW_GROUP_AGGR both replace the aggregate update; enable one")
-  endif()
   ADD_DEFINITIONS(-DVW_AGGR_FUSED=1)
   message(STATUS "Building with VW_AGGR_FUSED")
 endif()
 
-# VW_AGGR_FUSED_KINDS: the fused aggregate pass specialized by aggregate kind,
-# resolved once from the plan: dense columns read directly (no identity
-# selection), columns sharing one selection vector load it once per row,
-# COUNT(*) adds 1 (no column of ones). Other shapes keep the generic kernel.
-OPTION(VW_AGGR_FUSED_KINDS "Kind-specialized fused aggregate update in VectorWise HashGroup" OFF)
-if(VW_AGGR_FUSED_KINDS)
-  if(NOT VW_AGGR_FUSED AND NOT VW_GROUP_DISPATCH)
-    message(FATAL_ERROR "VW_AGGR_FUSED_KINDS specializes the fused aggregate update; enable VW_AGGR_FUSED or VW_GROUP_DISPATCH")
+# VW_AGGR_FUSED_BUCKET: for group-bys the fused update applies to, update by
+# group instead of by row: per vector, counting-sort the rows by the groups
+# they touch and sum each group's aggregates in registers (no store-to-load
+# chain per row). Sticky fallback: the first vector that touches more than
+# VW_AGGR_FUSED_BUCKET_MAX_GROUPS groups switches the operator (per thread)
+# to the fused pass for the rest of the query.
+OPTION(VW_AGGR_FUSED_BUCKET "Bucketed fused aggregate update in VectorWise HashGroup" OFF)
+set(VW_AGGR_FUSED_BUCKET_MAX_GROUPS 256 CACHE STRING
+    "VW_AGGR_FUSED_BUCKET: groups per vector above which the operator falls back to the fused pass")
+if(VW_AGGR_FUSED_BUCKET)
+  if(NOT VW_AGGR_FUSED)
+    message(FATAL_ERROR "VW_AGGR_FUSED_BUCKET replaces the fused aggregate update; enable VW_AGGR_FUSED")
   endif()
-  ADD_DEFINITIONS(-DVW_AGGR_FUSED_KINDS=1)
-  message(STATUS "Building with VW_AGGR_FUSED_KINDS")
+  if(NOT VW_AGGR_FUSED_BUCKET_MAX_GROUPS GREATER 0 OR VW_AGGR_FUSED_BUCKET_MAX_GROUPS GREATER 65535)
+    message(FATAL_ERROR "VW_AGGR_FUSED_BUCKET_MAX_GROUPS must be 1..65535")
+  endif()
+  ADD_DEFINITIONS(-DVW_AGGR_FUSED_BUCKET=1
+                  -DVW_AGGR_FUSED_BUCKET_MAX_GROUPS=${VW_AGGR_FUSED_BUCKET_MAX_GROUPS})
+  message(STATUS "Building with VW_AGGR_FUSED_BUCKET (fallback above ${VW_AGGR_FUSED_BUCKET_MAX_GROUPS} groups per vector)")
+endif()
+
+# VW_AGGR_DIRECT: for group-bys whose aggregates are all int64 SUM / COUNT(*),
+# a vector that touches at most 8 groups sums each aggregate in one pass with
+# one register accumulator per group (include/vectorwise/AggrDirect.hpp);
+# columns read through a selection are summed over the row positions, so
+# there is no gather. Independent of VW_AGGR_FUSED: sticky, the first vector
+# touching more groups switches the operator to the next update compiled in
+# (VW_AGGR_FUSED_BUCKET, else VW_AGGR_FUSED, else the interpreted passes).
+# VW_AGGR_DIRECT_ISA: auto (AVX-512F, else AVX2, else scalar, from the
+# target), or force avx512 / avx2 / scalar (the target must support it).
+OPTION(VW_AGGR_DIRECT "Register-accumulator grouped SUM for vectors with few groups in VectorWise HashGroup" OFF)
+set(VW_AGGR_DIRECT_ISA auto CACHE STRING
+    "VW_AGGR_DIRECT kernel ISA: auto, avx512, avx2 or scalar")
+if(VW_AGGR_DIRECT)
+  ADD_DEFINITIONS(-DVW_AGGR_DIRECT=1)
+  if(VW_AGGR_DIRECT_ISA STREQUAL "avx512")
+    ADD_DEFINITIONS(-DVW_AGGR_DIRECT_ISA_AVX512=1)
+  elseif(VW_AGGR_DIRECT_ISA STREQUAL "avx2")
+    ADD_DEFINITIONS(-DVW_AGGR_DIRECT_ISA_AVX2=1)
+  elseif(VW_AGGR_DIRECT_ISA STREQUAL "scalar")
+    ADD_DEFINITIONS(-DVW_AGGR_DIRECT_ISA_SCALAR=1)
+  elseif(NOT VW_AGGR_DIRECT_ISA STREQUAL "auto")
+    message(FATAL_ERROR "VW_AGGR_DIRECT_ISA must be auto, avx512, avx2 or scalar (got '${VW_AGGR_DIRECT_ISA}')")
+  endif()
+  message(STATUS "Building with VW_AGGR_DIRECT (ISA ${VW_AGGR_DIRECT_ISA})")
 endif()
 
 # VW_PROJ_COMPOUND: compound projection primitives (X100-style). Inside one
@@ -272,23 +269,11 @@ if(VW_PROJ_COMPOUND)
   message(STATUS "Building with VW_PROJ_COMPOUND")
 endif()
 
-OPTION(VW_GROUP_AGGR_SEL "Perform selection vector batching for VectorWise" OFF)
-if(VW_GROUP_AGGR_SEL)
-  ADD_DEFINITIONS(-DVW_GROUP_AGGR_SEL=1)
-  message(STATUS "Building with VW_GROUP_AGGR_SEL")
-endif(VW_GROUP_AGGR_SEL)
-
 OPTION(VW_POS_16 "Use uint16_t for VectorWise pos_t" OFF)
 if(VW_POS_16)
   ADD_DEFINITIONS(-DVW_POS_16=1)
   message(STATUS "Building with VW_POS_16")
 endif(VW_POS_16)
-
-OPTION(VW_FUSE_HASH "Perform hash inside Lookup() for VectorWise GROUP BY" OFF)
-if(VW_FUSE_HASH)
-  ADD_DEFINITIONS(-DVW_FUSE_HASH=1)
-  message(STATUS "Building with VW_FUSE_HASH")
-endif(VW_FUSE_HASH)
 
 # AVX-512 selection kernels (include/vectorwise/SimdSelection.hpp). The
 # existing sel_*/selsel_* primitive names are redirected to the SIMD kernels
@@ -1071,6 +1056,7 @@ add_executable(run_aggrbench
   )
 target_include_directories(run_aggrbench PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/simde>
     $<INSTALL_INTERFACE:include>
     PRIVATE src)
 
@@ -1150,6 +1136,7 @@ add_executable(test_all
   src/test/vectorwise/simd_selection.cpp
   src/test/vectorwise/simd_hash.cpp
   src/test/vectorwise/simd_aggr.cpp
+  src/test/vectorwise/aggr_direct.cpp
   src/test/vectorwise/compound.cpp
   src/test/vectorwise/bloom_avx2.cpp
   src/test/vectorwise/crc32_fast.cpp
