@@ -167,9 +167,38 @@ endif()
 #                           and direct paths (needs one of them)
 #   VW_GROUP_GLOBAL_DIRECT  phase 2: global find-or-create
 #   VW_GROUP_DISPATCH       phase 1: plan-resolved key loop (implies nothing)
-# The code of earlier options (VW_GROUP_AGGR, _SEL, VW_FUSE_HASH,
-# VW_GROUP_NO_CONCAT, VW_GROUP_RUN_HEADS) is still in the
-# sources but has no CMake option; VW_SPILL_WORD_COPY was removed.
+#   VW_GROUP_AGGR           phase 1: lookup + aggregate update, group-wise
+#                           (alone: excludes every option above)
+# The code of earlier options (VW_FUSE_HASH, VW_GROUP_NO_CONCAT,
+# VW_GROUP_RUN_HEADS) is still in the sources but has no CMake option;
+# VW_SPILL_WORD_COPY was removed.
+
+# VW_GROUP_AGGR: HashGroup's Lookup records each row's position in its
+# group's Group record (pos[1024]: vector size at most 1024) and the
+# aggregates run once per group over those positions, instead of one
+# read-modify-write through htMatches per row. Only on the Lookup_T path:
+# it fills neither htMatches (the fused and direct updates read them) nor
+# the dispatch key loop's groups, and creates groups one at a time.
+# VW_GROUP_AGGR_SEL (needs VW_GROUP_AGGR) also records the selection index
+# per row, so selective aggregates read param[sel[i]] directly.
+OPTION(VW_GROUP_AGGR "Group-wise GROUP BY aggregation in VectorWise HashGroup" OFF)
+OPTION(VW_GROUP_AGGR_SEL "VW_GROUP_AGGR: per-group selection indices" OFF)
+if(VW_GROUP_AGGR)
+  foreach(opt VW_AGGR_FUSED VW_AGGR_DIRECT VW_GROUP_DISPATCH VW_GROUP_BATCH_CREATE)
+    if(${opt})
+      message(FATAL_ERROR "VW_GROUP_AGGR replaces HashGroup's lookup and aggregate update; disable ${opt}")
+    endif()
+  endforeach()
+  ADD_DEFINITIONS(-DVW_GROUP_AGGR=1)
+  message(STATUS "Building with VW_GROUP_AGGR")
+endif()
+if(VW_GROUP_AGGR_SEL)
+  if(NOT VW_GROUP_AGGR)
+    message(FATAL_ERROR "VW_GROUP_AGGR_SEL extends VW_GROUP_AGGR; enable VW_GROUP_AGGR")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_AGGR_SEL=1)
+  message(STATUS "Building with VW_GROUP_AGGR_SEL")
+endif()
 
 # VW_GROUP_BATCH_CREATE: HashGroup pre-aggregation creates a vector's new
 # groups in one consecutive block and initializes them (buildScatter) once
