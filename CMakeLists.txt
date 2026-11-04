@@ -812,6 +812,15 @@ ELSE(AUTOVECTORIZE)
 	endif(CLANG)
 ENDIF(AUTOVECTORIZE)
 
+# VW_NOVECTORIZE_ATTR: restore the original gcc no-tree-vectorize attribute
+# on the Hyper query functions (NOVECTORIZE in Compat.hpp, empty since
+# c024fb4). gcc does not apply it to the TBB lambdas that hold the loops.
+OPTION(VW_NOVECTORIZE_ATTR "gcc no-tree-vectorize attribute on the Hyper query functions" OFF)
+if(VW_NOVECTORIZE_ATTR)
+  ADD_DEFINITIONS(-DNOVECTORIZE_ATTR=1)
+  message(STATUS "Building with VW_NOVECTORIZE_ATTR")
+endif()
+
 # PGO: profile-guided optimization
 # Usage: build with -DPGO=generate, run workload, rebuild with -DPGO=use
 set(PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, generate, or use")
