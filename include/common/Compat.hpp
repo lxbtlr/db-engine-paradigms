@@ -81,5 +81,9 @@ DIAGNOSTIC_POP
 
 // clang-format on
 
+#if defined(NOVECTORIZE_ATTR) && COMPILER==GCCC
+#define NOVECTORIZE __attribute__((optimize("no-tree-vectorize")))
+#else
 #define NOVECTORIZE
+#endif
 } // namespace compat
