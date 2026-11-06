@@ -233,6 +233,26 @@ if(VW_GROUP_DISPATCH)
   message(STATUS "Building with VW_GROUP_DISPATCH")
 endif()
 
+# VW_GROUP_CONCAT_SIMD: HashGroup packs its key columns in one pass, a byte
+# permute per column planned once from the key shape (SimdConcat.hpp), in
+# Concat and in VW_GROUP_DISPATCH's compound key step. AVX-512 VBMI where the
+# compiler targets it (Ice Lake and newer), else AVX2, else NEON; key shapes
+# it does not cover keep the per-column copy.
+# VW_GROUP_CONCAT_SEL: how keys read through a selection vector are loaded:
+# stage (scalar loads into a stack buffer) or gather (vpgather / NEON lane
+# loads).
+OPTION(VW_GROUP_CONCAT_SIMD "One-pass SIMD compound key concatenation in VectorWise HashGroup" OFF)
+set(VW_GROUP_CONCAT_SEL "stage" CACHE STRING "VW_GROUP_CONCAT_SIMD selection-vector loads: stage or gather")
+if(VW_GROUP_CONCAT_SIMD)
+  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_SIMD=1)
+  if(VW_GROUP_CONCAT_SEL STREQUAL "gather")
+    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_GATHER=1)
+  elseif(NOT VW_GROUP_CONCAT_SEL STREQUAL "stage")
+    message(FATAL_ERROR "VW_GROUP_CONCAT_SEL must be stage or gather")
+  endif()
+  message(STATUS "Building with VW_GROUP_CONCAT_SIMD (${VW_GROUP_CONCAT_SEL})")
+endif()
+
 # VW_AGGR_FUSED: HashGroup updates all int64 SUM / COUNT(*) aggregates of a
 # row's pre-aggregation entry in one pass instead of one pass per aggregate
 # (breaks the per-aggregate store-forwarding chains; TPC-H Q1). Group-bys
@@ -1109,6 +1129,15 @@ target_include_directories(run_hashbench PUBLIC
     PRIVATE src)
 target_link_libraries(run_hashbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
 
+add_executable(run_concatbench
+  src/benchmarks/primitives/concatbench.cpp
+  )
+target_include_directories(run_concatbench PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+    PRIVATE src)
+target_link_libraries(run_concatbench vectorwise common ${TBB_LIBRARIES} ${JEVENTSLIB})
+
 add_executable(run_aggrbench
   src/benchmarks/primitives/aggrbench.cpp
   )
@@ -1196,6 +1225,7 @@ add_executable(test_all
   src/test/vectorwise/simd_aggr.cpp
   src/test/vectorwise/aggr_direct.cpp
   src/test/vectorwise/compound.cpp
+  src/test/vectorwise/group_concat.cpp
   src/test/vectorwise/bloom_avx2.cpp
   src/test/vectorwise/crc32_fast.cpp
   src/test/vectorwise/Operators.cpp

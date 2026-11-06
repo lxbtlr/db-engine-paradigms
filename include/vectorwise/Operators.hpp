@@ -8,6 +8,7 @@
 #include "common/runtime/PartitionedDeque.hpp"
 #include "common/runtime/Query.hpp"
 #include "vectorwise/Primitives.hpp"
+#include "vectorwise/SimdConcat.hpp"
 #include <atomic>
 #include <cstdint>
 #include <deque>
@@ -691,6 +692,14 @@ class HashGroup : public UnaryOperator {
 
    void Concat(pos_t n);
    template <typename T> void Concat_T(pos_t n, const KeyColumn& col);
+#ifdef VW_GROUP_CONCAT_SIMD
+   /// VW_GROUP_CONCAT_SIMD: all key columns packed in one pass by a kernel
+   /// planned once from the key shape (SimdConcat.hpp); false (Concat_T
+   /// per column) for shapes it does not cover
+   primitives::simd_concat::Plan concatPlan;
+   bool concatPlanned = false;
+   bool concatSimd(pos_t n);
+#endif
 
    void Hash(pos_t n);
    template <typename T> void Hash_T(pos_t n);

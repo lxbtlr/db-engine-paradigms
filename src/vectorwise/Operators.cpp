@@ -1931,9 +1931,18 @@ size_t HashGroup::next() {
 #endif
       };
 
+#ifdef VW_GROUP_CONCAT_SIMD
+      // the AVX2 / NEON kernels store whole lanes past the last key
+      if (packedKeys.size() <
+          vecSize * totalKeySize + primitives::simd_concat::kSlack) {
+         packedKeys.resize(vecSize * totalKeySize +
+                           primitives::simd_concat::kSlack);
+      }
+#else
       if (packedKeys.size() < vecSize * totalKeySize) {
          packedKeys.resize(vecSize * totalKeySize);
       }
+#endif
 #ifdef VW_GROUP_AGGR
       if (groups.capacity() < vecSize) {
          groups.reserve(vecSize);
@@ -2733,6 +2742,9 @@ void HashGroup::resolvePaths() {
 }
 
 void HashGroup::concatResolved(pos_t n) {
+#ifdef VW_GROUP_CONCAT_SIMD
+   if (concatSimd(n)) return;
+#endif
    for (size_t c = 0; c < keyColumns.size(); ++c)
       (this->*concatSteps[c])(n, keyColumns[c]);
 }
@@ -2934,7 +2946,47 @@ void HashGroup::keyStepT(pos_t n) {
 #endif // VW_GROUP_DISPATCH
 
 // CONCAT
+#ifdef VW_GROUP_CONCAT_SIMD
+bool HashGroup::concatSimd(pos_t n) {
+   namespace sc = primitives::simd_concat;
+   const size_t cols = keyColumns.size();
+   if (!concatPlanned) {
+      // planned at the first vector: whether a key reads through a selection
+      // vector is fixed by the plan, its pointer is rebound per vector
+      concatPlanned = true;
+      if (cols <= sc::kMaxCols) {
+         uint32_t width[sc::kMaxCols], offset[sc::kMaxCols];
+         bool sel[sc::kMaxCols];
+         for (size_t c = 0; c < cols; ++c) {
+            width[c] = keyColumns[c].size;
+            offset[c] = keyColumns[c].offset;
+            sel[c] = keyColumns[c].sel != nullptr;
+         }
+#ifdef VW_GROUP_CONCAT_GATHER
+         constexpr auto selLoad = sc::SelLoad::Gather;
+#else
+         constexpr auto selLoad = sc::SelLoad::Stage;
+#endif
+         sc::build(concatPlan, sc::best(), selLoad, cols, width, offset, sel,
+                   totalKeySize);
+      }
+   }
+   if (!concatPlan.ok) return false;
+   const char* data[sc::kMaxCols];
+   const pos_t* sel[sc::kMaxCols];
+   for (size_t c = 0; c < cols; ++c) {
+      data[c] = static_cast<const char*>(keyColumns[c].data);
+      sel[c] = keyColumns[c].sel;
+   }
+   sc::run(concatPlan, n, data, sel, packedKeys.data());
+   return true;
+}
+#endif
+
 void HashGroup::Concat(pos_t n) {
+#ifdef VW_GROUP_CONCAT_SIMD
+   if (concatSimd(n)) return;
+#endif
    for (const auto& col : keyColumns) {
       switch (col.size) {
          case 1: Concat_T<uint8_t>(n, col); break;
