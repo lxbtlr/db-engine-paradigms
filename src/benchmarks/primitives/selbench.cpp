@@ -5,10 +5,17 @@
 //
 // Usage: run_selbench [-v vecSize] [-m l1|stream|all] [-r reps]
 //                     [-s sel%,sel%,...] [-d inSel density %]
+//                     [-R lo:hi,lo:hi,...] [-f family substring]
 //   l1     : one vecSize-long vector, called reps times (cache resident)
 //   stream : a 64 MiB column scanned vector by vector (as a Scan does)
-// Output: CSV on stdout, one row per (kernel, impl, mode, selectivity).
+//   -R     : range bounds for the between families; values are uniform in
+//            [0, 100), so x >= lo passes 100-lo %, x < hi passes hi %
+//   -f     : run only the families whose name contains the substring
+// Output: CSV on stdout, one row per (kernel, impl, mode, selectivity). The
+// between families (VW_SEL_BETWEEN) put the bounds in op ("ge_lt:lo:hi") and
+// the overall pass rate in sel_pct.
 #include "common/runtime/Types.hpp"
+#include "vectorwise/BetweenPrimitives.hpp"
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/SimdSelection.hpp"
 #include <algorithm>
@@ -20,6 +27,7 @@
 #include <random>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <unistd.h>
 #include <vector>
 
@@ -35,6 +43,13 @@ size_t reps = 20000;
 std::string mode = "all";
 std::vector<int> sels = {1, 10, 50, 90, 99};
 int inDensity = 50;
+std::string onlyFamily;
+// default ranges: overall 15% with each bound first (Q6 l_shipdate is ~15%
+// of which the upper bound passes most), 1%, 27% (SSB Q1.1 lo_discount),
+// 85%, all
+std::vector<std::pair<int, int>> ranges = {{40, 55}, {0, 15}, {85, 100},
+                                           {45, 46}, {20, 47}, {10, 95},
+                                           {0, 100}};
 constexpr size_t kStreamBytes = 64ull << 20;
 
 volatile size_t sink; // keeps results alive
@@ -79,6 +94,9 @@ void row(const std::string& family, const char* impl, const char* type,
 }
 
 bool wantMode(const char* m) { return mode == "all" || mode == m; }
+bool wantFamily(const std::string& f) {
+   return onlyFamily.empty() || f.find(onlyFamily) != std::string::npos;
+}
 
 struct Impl3 {
    const char* name;
@@ -93,6 +111,7 @@ struct Impl4 {
 template <typename T, template <typename> class Op>
 void benchF3(const std::string& family, bool colcol,
              const std::vector<Impl3>& impls) {
+   if (!wantFamily(family)) return;
    std::mt19937_64 rng(1);
    std::uniform_int_distribution<int> d(0, 99);
    const size_t total = wantMode("stream") ? kStreamBytes / sizeof(T) : vecSize;
@@ -144,6 +163,7 @@ void benchF3(const std::string& family, bool colcol,
 template <typename T, template <typename> class Op>
 void benchF4(const std::string& family, bool colcol,
              const std::vector<Impl4>& impls) {
+   if (!wantFamily(family)) return;
    std::mt19937_64 rng(2);
    std::uniform_int_distribution<int> d(0, 99);
    const size_t total = wantMode("stream") ? kStreamBytes / sizeof(T) : vecSize;
@@ -263,6 +283,7 @@ template <typename T, template <typename> class Op> void selselColCol() {
 
 /// Char<N> == constant over a column of TPC-H-like segment names.
 template <unsigned N> void charEq() {
+   if (!wantFamily("char_eq_" + std::to_string(N))) return;
    using C = Char<N>;
    static const char* words[] = {"AUTOMOBILE", "BUILDING", "FURNITURE",
                                  "MACHINERY", "HOUSEHOLD"};
@@ -313,6 +334,153 @@ template <unsigned N> void charEq() {
    }
 }
 
+template <typename T> auto rawOf(const T& v) {
+   if constexpr (std::is_same<T, Date>::value)
+      return v.value;
+   else
+      return v;
+}
+
+/// Range lo <= x < hi (HiStrict) or lo <= x <= hi: the two-primitive chain
+/// (either bound first; the VW plans test the upper bound first) against the
+/// fused kernels. Dense input (family between) and gathered input through a
+/// selection vector of ~inDensity% (selsel_between). fused_unsigned is
+/// (x - lo) < (hi - lo) in unsigned arithmetic, one compare per row; it is a
+/// bound only (not in the engine: Typer's bounds are runtime values, so its
+/// compiler cannot make that rewrite).
+template <typename T, template <typename> class Hi> void benchBetween(bool gathered) {
+   const std::string family = gathered ? "selsel_between" : "between";
+   if (!wantFamily(family)) return;
+   constexpr bool hiStrict = std::is_same<Hi<T>, std::less<T>>::value;
+   using R = std::conditional_t<sizeof(T) == 8, uint64_t, uint32_t>;
+   // fn(n, inSel or nullptr, result, scratch, col, lo, hi)
+   using FB = pos_t (*)(pos_t, pos_t*, pos_t*, pos_t*, T*, T*, T*);
+   struct ImplB {
+      const char* name;
+      FB fn;
+   };
+   std::vector<ImplB> impls = {
+       {"chain_hilo_bf",
+        +[](pos_t n, pos_t* in, pos_t* res, pos_t* tmp, T* a, T* lo, T* hi) {
+           pos_t k = in ? selsel_col_val_bf<T, Hi>(n, in, tmp, a, hi)
+                        : sel_col_val_bf<T, Hi>(n, tmp, a, hi);
+           return selsel_col_val_bf<T, std::greater_equal>(k, tmp, res, a, lo);
+        }},
+       {"chain_lohi_bf",
+        +[](pos_t n, pos_t* in, pos_t* res, pos_t* tmp, T* a, T* lo, T* hi) {
+           pos_t k = in ? selsel_col_val_bf<T, std::greater_equal>(n, in, tmp, a, lo)
+                        : sel_col_val_bf<T, std::greater_equal>(n, tmp, a, lo);
+           return selsel_col_val_bf<T, Hi>(k, tmp, res, a, hi);
+        }},
+       {"fused_bf",
+        +[](pos_t n, pos_t* in, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+           return in ? between::between_bf<T, std::greater_equal, Hi, true>(n, in, res, a, lo, hi)
+                     : between::between_bf<T, std::greater_equal, Hi, false>(n, in, res, a, lo, hi);
+        }},
+       {"fused_unsigned",
+        +[](pos_t n, pos_t* in, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+           const R l = R(rawOf(*lo)), w = R(R(rawOf(*hi)) - l);
+           pos_t found = 0;
+           for (pos_t i = 0; i < n; i++) {
+              const pos_t idx = in ? in[i] : i;
+              const R d = R(R(rawOf(a[idx])) - l);
+              res[found] = idx;
+              found += hiStrict ? d < w : d <= w;
+           }
+           return found;
+        }},
+#ifdef VW_HAVE_SIMD_SEL
+       // what fair_sel runs: SIMD on dense input, scalar _bf on gathered
+       {"chain_hilo_simd",
+        +[](pos_t n, pos_t* in, pos_t* res, pos_t* tmp, T* a, T* lo, T* hi) {
+           pos_t k = in ? selsel_col_val_bf<T, Hi>(n, in, tmp, a, hi)
+                        : simd::sel_col_val<T, Hi>(n, tmp, a, hi);
+           return selsel_col_val_bf<T, std::greater_equal>(k, tmp, res, a, lo);
+        }},
+       {"chain_hilo_simd_sl",
+        +[](pos_t n, pos_t* in, pos_t* res, pos_t* tmp, T* a, T* lo, T* hi) {
+           pos_t k = in ? simd::selsel_col_val_scalarload<T, Hi>(n, in, tmp, a, hi)
+                        : simd::sel_col_val<T, Hi>(n, tmp, a, hi);
+           return simd::selsel_col_val_scalarload<T, std::greater_equal>(
+               k, tmp, res, a, lo);
+        }},
+#endif
+   };
+#ifdef VW_HAVE_SIMD_SEL
+   using simd::Emit;
+   if (!gathered) {
+      impls.push_back({"fused_simd512_reg", +[](pos_t n, pos_t*, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return simd::sel_between_v<T, std::greater_equal, Hi, Emit::Reg>(n, res, a, lo, hi);
+                       }});
+      impls.push_back({"fused_simd512_mem", +[](pos_t n, pos_t*, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return simd::sel_between_v<T, std::greater_equal, Hi, Emit::Mem>(n, res, a, lo, hi);
+                       }});
+#ifdef VW_HAVE_SIMD_SEL_256
+      impls.push_back({"fused_simd256_reg", +[](pos_t n, pos_t*, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return simd::sel_between_256<T, std::greater_equal, Hi, Emit::Reg>(n, res, a, lo, hi);
+                       }});
+#endif
+   } else {
+      impls.push_back({"fused_scalarload", +[](pos_t n, pos_t* in, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return simd::selsel_between_scalarload<T, std::greater_equal, Hi>(n, in, res, a, lo, hi);
+                       }});
+      impls.push_back({"fused_hwgather", +[](pos_t n, pos_t* in, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return simd::selsel_between_hwgather<T, std::greater_equal, Hi>(n, in, res, a, lo, hi);
+                       }});
+   }
+#endif
+
+   std::mt19937_64 rng(4);
+   std::uniform_int_distribution<int> d(0, 99);
+   const size_t total = wantMode("stream") ? kStreamBytes / sizeof(T) : vecSize;
+   std::vector<T> a(std::max(total, vecSize));
+   for (auto& x : a) x = mk<T>(d(rng));
+   std::vector<pos_t> inSel;
+   for (size_t i = 0; i < vecSize; ++i)
+      if (!gathered || d(rng) < inDensity) inSel.push_back(pos_t(i));
+   const size_t k = inSel.size();
+   pos_t* in = gathered ? inSel.data() : nullptr;
+   const int density = gathered ? inDensity : 100;
+   std::vector<pos_t> res(vecSize + 64), tmp(vecSize + 64);
+   for (auto [l, h] : ranges) {
+      // x <= h-1 passes the same rows as x < h
+      T lo = mk<T>(l), hi = mk<T>(hiStrict ? h : h - 1);
+      const std::string op = std::string(hiStrict ? "ge_lt:" : "ge_le:") +
+                             std::to_string(l) + ":" + std::to_string(h);
+      const int pct = std::max(0, h - l);
+      for (auto& im : impls) {
+         if (wantMode("l1")) {
+            size_t found = 0;
+            double ns = bestNs(
+                [&] {
+                   for (size_t r = 0; r < reps; ++r)
+                      found = im.fn(k, in, res.data(), tmp.data(), a.data(),
+                                    &lo, &hi);
+                },
+                reps * k);
+            sink = found;
+            row(family, im.name, tname<T>(), op.c_str(), "l1", density, pct,
+                ns, found);
+         }
+         if (wantMode("stream")) {
+            size_t found = 0;
+            const size_t chunks = total / vecSize;
+            double ns = bestNs(
+                [&] {
+                   found = 0;
+                   for (size_t ch = 0; ch < chunks; ++ch)
+                      found += im.fn(k, in, res.data(), tmp.data(),
+                                     a.data() + ch * vecSize, &lo, &hi);
+                },
+                chunks * k);
+            sink = found;
+            row(family, im.name, tname<T>(), op.c_str(), "stream", density,
+                pct, ns, found);
+         }
+      }
+   }
+}
+
 std::vector<int> parseList(const char* s) {
    std::vector<int> out;
    std::stringstream ss(s);
@@ -325,17 +493,29 @@ std::vector<int> parseList(const char* s) {
 
 int main(int argc, char** argv) {
    int opt;
-   while ((opt = getopt(argc, argv, "v:m:r:s:d:")) != -1) {
+   while ((opt = getopt(argc, argv, "v:m:r:s:d:R:f:")) != -1) {
       switch (opt) {
       case 'v': vecSize = std::strtoull(optarg, nullptr, 10); break;
       case 'm': mode = optarg; break;
       case 'r': reps = std::strtoull(optarg, nullptr, 10); break;
       case 's': sels = parseList(optarg); break;
       case 'd': inDensity = std::atoi(optarg); break;
+      case 'f': onlyFamily = optarg; break;
+      case 'R': {
+         ranges.clear();
+         std::stringstream ss(optarg);
+         std::string tok;
+         while (std::getline(ss, tok, ',')) {
+            const auto c = tok.find(':');
+            ranges.push_back({std::atoi(tok.substr(0, c).c_str()),
+                              std::atoi(tok.substr(c + 1).c_str())});
+         }
+         break;
+      }
       default:
          std::fprintf(stderr,
                       "usage: %s [-v vec] [-m l1|stream|all] [-r reps] "
-                      "[-s sel,..] [-d density]\n",
+                      "[-s sel,..] [-d density] [-R lo:hi,..] [-f family]\n",
                       argv[0]);
          return 1;
       }
@@ -372,5 +552,13 @@ int main(int argc, char** argv) {
    // Char<N> == constant (Q3 c_mktsegment is Char<10>)
    charEq<10>();
    charEq<25>();
+
+   // ranges (VW_SEL_BETWEEN): Q6 l_shipdate int32 [lo, hi), Q5 o_orderdate
+   // Date [lo, hi), Q6 / SSB Q1.x l_discount, lo_quantity int64 [lo, hi]
+   for (bool gathered : {false, true}) {
+      benchBetween<int32_t, std::less>(gathered);
+      benchBetween<Date, std::less>(gathered);
+      benchBetween<int64_t, std::less_equal>(gathered);
+   }
    return 0;
 }

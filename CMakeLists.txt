@@ -318,6 +318,18 @@ if(VW_PROJ_COMPOUND)
   message(STATUS "Building with VW_PROJ_COMPOUND")
 endif()
 
+# VW_SEL_BETWEEN: compound range selection (X100-style). Inside one Select
+# expression, a lower (>=, >) and an upper (<=, <) bound comparison of the
+# same int32/int64/Date column with constants, the second reading the first's
+# selection, run as one pass (BetweenPrimitives.hpp); pairs are found by
+# ExpressionBuilder at build time and the selection between them is not
+# written. Kernels follow VW_SIMD_SEL and its WIDTH/COMPRESS/GATHER options.
+OPTION(VW_SEL_BETWEEN "Compound range selection in VectorWise expressions" OFF)
+if(VW_SEL_BETWEEN)
+  ADD_DEFINITIONS(-DVW_SEL_BETWEEN=1)
+  message(STATUS "Building with VW_SEL_BETWEEN")
+endif()
+
 OPTION(VW_POS_16 "Use uint16_t for VectorWise pos_t" OFF)
 if(VW_POS_16)
   ADD_DEFINITIONS(-DVW_POS_16=1)
@@ -378,7 +390,9 @@ if(VW_SIMD_SEL_WIDTH STREQUAL "256")
   # compare. Functions using zmm intrinsics (the 512 kernels) keep zmm.
   set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/vectorwise/primitives/Selection.cpp
+    ${CMAKE_SOURCE_DIR}/src/vectorwise/primitives/Between.cpp
     ${CMAKE_SOURCE_DIR}/src/benchmarks/primitives/selbench.cpp
+    ${CMAKE_SOURCE_DIR}/src/test/vectorwise/between.cpp
     ${CMAKE_SOURCE_DIR}/src/test/vectorwise/simd_selection.cpp
     PROPERTIES COMPILE_OPTIONS "-mprefer-vector-width=256")
 elseif(NOT VW_SIMD_SEL_WIDTH STREQUAL "512")
@@ -1196,6 +1210,7 @@ add_executable(test_all
   src/test/vectorwise/simd_aggr.cpp
   src/test/vectorwise/aggr_direct.cpp
   src/test/vectorwise/compound.cpp
+  src/test/vectorwise/between.cpp
   src/test/vectorwise/bloom_avx2.cpp
   src/test/vectorwise/crc32_fast.cpp
   src/test/vectorwise/Operators.cpp

@@ -546,6 +546,10 @@ config_flags() {
     fair_kinds)          echo "$(config_flags fair_gdisp) -DVW_AGGR_KINDS=ON" ;;
     fair_compound)       echo "$(config_flags fair_kinds) -DVW_PROJ_COMPOUND=ON" ;;
     fair_bloom)          echo "$(config_flags fair_compound) -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
+    # compound range selection: on top of the fair pool, and against fair_sel
+    # alone (one Select, the work Typer's && does; Q5, Q6, SSB Q1.x, Q3.x)
+    fair_between)        echo "$(config_flags fair_compound) -DVW_SEL_BETWEEN=ON" ;;
+    sel_between)         echo "$(config_flags fair_sel) -DVW_SEL_BETWEEN=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

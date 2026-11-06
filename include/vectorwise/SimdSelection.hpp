@@ -471,6 +471,118 @@ pos_t sel_col_col(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
 #endif
 }
 
+//--- range (VW_SEL_BETWEEN, BetweenPrimitives.hpp) ---------------------------
+// Lo(x, *lo) && Hi(x, *hi): each element is loaded once and compared twice,
+// the second compare under the first's mask, then one compress. No unroll.
+
+template <typename T>
+inline void load16(const T* a, size_t i, __mmask16 k, __m512i& lo,
+                   __m512i& hi) {
+   if constexpr (Width<T>::bits == 32) {
+      lo = hi = _mm512_maskz_loadu_epi32(k, a + i);
+   } else {
+      lo = _mm512_maskz_loadu_epi64((__mmask8)k, a + i);
+      hi = _mm512_maskz_loadu_epi64((__mmask8)(k >> 8), a + i + 8);
+   }
+}
+
+/// result = positions i with Lo(param1[i], *lo) && Hi(param1[i], *hi), zmm
+template <typename T, template <typename> class Lo, template <typename> class Hi,
+          Emit E>
+pos_t sel_between_v(pos_t n, pos_t* RES result, T* RES param1, T* RES lo,
+                    T* RES hi) {
+   static_assert(kernel_ok<T, Lo> && kernel_ok<T, Hi>,
+                 "unsupported type/comparator");
+   const __m512i cl = broadcast(*lo), ch = broadcast(*hi);
+   const __m512i step = _mm512_set1_epi32(16);
+   __m512i ids = lane_ids();
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16) {
+      __m512i vlo, vhi;
+      if constexpr (Width<T>::bits == 32) {
+         vlo = vhi = _mm512_loadu_si512(param1 + i);
+      } else {
+         vlo = _mm512_loadu_si512(param1 + i);
+         vhi = _mm512_loadu_si512(param1 + i + 8);
+      }
+      const __mmask16 m = cmp_regs<T, Lo>(0xFFFF, vlo, vhi, cl, cl);
+      found += emit_as<E>(result + found, cmp_regs<T, Hi>(m, vlo, vhi, ch, ch),
+                          ids);
+      ids = _mm512_add_epi32(ids, step);
+   }
+   if (i < n) {
+      const __mmask16 k = tail_mask(n - i);
+      __m512i vlo, vhi;
+      load16(param1, i, k, vlo, vhi);
+      const __mmask16 m = cmp_regs<T, Lo>(k, vlo, vhi, cl, cl);
+      found += emit_as<E>(result + found, cmp_regs<T, Hi>(m, vlo, vhi, ch, ch),
+                          ids);
+   }
+   return found;
+}
+
+#ifdef VW_HAVE_SIMD_SEL_256
+/// 8 elements a[i..i+8) (k = valid lanes) in range, ymm
+template <typename T, template <typename> class Lo, template <typename> class Hi>
+inline __mmask8 between8(const T* a, size_t i, __mmask8 k, __m256i cl,
+                         __m256i ch) {
+   constexpr int L = CmpImm<Lo>::imm, H = CmpImm<Hi>::imm;
+   if constexpr (Width<T>::bits == 32) {
+      const __m256i v = _mm256_maskz_loadu_epi32(k, a + i);
+      const __mmask8 m = _mm256_mask_cmp_epi32_mask(k, v, cl, L);
+      return _mm256_mask_cmp_epi32_mask(m, v, ch, H);
+   } else {
+      const __mmask8 klo = k & 0xF, khi = k >> 4;
+      const __m256i lo = _mm256_maskz_loadu_epi64(klo, a + i);
+      const __m256i hi = _mm256_maskz_loadu_epi64(khi, a + i + 4);
+      __mmask8 mlo = _mm256_mask_cmp_epi64_mask(klo, lo, cl, L);
+      __mmask8 mhi = _mm256_mask_cmp_epi64_mask(khi, hi, cl, L);
+      mlo = _mm256_mask_cmp_epi64_mask(mlo, lo, ch, H);
+      mhi = _mm256_mask_cmp_epi64_mask(mhi, hi, ch, H);
+      return (__mmask8)(mlo | (mhi << 4));
+   }
+}
+
+/// result = positions i with Lo(param1[i], *lo) && Hi(param1[i], *hi), ymm
+template <typename T, template <typename> class Lo, template <typename> class Hi,
+          Emit E>
+pos_t sel_between_256(pos_t n, pos_t* RES result, T* RES param1, T* RES lo,
+                      T* RES hi) {
+   static_assert(kernel_ok<T, Lo> && kernel_ok<T, Hi>,
+                 "unsupported type/comparator");
+   const __m256i cl = broadcast256(*lo), ch = broadcast256(*hi);
+   const __m256i step8 = _mm256_set1_epi32(8), step16 = _mm256_set1_epi32(16);
+   __m256i ids = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16) {
+      const __mmask8 m0 = between8<T, Lo, Hi>(param1, i, 0xFF, cl, ch);
+      const __mmask8 m1 = between8<T, Lo, Hi>(param1, i + 8, 0xFF, cl, ch);
+      found += emit8<E>(result + found, m0, ids);
+      found += emit8<E>(result + found, m1, _mm256_add_epi32(ids, step8));
+      ids = _mm256_add_epi32(ids, step16);
+   }
+   for (; i < n; i += 8) {
+      const size_t r = (n - i < 8) ? n - i : 8;
+      const __mmask8 k = (__mmask8)((1u << r) - 1);
+      found += emit8<E>(result + found,
+                        between8<T, Lo, Hi>(param1, i, k, cl, ch), ids);
+      ids = _mm256_add_epi32(ids, step8);
+   }
+   return found;
+}
+#endif // VW_HAVE_SIMD_SEL_256
+
+/// the variant selected by VW_SIMD_SEL_WIDTH / VW_SIMD_SEL_COMPRESS
+template <typename T, template <typename> class Lo, template <typename> class Hi>
+pos_t sel_between(pos_t n, pos_t* RES result, T* RES param1, T* RES lo,
+                  T* RES hi) {
+#if defined(VW_SIMD_SEL_WIDTH_256) && defined(VW_HAVE_SIMD_SEL_256)
+   return sel_between_256<T, Lo, Hi, kEmit>(n, result, param1, lo, hi);
+#else
+   return sel_between_v<T, Lo, Hi, kEmit>(n, result, param1, lo, hi);
+#endif
+}
+
 //--- gather -> compressed ----------------------------------------------------
 //
 // Two SIMD implementations of the gathered input, chosen with the CMake
@@ -644,6 +756,97 @@ pos_t selsel_col_col(pos_t n, pos_t* RES inSel, pos_t* RES result,
    return selsel_col_col_hwgather<T, Op>(n, inSel, result, param1, param2);
 #else
    return selsel_col_col_scalarload<T, Op>(n, inSel, result, param1, param2);
+#endif
+}
+
+//--- range, gathered input (VW_SEL_BETWEEN) ----------------------------------
+// inSel and result may be the same buffer: a group's entries are loaded
+// before its positions are stored, and stores never pass the group.
+
+/// Match mask of Lo(a[sel[j]], l) && Hi(a[sel[j]], h) for j < 16
+template <typename T, template <typename> class Lo, template <typename> class Hi>
+VW_SEL_INLINE __mmask16 mask16_between(const pos_t* sel, const T* a, T l, T h) {
+   unsigned m0 = 0, m1 = 0;
+   VW_SEL_SCALAR_LOOP
+   for (unsigned j = 0; j < 16; j += 2) {
+      const T v0 = a[sel[j]], v1 = a[sel[j + 1]];
+      unsigned b0 = Lo<T>()(v0, l) & Hi<T>()(v0, h);
+      unsigned b1 = Lo<T>()(v1, l) & Hi<T>()(v1, h);
+      VW_SEL_OPAQUE(b0);
+      VW_SEL_OPAQUE(b1);
+      m0 |= b0 << j;
+      m1 |= b1 << (j + 1);
+      VW_SEL_OPAQUE(m0);
+      VW_SEL_OPAQUE(m1);
+   }
+   return (__mmask16)(m0 | m1);
+}
+
+/// Same for the last r < 16 entries.
+template <typename T, template <typename> class Lo, template <typename> class Hi>
+VW_SEL_INLINE __mmask16 mask_tail_between(const pos_t* sel, size_t r,
+                                          const T* a, T l, T h) {
+   unsigned m = 0;
+   VW_SEL_SCALAR_TAIL
+   for (unsigned j = 0; j < r; ++j) {
+      const T v = a[sel[j]];
+      unsigned bit = Lo<T>()(v, l) & Hi<T>()(v, h);
+      VW_SEL_OPAQUE(bit);
+      m |= bit << j;
+      VW_SEL_OPAQUE(m);
+   }
+   return (__mmask16)m;
+}
+
+/// result = entries idx of inSel in range, scalar loads
+template <typename T, template <typename> class Lo, template <typename> class Hi>
+pos_t selsel_between_scalarload(pos_t n, pos_t* inSel, pos_t* result,
+                                T* RES param1, T* RES lo, T* RES hi) {
+   static_assert(kernel_ok<T, Lo> && kernel_ok<T, Hi>,
+                 "unsupported type/comparator");
+   const T l = *lo, h = *hi;
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16) {
+      const __mmask16 m = mask16_between<T, Lo, Hi>(inSel + i, param1, l, h);
+      found += emit(result + found, m, load_idx(inSel + i, 16));
+   }
+   if (i < n) {
+      const size_t r = n - i;
+      const __mmask16 m =
+          mask_tail_between<T, Lo, Hi>(inSel + i, r, param1, l, h);
+      found += emit(result + found, m, load_idx(inSel + i, r));
+   }
+   return found;
+}
+
+/// result = entries idx of inSel in range, vpgather
+template <typename T, template <typename> class Lo, template <typename> class Hi>
+pos_t selsel_between_hwgather(pos_t n, pos_t* inSel, pos_t* result,
+                              T* RES param1, T* RES lo, T* RES hi) {
+   static_assert(kernel_ok<T, Lo> && kernel_ok<T, Hi>,
+                 "unsupported type/comparator");
+   const __m512i cl = broadcast(*lo), ch = broadcast(*hi);
+   size_t found = 0;
+   for (size_t i = 0; i < n; i += 16) {
+      const size_t r = (n - i < 16) ? n - i : 16;
+      const __mmask16 k = tail_mask(r);
+      const __m512i idx = load_idx(inSel + i, r);
+      __m512i vlo, vhi = cl;
+      gather(param1, idx, k, vlo, vhi);
+      const __mmask16 m = cmp_regs<T, Lo>(k, vlo, vhi, cl, cl);
+      found += emit(result + found, cmp_regs<T, Hi>(m, vlo, vhi, ch, ch), idx);
+   }
+   return found;
+}
+
+template <typename T, template <typename> class Lo, template <typename> class Hi>
+pos_t selsel_between(pos_t n, pos_t* inSel, pos_t* result, T* RES param1,
+                     T* RES lo, T* RES hi) {
+#ifdef VW_SIMD_SEL_GATHER_HWGATHER
+   return selsel_between_hwgather<T, Lo, Hi>(n, inSel, result, param1, lo, hi);
+#else
+   return selsel_between_scalarload<T, Lo, Hi>(n, inSel, result, param1, lo,
+                                               hi);
 #endif
 }
 
