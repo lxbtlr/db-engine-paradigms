@@ -72,9 +72,12 @@ std::vector<Isa> kernels() {
    return v;
 }
 
-/// runs plan p and the reference on the same input
+/// runs plan p and the reference on the same input; shared: every
+/// selection-vector column reads the first one's selection vector (one
+/// filter feeding several key columns, TPC-H Q1)
 void check(const Plan& p, const Shape& s, pos_t n, bool ascending,
-           std::mt19937_64& rng) {
+           std::mt19937_64& rng, bool shared = false) {
+   const pos_t* first = nullptr;
    const size_t cols = s.width.size();
    std::vector<std::unique_ptr<GuardedColumn>> columns;
    std::vector<std::vector<pos_t>> sels(cols);
@@ -95,7 +98,8 @@ void check(const Plan& p, const Shape& s, pos_t n, bool ascending,
          if (n) v[rng() % n] = 0;
          if (ascending) std::sort(v.begin(), v.end());
          v.resize(n + 32); // sel buffers are vector sized
-         sel[c] = v.data();
+         sel[c] = shared && first ? first : v.data();
+         if (!first) first = sel[c];
       }
    }
    const size_t bytes = size_t(n) * s.keySize;
@@ -183,4 +187,30 @@ TEST(GroupConcat, UncoveredShapes) {
    }
    Plan p;
    EXPECT_FALSE(build(p, Isa::Scalar, SelLoad::Stage, 2, w3, o3, sel, 7));
+}
+
+// VW_GROUP_CONCAT_ROW: the instantiated row kernels, with the selection
+// vector shared (the kernel) and not (the per-column fallback)
+TEST(GroupConcat, RowKernels) {
+   std::mt19937_64 rng(13);
+   Shape s;
+   for (uint32_t w : {1u, 1u}) {
+      s.width.push_back(w);
+      s.offset.push_back(s.keySize);
+      s.sel.push_back(true);
+      s.keySize += w;
+   }
+   const bool sel[] = {true, true};
+   Plan p;
+   ASSERT_TRUE(build(p, Isa::Row, SelLoad::Stage, 2, s.width.data(),
+                     s.offset.data(), sel, s.keySize));
+   for (pos_t n : kSizes)
+      for (bool shared : {true, false}) check(p, s, n, true, rng, shared);
+
+   // shapes without an instantiation
+   const uint32_t w22[] = {2, 2}, o22[] = {0, 2};
+   EXPECT_FALSE(build(p, Isa::Row, SelLoad::Stage, 2, w22, o22, sel, 4));
+   const bool mixed[] = {true, false};
+   EXPECT_FALSE(build(p, Isa::Row, SelLoad::Stage, 2, s.width.data(),
+                      s.offset.data(), mixed, 2));
 }

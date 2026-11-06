@@ -240,10 +240,10 @@ void rowTmpl(pos_t n, const char* const* data, const pos_t* const* sel,
    rowTmplImpl<Sel, W...>(n, data, sel, out,
                           std::make_index_sequence<sizeof...(W)>());
 }
-using RowFn = void (*)(pos_t, const char* const*, const pos_t* const*, char*);
+using TmplFn = void (*)(pos_t, const char* const*, const pos_t* const*, char*);
 /// the instantiations for the bench's preset shapes
-RowFn rowTmplFor(const std::string& spec) {
-   static const std::pair<const char*, RowFn> table[] = {
+TmplFn rowTmplFor(const std::string& spec) {
+   static const std::pair<const char*, TmplFn> table[] = {
        {"1s1s", rowTmpl<true, 1, 1>},
        {"2s2s", rowTmpl<true, 2, 2>},
        {"4s4s", rowTmpl<true, 4, 4>},
@@ -434,7 +434,7 @@ int main(int argc, char** argv) {
                                 else
                                    rowGprN<false>(s, n, d, sl, o);
                              }});
-      if (RowFn f = rowTmplFor(s.spec))
+      if (TmplFn f = rowTmplFor(s.spec))
          variants.push_back({"row_tmpl", f});
       if (std::any_of(s.width.begin(), s.width.end(),
                       [](uint32_t w) { return w > 8; }))

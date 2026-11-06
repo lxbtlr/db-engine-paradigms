@@ -252,6 +252,17 @@ if(VW_GROUP_CONCAT_SIMD)
   endif()
   message(STATUS "Building with VW_GROUP_CONCAT_SIMD (${VW_GROUP_CONCAT_SEL})")
 endif()
+# VW_GROUP_CONCAT_ROW (needs VW_GROUP_CONCAT_SIMD): keys of the shapes with a
+# row kernel (SimdConcat.hpp; TPC-H Q1's) are assembled per row in a 64-bit
+# register instead; other shapes take the vector kernels.
+OPTION(VW_GROUP_CONCAT_ROW "VW_GROUP_CONCAT_SIMD: per-row register kernels for the instantiated key shapes" OFF)
+if(VW_GROUP_CONCAT_ROW)
+  if(NOT VW_GROUP_CONCAT_SIMD)
+    message(FATAL_ERROR "VW_GROUP_CONCAT_ROW extends VW_GROUP_CONCAT_SIMD; enable VW_GROUP_CONCAT_SIMD")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_ROW=1)
+  message(STATUS "Building with VW_GROUP_CONCAT_ROW")
+endif()
 
 # VW_AGGR_FUSED: HashGroup updates all int64 SUM / COUNT(*) aggregates of a
 # row's pre-aggregation entry in one pass instead of one pass per aggregate

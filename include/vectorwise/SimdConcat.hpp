@@ -41,7 +41,11 @@ namespace vectorwise {
 namespace primitives {
 namespace simd_concat {
 
-enum class Isa : uint8_t { Scalar, Avx2, Vbmi, Neon };
+/// Row (VW_GROUP_CONCAT_ROW) is not a vector kernel: per row the key is
+/// assembled in a 64-bit register by a function instantiated for the key's
+/// column widths, one index load per row when every column reads the same
+/// selection vector, one store per row (keys up to 8 bytes)
+enum class Isa : uint8_t { Scalar, Avx2, Vbmi, Neon, Row };
 /// how a column read through a selection vector is brought into a register
 enum class SelLoad : uint8_t {
    Stage, ///< scalar loads into a stack buffer, then a vector load
@@ -52,8 +56,13 @@ constexpr size_t kMaxCols = 8;
 /// bytes past n * K that run() may write (packedKeys is sized with them)
 constexpr size_t kSlack = 64;
 
+using RowFn = void (*)(pos_t n, const char* const* data, const pos_t* sel,
+                       char* out);
+
 struct Plan {
    bool ok = false;
+   /// Row: the instantiation for this key shape
+   RowFn row = nullptr;
    Isa isa = Isa::Scalar;
    SelLoad selLoad = SelLoad::Stage;
    uint32_t keySize = 0;
@@ -81,14 +90,15 @@ const char* name(Isa isa);
 /// plan column c (width[c] bytes at offset[c] of a K-byte key, read through
 /// a selection vector if sel[c]) for isa; false if the shape is not covered
 /// (column width not 1/2/4/8, key wider than a lane, too many columns,
-/// isa not compiled in)
+/// isa not compiled in; Row: no instantiation for the shape)
 bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
            const uint32_t* width, const uint32_t* offset, const bool* sel,
            uint32_t keySize);
 
 /// pack rows [0, n): out[i * K + offset[c] ..] = column c of row i, where
 /// row i of column c is data[c][i] or data[c][sel[c][i]]. Writes up to
-/// kSlack bytes past n * K.
+/// kSlack bytes past n * K. Row: columns reading different selection
+/// vectors take the per-column copy.
 void run(const Plan& p, pos_t n, const char* const* data,
          const pos_t* const* sel, char* out);
 

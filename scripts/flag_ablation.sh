@@ -547,9 +547,11 @@ config_flags() {
     fair_compound)       echo "$(config_flags fair_kinds) -DVW_PROJ_COMPOUND=ON" ;;
     fair_bloom)          echo "$(config_flags fair_compound) -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
     # one-pass compound key concatenation (Q1, Q3, Q18 group keys), on the
-    # cmake_defaults baseline; selection-vector keys staged or gathered
+    # cmake_defaults baseline; selection-vector keys staged or gathered, or
+    # (row) the key built per row in a register for the shapes with a kernel
     base_concat)         echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON" ;;
     base_concat_gather)  echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_SEL=gather" ;;
+    base_concat_row)     echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

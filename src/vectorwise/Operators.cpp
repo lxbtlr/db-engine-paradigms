@@ -2967,8 +2967,13 @@ bool HashGroup::concatSimd(pos_t n) {
 #else
          constexpr auto selLoad = sc::SelLoad::Stage;
 #endif
-         sc::build(concatPlan, sc::best(), selLoad, cols, width, offset, sel,
-                   totalKeySize);
+#ifdef VW_GROUP_CONCAT_ROW
+         // the row kernel instantiated for this key shape, if there is one
+         if (!sc::build(concatPlan, sc::Isa::Row, selLoad, cols, width,
+                        offset, sel, totalKeySize))
+#endif
+            sc::build(concatPlan, sc::best(), selLoad, cols, width, offset,
+                      sel, totalKeySize);
       }
    }
    if (!concatPlan.ok) return false;

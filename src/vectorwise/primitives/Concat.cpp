@@ -3,6 +3,7 @@
 // option.
 #include "vectorwise/SimdConcat.hpp"
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <utility>
 #if defined(VW_CONCAT_HAVE_VBMI) || defined(VW_CONCAT_HAVE_AVX2)
@@ -386,6 +387,77 @@ void runNeon(const Plan& p, pos_t n, const char* const* data,
 }
 #endif
 
+// Row kernels: per row, each column's value is loaded at its exact width,
+// shifted to its key offset and or-ed into one 64-bit register, which is
+// stored once (8 bytes for keys of 3, 5, 6, 7 bytes; kSlack covers the
+// last row). With the widths fixed at compile time the column loop unrolls
+// to straight-line loads and immediate shifts; with them as data (a loop
+// over the plan's columns) the per-column overhead outweighs the saved
+// passes (run_concatbench row_gpr).
+template <size_t W> inline uint64_t loadW(const char* p) {
+   if constexpr (W == 1) {
+      uint8_t v;
+      std::memcpy(&v, p, W);
+      return v;
+   } else if constexpr (W == 2) {
+      uint16_t v;
+      std::memcpy(&v, p, W);
+      return v;
+   } else if constexpr (W == 4) {
+      uint32_t v;
+      std::memcpy(&v, p, W);
+      return v;
+   } else {
+      uint64_t v;
+      std::memcpy(&v, p, W);
+      return v;
+   }
+}
+template <bool Sel, size_t... W, size_t... C>
+void rowImpl(pos_t n, const char* const* data, const pos_t* __restrict__ sel,
+             char* __restrict__ out, std::index_sequence<C...>) {
+   constexpr size_t K = (W + ...);
+   static_assert(K <= 8, "row kernels hold the key in 64 bits");
+   constexpr size_t ws[] = {W...};
+   constexpr auto offs = [] {
+      std::array<size_t, sizeof...(W)> o{};
+      size_t acc = 0;
+      for (size_t c = 0; c < sizeof...(W); ++c) o[c] = acc, acc += ws[c];
+      return o;
+   }();
+   const char* d[] = {data[C]...};
+   for (pos_t i = 0; i < n; ++i) {
+      const size_t r = Sel ? sel[i] : i;
+      const uint64_t key =
+          ((loadW<ws[C]>(d[C] + r * ws[C]) << (8 * offs[C])) | ...);
+      std::memcpy(out + size_t(i) * K, &key,
+                  K == 1 || K == 2 || K == 4 || K == 8 ? K : 8);
+   }
+}
+template <bool Sel, size_t... W>
+void rowKernel(pos_t n, const char* const* data, const pos_t* sel,
+               char* out) {
+   rowImpl<Sel, W...>(n, data, sel, out,
+                      std::make_index_sequence<sizeof...(W)>());
+}
+
+/// The instantiated key shapes: every column through the one selection
+/// vector (sel) or every column dense. Only the compound group keys of the
+/// TPC-H / SSB plans that fit 8 bytes of 1/2/4/8-byte columns are listed
+/// (TPC-H Q1: l_returnflag, l_linestatus); the others group on wider keys.
+/// All 127 width tuples x sel/dense could be generated: a kernel only runs
+/// for its own shape, so the cost would be build and test time, not query
+/// time; the table is kept to the shapes in use to keep those short.
+struct RowEntry {
+   bool sel;
+   uint32_t cols;
+   uint8_t width[kMaxCols];
+   RowFn fn;
+};
+const RowEntry kRowKernels[] = {
+    {true, 2, {1, 1}, rowKernel<true, 1, 1>}, // Q1
+};
+
 uint32_t pow2ceil(uint32_t x) {
    uint32_t p = 1;
    while (p < x) p <<= 1;
@@ -408,7 +480,8 @@ Isa best() {
 
 bool available(Isa isa) {
    switch (isa) {
-   case Isa::Scalar: return true;
+   case Isa::Scalar:
+   case Isa::Row: return true;
 #ifdef VW_CONCAT_HAVE_AVX2
    case Isa::Avx2: return true;
 #endif
@@ -427,6 +500,7 @@ const char* name(Isa isa) {
    case Isa::Avx2: return "avx2";
    case Isa::Vbmi: return "vbmi";
    case Isa::Neon: return "neon";
+   case Isa::Row: return "row";
    default: return "scalar";
    }
 }
@@ -435,6 +509,29 @@ bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
            const uint32_t* width, const uint32_t* offset, const bool* sel,
            uint32_t keySize) {
    p = Plan();
+   if (isa == Isa::Row) {
+      if (cols == 0 || cols > kMaxCols) return false;
+      for (const RowEntry& e : kRowKernels) {
+         if (e.cols != cols) continue;
+         bool match = true;
+         for (size_t c = 0; c < cols && match; ++c)
+            match = e.width[c] == width[c] && e.sel == sel[c] &&
+                    offset[c] == (c ? offset[c - 1] + width[c - 1] : 0);
+         if (!match) continue;
+         p.isa = isa;
+         p.keySize = keySize;
+         p.cols = uint32_t(cols);
+         for (size_t c = 0; c < cols; ++c) {
+            p.width[c] = uint8_t(width[c]);
+            p.offset[c] = offset[c];
+            p.sel[c] = sel[c];
+         }
+         p.row = e.fn;
+         p.ok = true;
+         return true;
+      }
+      return false;
+   }
    if (isa == Isa::Scalar || !available(isa)) return false;
    if (cols == 0 || cols > kMaxCols || keySize == 0) return false;
    const uint32_t lane = isa == Isa::Vbmi ? 64 : 16;
@@ -506,6 +603,20 @@ void run(const Plan& p, pos_t n, const char* const* data,
 #ifdef VW_CONCAT_HAVE_NEON
    case Isa::Neon: runNeon(p, n, data, sel, out); return;
 #endif
+   case Isa::Row: {
+      // the kernel reads one selection vector for every column
+      const pos_t* s = nullptr;
+      for (uint32_t c = 0; c < p.cols; ++c) {
+         if (!p.sel[c]) continue;
+         if (s && sel[c] != s) {
+            tail(p, 0, n, data, sel, out);
+            return;
+         }
+         s = sel[c];
+      }
+      p.row(n, data, s, out);
+      return;
+   }
    default: tail(p, 0, n, data, sel, out); return;
    }
 }
