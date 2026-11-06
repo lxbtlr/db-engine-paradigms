@@ -5,6 +5,10 @@
 #include "common/runtime/Types.hpp"
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/SimdSelection.hpp"
+#if defined(VW_SIMD_SEL) && defined(__aarch64__) && !defined(VW_POS_16)
+// NEON kernels write 32-bit positions; under VW_POS_16 aarch64 stays scalar
+#include "vectorwise/SimdNeon.hpp"
+#endif
 #include <functional>
 
 using namespace types;
@@ -17,7 +21,9 @@ namespace {
 
 /// the kernel the selection primitives' options would pick: AVX-512 under
 /// VW_SIMD_SEL (gathered input only with VW_SIMD_SEL_GATHER != scalar),
-/// the branch-free template otherwise
+/// the branch-free template otherwise. On aarch64 with NEON, VW_SIMD_SEL
+/// picks the NEON kernels (gathered: VW_SIMD_SEL_GATHER=scalarload) although
+/// the selection primitives themselves stay scalar there.
 template <typename T, template <typename> class Lo, template <typename> class Hi,
           bool SelIn>
 pos_t run(pos_t n, pos_t* inSel, pos_t* out, void* col, void* lo, void* hi) {
@@ -30,6 +36,12 @@ pos_t run(pos_t n, pos_t* inSel, pos_t* out, void* col, void* lo, void* hi) {
    if constexpr (SelIn && simd::use_simd_gather<T, Lo>() &&
                  simd::use_simd_gather<T, Hi>())
       return simd::selsel_between<T, Lo, Hi>(n, inSel, out, c, l, h);
+#elif defined(VW_HAVE_NEON) && defined(VW_SIMD_SEL)
+   if constexpr (!SelIn) return neon::sel_between_x16<T, Lo, Hi>(n, out, c, l, h);
+#ifdef VW_SIMD_SEL_GATHER_SCALARLOAD
+   if constexpr (SelIn)
+      return neon::selsel_between<T, Lo, Hi>(n, inSel, out, c, l, h);
+#endif
 #endif
    return between_bf<T, Lo, Hi, SelIn>(n, inSel, out, c, l, h);
 }

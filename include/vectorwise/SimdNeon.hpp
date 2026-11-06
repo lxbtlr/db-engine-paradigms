@@ -5,9 +5,10 @@
 // against the scalar engine templates and the AVX-512 kernels compiled
 // through SIMDe; see study/NEON_PORT_STUDY.md for the per-kernel decision.
 //
-// NOT WIRED INTO THE ENGINE YET. Every AVX-512 kernel in the engine is
-// guarded by __AVX512F__ (and friends), so an aarch64 build runs the scalar
-// templates everywhere. The "engine site" line above each kernel names the
+// NOT WIRED INTO THE ENGINE YET, except the range selection kernels
+// (VW_SEL_BETWEEN + VW_SIMD_SEL, Between.cpp). Every AVX-512 kernel in the
+// engine is guarded by __AVX512F__ (and friends), so an aarch64 build runs
+// the scalar templates everywhere else. The "engine site" line above each kernel names the
 // guard that would get a VW_HAVE_NEON branch.
 //
 // What AVX-512 has and NEON does not, and the substitute used here:
@@ -307,6 +308,103 @@ pos_t selsel_col_val(pos_t n, pos_t* RES inSel, pos_t* RES result,
       const pos_t idx = inSel[i];
       result[found] = idx;
       found += Op<R>()(a[idx], c);
+   }
+   return pos_t(found);
+}
+
+//--- range selection (engine: Between.cpp, VW_SEL_BETWEEN) -------------------
+// Lo(x, l) && Hi(x, h): two compares ANDed per lane, one mask and compress.
+// WIRED: Between.cpp picks these under VW_SEL_BETWEEN + VW_SIMD_SEL on
+// aarch64 (the gathered one only with VW_SIMD_SEL_GATHER=scalarload). The
+// ordinary selection primitives stay scalar there, so a fused-vs-chain
+// comparison is NEON vs scalar. inSel and result may be the same buffer:
+// each group of 4 is loaded before its positions are stored at found <= i.
+
+/// in-range mask of 4 contiguous int32 / int64 elements
+template <typename R, template <typename> class Lo, template <typename> class Hi>
+VW_NEON_INLINE uint32x4_t between4(const R* p, R l, R h) {
+   if constexpr (sizeof(R) == 4) {
+      const int32x4_t v = vld1q_s32(p);
+      return vandq_u32(Cmp<Lo>::f(v, vdupq_n_s32(l)),
+                       Cmp<Hi>::f(v, vdupq_n_s32(h)));
+   } else {
+      const int64x2_t vl = vdupq_n_s64(l), vh = vdupq_n_s64(h);
+      const int64x2_t a = vld1q_s64(p), b = vld1q_s64(p + 2);
+      return narrow2x64(vandq_u64(Cmp<Lo>::f(a, vl), Cmp<Hi>::f(a, vh)),
+                        vandq_u64(Cmp<Lo>::f(b, vl), Cmp<Hi>::f(b, vh)));
+   }
+}
+/// same for a[idx[0..3]] (scalar loads into lanes)
+template <typename R, template <typename> class Lo, template <typename> class Hi>
+VW_NEON_INLINE uint32x4_t between4_at(const R* a, const pos_t* idx, R l, R h) {
+   if constexpr (sizeof(R) == 4) {
+      int32x4_t v = vdupq_n_s32(a[idx[0]]);
+      v = vld1q_lane_s32(a + idx[1], v, 1);
+      v = vld1q_lane_s32(a + idx[2], v, 2);
+      v = vld1q_lane_s32(a + idx[3], v, 3);
+      return vandq_u32(Cmp<Lo>::f(v, vdupq_n_s32(l)),
+                       Cmp<Hi>::f(v, vdupq_n_s32(h)));
+   } else {
+      const int64x2_t vl = vdupq_n_s64(l), vh = vdupq_n_s64(h);
+      int64x2_t lo = vdupq_n_s64(a[idx[0]]), hi = vdupq_n_s64(a[idx[2]]);
+      lo = vld1q_lane_s64(a + idx[1], lo, 1);
+      hi = vld1q_lane_s64(a + idx[3], hi, 1);
+      return narrow2x64(vandq_u64(Cmp<Lo>::f(lo, vl), Cmp<Hi>::f(lo, vh)),
+                        vandq_u64(Cmp<Lo>::f(hi, vl), Cmp<Hi>::f(hi, vh)));
+   }
+}
+
+/// sel_between, 16 elements per step (one ADDV for four groups)
+template <typename T, template <typename> class Lo, template <typename> class Hi>
+pos_t sel_between_x16(pos_t n, pos_t* RES result, T* RES param1, T* RES lo,
+                      T* RES hi) {
+   using R = raw_t<T>;
+   static_assert(sizeof(T) == sizeof(R), "int32 / int64 / Date only");
+   const R* a = reinterpret_cast<const R*>(param1);
+   const R l = rawValue(*lo), h = rawValue(*hi);
+   uint32x4_t ids = {0, 1, 2, 3};
+   const uint32x4_t four = vdupq_n_u32(4), sixteen = vdupq_n_u32(16);
+   size_t found = 0, i = 0;
+   for (; i + 16 <= n; i += 16) {
+      const unsigned m = mask16(between4<R, Lo, Hi>(a + i, l, h),
+                                between4<R, Lo, Hi>(a + i + 4, l, h),
+                                between4<R, Lo, Hi>(a + i + 8, l, h),
+                                between4<R, Lo, Hi>(a + i + 12, l, h));
+      found += emit4(result + found, ids, m & 15);
+      found += emit4(result + found, vaddq_u32(ids, four), m >> 4 & 15);
+      found += emit4(result + found, vaddq_u32(ids, vdupq_n_u32(8)), m >> 8 & 15);
+      found += emit4(result + found, vaddq_u32(ids, vdupq_n_u32(12)), m >> 12);
+      ids = vaddq_u32(ids, sixteen);
+   }
+   for (; i + 4 <= n; i += 4) {
+      found += emit4(result + found, ids, mask4(between4<R, Lo, Hi>(a + i, l, h)));
+      ids = vaddq_u32(ids, four);
+   }
+   for (; i < n; ++i) {
+      result[found] = pos_t(i);
+      found += Lo<R>()(a[i], l) & Hi<R>()(a[i], h);
+   }
+   return pos_t(found);
+}
+
+/// selsel_between: scalar loads through inSel into lanes, 4 per step
+template <typename T, template <typename> class Lo, template <typename> class Hi>
+pos_t selsel_between(pos_t n, pos_t* inSel, pos_t* result, T* RES param1,
+                     T* RES lo, T* RES hi) {
+   using R = raw_t<T>;
+   static_assert(sizeof(T) == sizeof(R), "int32 / int64 / Date only");
+   const R* a = reinterpret_cast<const R*>(param1);
+   const R l = rawValue(*lo), h = rawValue(*hi);
+   size_t found = 0, i = 0;
+   for (; i + 4 <= n; i += 4) {
+      const uint32x4_t ids = vld1q_u32(inSel + i);
+      found += emit4(result + found, ids,
+                     mask4(between4_at<R, Lo, Hi>(a, inSel + i, l, h)));
+   }
+   for (; i < n; ++i) {
+      const pos_t idx = inSel[i];
+      result[found] = idx;
+      found += Lo<R>()(a[idx], l) & Hi<R>()(a[idx], h);
    }
    return pos_t(found);
 }

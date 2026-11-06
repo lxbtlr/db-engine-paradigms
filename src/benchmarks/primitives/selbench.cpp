@@ -18,6 +18,9 @@
 #include "vectorwise/BetweenPrimitives.hpp"
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/SimdSelection.hpp"
+#if defined(__aarch64__) && !defined(VW_POS_16)
+#include "vectorwise/SimdNeon.hpp"
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -428,6 +431,22 @@ template <typename T, template <typename> class Hi> void benchBetween(bool gathe
                           return simd::selsel_between_hwgather<T, std::greater_equal, Hi>(n, in, res, a, lo, hi);
                        }});
    }
+#endif
+#ifdef VW_HAVE_NEON
+   if (!gathered)
+      impls.push_back({"fused_neon16", +[](pos_t n, pos_t*, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return neon::sel_between_x16<T, std::greater_equal, Hi>(n, res, a, lo, hi);
+                       }});
+   else
+      impls.push_back({"fused_neon_lanes", +[](pos_t n, pos_t* in, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return neon::selsel_between<T, std::greater_equal, Hi>(n, in, res, a, lo, hi);
+                       }});
+   // the NEON chain, as a fair_sel would run it if sel_col_val_x16 were wired
+   impls.push_back({"chain_hilo_neon", +[](pos_t n, pos_t* in, pos_t* res, pos_t* tmp, T* a, T* lo, T* hi) {
+                       pos_t k = in ? selsel_col_val_bf<T, Hi>(n, in, tmp, a, hi)
+                                    : neon::sel_col_val_x16<T, Hi>(n, tmp, a, hi);
+                       return selsel_col_val_bf<T, std::greater_equal>(k, tmp, res, a, lo);
+                    }});
 #endif
 
    std::mt19937_64 rng(4);

@@ -8,6 +8,9 @@
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/QueryBuilder.hpp"
 #include "vectorwise/SimdSelection.hpp"
+#if defined(__aarch64__) && !defined(VW_POS_16)
+#include "vectorwise/SimdNeon.hpp"
+#endif
 #include <functional>
 #include <gtest/gtest.h>
 #include <random>
@@ -120,6 +123,16 @@ void checkAll(between::Type t, bool loStrict, bool hiStrict) {
    expectChain<T, Lo, Hi>("selsel_between_hwgather", true,
                     [](pos_t n, pos_t* in, pos_t* out, T* c, T* l, T* h) {
                        return simd::selsel_between_hwgather<T, Lo, Hi>(n, in, out, c, l, h);
+                    });
+#endif
+#ifdef VW_HAVE_NEON
+   expectChain<T, Lo, Hi>("neon sel_between_x16", false,
+                    [](pos_t n, pos_t*, pos_t* out, T* c, T* l, T* h) {
+                       return neon::sel_between_x16<T, Lo, Hi>(n, out, c, l, h);
+                    });
+   expectChain<T, Lo, Hi>("neon selsel_between", true,
+                    [](pos_t n, pos_t* in, pos_t* out, T* c, T* l, T* h) {
+                       return neon::selsel_between<T, Lo, Hi>(n, in, out, c, l, h);
                     });
 #endif
 }
