@@ -2941,9 +2941,11 @@ void HashGroup::keyStepT(pos_t n) {
          if (!alloc) throw std::runtime_error("malloc failed");
          entry = reinterpret_cast<EntryHeader*>(alloc);
 #ifdef VW_GROUP_KEY_PAD
-         // buildScatter writes the key columns only: zero the padding
-         std::memset(reinterpret_cast<char*>(entry + 1) + keySize - keyPad, 0,
-                     keyPad);
+         // buildScatter writes the key columns only: zero the padding (most
+         // keys have none; skip the call, TPC-H Q18 creates 1.5M groups here)
+         if (keyPad)
+            std::memset(reinterpret_cast<char*>(entry + 1) + keySize - keyPad,
+                        0, keyPad);
 #endif
          preAggregation.allocations.emplace_back(alloc, 1);
          hashes[i] = hash;
@@ -3252,9 +3254,11 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
 
          entry = reinterpret_cast<EntryHeader*>(alloc);
 #ifdef VW_GROUP_KEY_PAD
-         // buildScatter writes the key columns only: zero the padding
-         std::memset(reinterpret_cast<char*>(entry + 1) + keySize - keyPad, 0,
-                     keyPad);
+         // buildScatter writes the key columns only: zero the padding (most
+         // keys have none; skip the call, TPC-H Q18 creates 1.5M groups here)
+         if (keyPad)
+            std::memset(reinterpret_cast<char*>(entry + 1) + keySize - keyPad,
+                        0, keyPad);
 #endif
          preAggregation.allocations.emplace_back(alloc, 1);
 
