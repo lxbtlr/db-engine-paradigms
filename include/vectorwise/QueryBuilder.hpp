@@ -131,6 +131,10 @@ class QueryBuilder {
       HashGroupBuilder(QueryBuilder& base);
       /// output buffers of the key columns; a single one is unique
       std::vector<void*> keyOutputs;
+      /// VW_GROUP_KEY_PAD: pads the packed key once, after the last key and
+      /// before the first value (or the end) takes an entry offset
+      bool keysPadded = false;
+      void padKeys();
 
       using B = HashGroupBuilder;
       B& addKey(DS col, primitives::F2 hash,

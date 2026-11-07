@@ -31,8 +31,15 @@
 //   fused_block              the row kernel over 128 rows, then hash_keys
 //                            over them (VW_GROUP_CONCAT_HASH_MODE=blocked)
 //
+// Padding mode (-P), shapes whose compound key is 3, 5..7 or 9..15 bytes:
+// concat, HashGroup's hash and a whole-key comparison per row
+//   unpadded         the K-byte key: variable-length hash and memcmp
+//   paddedP          VW_GROUP_KEY_PAD: padded to P = 4/8 (integer hash and
+//                    compare; +simdhash: the AVX-512 pass) or 16 (hash and
+//                    memcmp with the length fixed)
+//
 // Usage: run_concatbench [-k shape,...] [-s selPct,...] [-m l1|stream|both]
-//                        [-v vecSize] [-N rows] [-r reps] [-H]
+//                        [-v vecSize] [-N rows] [-r reps] [-H] [-P]
 //   l1: one vector of rows, repeated (vecs = N / vecSize); stream: N rows
 //   of each column walked vector by vector.
 // Output: CSV on stdout, ns per selected row (best of reps), speedup over
@@ -430,6 +437,102 @@ bool verify(const Shape& s, const Input& in, size_t vecSize, bool l1,
    return true;
 }
 
+
+/// -P: whole keys found equal (HashGroup's key comparison after a hash
+/// match), and the padded variants' output (zero-initialized, so the
+/// padding bytes stay zero as in HashGroup's packedKeys)
+uint64_t gEqual = 0;
+std::vector<char> gPadded;
+
+/// compare n keys of K bytes with themselves through a pointer the compiler
+/// cannot see is the same, so every comparison runs to the end
+template <typename Eq>
+void compareKeys(pos_t n, const char* keys, size_t K, Eq eq) {
+   const char* other = keys;
+   asm volatile("" : "+r"(other));
+   uint64_t equal = 0;
+   for (pos_t i = 0; i < n; ++i)
+      equal += eq(keys + size_t(i) * K, other + size_t(i) * K);
+   gEqual += equal;
+}
+/// unpadded K-byte key (not 1/2/4/8): Hash_T<char*> and Lookup_T<char*>'s
+/// variable-length hash and memcmp
+void hashEqBytes(const Shape& s, pos_t n, const char* keys) {
+   hashPass(s, n, keys);
+   const size_t K = s.keySize;
+   compareKeys(n, keys, K, [K](const char* a, const char* b) {
+      return std::memcmp(a, b, K) == 0;
+   });
+}
+/// VW_GROUP_KEY_PAD: the key padded to P = 4/8 (integer hash, simd: the
+/// AVX-512 pass, and integer compare) or 16 (byte hash and memcmp with the
+/// length fixed)
+template <size_t P>
+void hashEqPadded(pos_t n, const char* keys, bool simd) {
+   uint64_t* out = gHashes.data();
+   if constexpr (P == 16) {
+      const runtime::MurMurHash h;
+      for (pos_t i = 0; i < n; ++i)
+         out[i] = h.hashKey(keys + size_t(i) * 16, 16, 0);
+      compareKeys(n, keys, 16, [](const char* a, const char* b) {
+         return std::memcmp(a, b, 16) == 0;
+      });
+   } else {
+      using T = std::conditional_t<P == 4, uint32_t, uint64_t>;
+#ifdef VW_HAVE_SIMD_HASH
+      if (simd)
+         vectorwise::primitives::simd_hash::hash_keys<T>(n, keys, out);
+      else
+#endif
+         hashKeysT<T>(n, keys, out);
+      (void)simd;
+      compareKeys(n, keys, P, [](const char* a, const char* b) {
+         T x, y;
+         std::memcpy(&x, a, P);
+         std::memcpy(&y, b, P);
+         return x == y;
+      });
+   }
+}
+/// the padded size of a compound key (VW_GROUP_KEY_PAD), or 0 if unpadded
+uint32_t paddedSize(const Shape& s) {
+   const uint32_t k = s.keySize;
+   if (s.width.size() < 2 || k >= 16) return 0;
+   const uint32_t to = k <= 2 ? k : k <= 4 ? 4 : k <= 8 ? 8 : 16;
+   return to == k ? 0 : to;
+}
+/// -P: the padded variant's keys (gPadded, stride P) hold the unpadded
+/// ones' bytes and zero padding, for the first vectors
+bool verifyPadded(const Shape& s, const Input& in, size_t vecSize, bool l1,
+                  const Fn& padded, uint32_t P) {
+   const size_t cols = s.width.size();
+   const uint32_t K = s.keySize;
+   std::vector<char> a(vecSize * K + kSlack);
+   const char* data[kMaxCols];
+   const pos_t* sel[kMaxCols];
+   size_t dense = 0;
+   for (size_t v = 0; v < std::min<size_t>(in.vecs, 8); ++v) {
+      const size_t sv = l1 ? 0 : v;
+      const pos_t n = in.selN[sv];
+      for (size_t c = 0; c < cols; ++c) {
+         const char* col = in.columns[c].data();
+         data[c] = s.sel[c] ? col + (l1 ? 0 : v * vecSize * s.width[c])
+                            : col + (l1 ? 0 : dense * s.width[c]);
+         sel[c] = s.sel[c] ? in.sel.data() + sv * vecSize : nullptr;
+      }
+      dense += n;
+      runColumns(cols, s.width.data(), s.offset.data(), K, n, data, sel,
+                 a.data());
+      padded(n, data, sel, nullptr);
+      for (pos_t i = 0; i < n; ++i) {
+         const char* row = gPadded.data() + size_t(i) * P;
+         if (std::memcmp(row, a.data() + size_t(i) * K, K)) return false;
+         for (uint32_t b = K; b < P; ++b)
+            if (row[b]) return false;
+      }
+   }
+   return true;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -441,8 +544,8 @@ int main(int argc, char** argv) {
    size_t vecSize = 1024, rows = size_t(1) << 23;
    int reps = 5;
    int opt;
-   bool hashMode = false;
-   while ((opt = getopt(argc, argv, "k:s:m:v:N:r:H")) != -1) {
+   bool hashMode = false, padMode = false;
+   while ((opt = getopt(argc, argv, "k:s:m:v:N:r:HP")) != -1) {
       switch (opt) {
       case 'k': shapes = split(optarg); break;
       case 's':
@@ -454,6 +557,7 @@ int main(int argc, char** argv) {
       case 'N': rows = std::stoul(optarg); break;
       case 'r': reps = std::stoi(optarg); break;
       case 'H': hashMode = true; break;
+      case 'P': padMode = true; break;
       default:
          std::fprintf(stderr, "usage: %s [-k shape,..] [-s selPct,..] "
                               "[-m l1|stream|both] [-v vec] [-N rows] [-r reps]\n",
@@ -462,6 +566,7 @@ int main(int argc, char** argv) {
       }
    }
    gHashes.assign(vecSize + 8, 0);
+   gPadded.assign(vecSize * 16 + kSlack, 0);
    std::vector<bool> l1Modes;
    if (modes == "l1" || modes == "both") l1Modes.push_back(true);
    if (modes == "stream" || modes == "both") l1Modes.push_back(false);
@@ -582,15 +687,53 @@ int main(int argc, char** argv) {
             }
          }
       }
+      if (padMode) {
+         // concat, hash and whole-key comparison per row: the key as it is,
+         // and padded (VW_GROUP_KEY_PAD) to 4, 8 or 16 bytes
+         const uint32_t P = paddedSize(s);
+         if (!P) continue;
+         // padding bytes start zero for this shape's stride
+         std::fill(gPadded.begin(), gPadded.end(), 0);
+         variants.clear();
+         variants.push_back({"unpadded", [&s](pos_t n, const char* const* d,
+                                              const pos_t* const* sl,
+                                              char* o) {
+                                runColumns(s.width.size(), s.width.data(),
+                                           s.offset.data(), s.keySize, n, d,
+                                           sl, o);
+                                hashEqBytes(s, n, o);
+                             }});
+         for (bool simd : {false, true}) {
+#ifndef VW_HAVE_SIMD_HASH
+            if (simd) continue;
+#endif
+            if (simd && P == 16) continue;
+            variants.push_back(
+                {std::string("padded") + std::to_string(P) +
+                     (simd ? "+simdhash" : ""),
+                 [&s, P, simd](pos_t n, const char* const* d,
+                               const pos_t* const* sl, char*) {
+                    char* o = gPadded.data();
+                    runColumns(s.width.size(), s.width.data(),
+                               s.offset.data(), P, n, d, sl, o);
+                    if (P == 4) hashEqPadded<4>(n, o, simd);
+                    else if (P == 8) hashEqPadded<8>(n, o, simd);
+                    else hashEqPadded<16>(n, o, simd);
+                 }});
+         }
+      }
 
       for (bool l1 : l1Modes)
          for (unsigned selPct : sels) {
             Input in = makeInput(s, rows, vecSize, l1, selPct, rng);
-            std::vector<char> out(vecSize * s.keySize + kSlack);
+            std::vector<char> out(vecSize * 16 + kSlack);
             double scalarNs = 0;
             for (const auto& v : variants) {
-               const bool ok = verify(s, in, vecSize, l1, v.fn, variants[0].fn,
-                                      hashMode);
+               const bool ok =
+                   padMode && &v != &variants[0]
+                       ? verifyPadded(s, in, vecSize, l1, v.fn, paddedSize(s))
+                       : verify(s, in, vecSize, l1, v.fn, variants[0].fn,
+                                hashMode);
                double best = 1e300;
                pass(s, in, vecSize, l1, v.fn, out, sink); // warm
                for (int r = 0; r < reps; ++r)

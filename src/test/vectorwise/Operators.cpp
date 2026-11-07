@@ -10,6 +10,9 @@
 #include <algorithm>
 #include <gtest/gtest.h>
 #include <map>
+#include <random>
+#include <set>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -466,6 +469,74 @@ TEST_F(HashGroupT, simpleGroup) {
       }
    }
    ASSERT_EQ(found, size_t(5));
+}
+
+// 900 groups of a 12-byte key (int64, int32) over 20000 rows: entries are
+// created, found again and merged by the global phase; with
+// VW_GROUP_KEY_PAD the key is padded to 16 bytes, whose padding must stay
+// zero in every entry for whole-key comparison to find the groups. Kept
+// under the pre-aggregation fill limit (1433): above it this harness loses
+// aggregates also without padding (2026-11-07, not investigated)
+TEST_F(HashGroupT, compoundKeyManyGroups) {
+   enum { grouped_k1, grouped_k2, aggregated_v };
+   constexpr size_t rows = 20000;
+   std::vector<int64_t> k1(rows), v(rows);
+   std::vector<int32_t> k2(rows);
+   std::map<std::tuple<int64_t, int32_t>, int64_t> expected;
+   std::mt19937_64 rng(5);
+   for (size_t i = 0; i < rows; ++i) {
+      k1[i] = int64_t(rng() % 30) - 15;
+      k2[i] = int32_t(rng() % 30);
+      v[i] = int64_t(rng() % 1000);
+      expected[std::make_tuple(k1[i], k2[i])] += v[i];
+   }
+   auto& rel = db["t"];
+   rel.insert("k1", make_unique<algebra::BigInt>()) = std::move(k1);
+   rel.insert("k2", make_unique<algebra::Integer>()) = std::move(k2);
+   rel.insert("v", make_unique<algebra::BigInt>()) = std::move(v);
+   rel.nrTuples = rows;
+
+   auto t = Scan("t");
+   HashGroup()
+       .addKey(Column(t, "k1"), primitives::hash_int64_t_col,
+               primitives::keys_not_equal_int64_t_col,
+               primitives::partition_by_key_int64_t_col,
+               primitives::scatter_sel_int64_t_col,
+               primitives::keys_not_equal_row_int64_t_col,
+               primitives::partition_by_key_row_int64_t_col,
+               primitives::scatter_sel_row_int64_t_col,
+               primitives::gather_val_int64_t_col,
+               Buffer(grouped_k1, sizeof(int64_t)))
+       .addKey(Column(t, "k2"), primitives::hash_int32_t_col,
+               primitives::keys_not_equal_int32_t_col,
+               primitives::partition_by_key_int32_t_col,
+               primitives::scatter_sel_int32_t_col,
+               primitives::keys_not_equal_row_int32_t_col,
+               primitives::partition_by_key_row_int32_t_col,
+               primitives::scatter_sel_row_int32_t_col,
+               primitives::gather_val_int32_t_col,
+               Buffer(grouped_k2, sizeof(int32_t)))
+       .addValue(Column(t, "v"), primitives::aggr_init_plus_int64_t_col,
+                 primitives::aggr_plus_int64_t_col,
+                 primitives::aggr_row_plus_int64_t_col,
+                 primitives::gather_val_int64_t_col,
+                 Buffer(aggregated_v, sizeof(int64_t)));
+
+   auto root = popOperator();
+   size_t found = 0;
+   std::set<std::tuple<int64_t, int32_t>> seen;
+   while (auto n = root->next()) {
+      found += n;
+      auto keys1 = (int64_t*)Buffer(grouped_k1).data;
+      auto keys2 = (int32_t*)Buffer(grouped_k2).data;
+      auto aggrs = (int64_t*)Buffer(aggregated_v).data;
+      for (size_t i = 0; i < n; ++i) {
+         const auto key = std::make_tuple(keys1[i], keys2[i]);
+         ASSERT_TRUE(seen.insert(key).second) << "duplicate group";
+         ASSERT_EQ(aggrs[i], expected.at(key));
+      }
+   }
+   ASSERT_EQ(found, expected.size());
 }
 
 class HashGroupSmallBuf : public ::testing::Test,

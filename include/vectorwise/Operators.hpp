@@ -675,6 +675,11 @@ class HashGroup : public UnaryOperator {
    };
 
    uint32_t totalKeySize = 0;
+   /// VW_GROUP_KEY_PAD: zero bytes after the key columns that round a
+   /// compound key of 3, 5..7 or 9..15 bytes up to 4, 8 or 16
+   /// (QueryBuilder::HashGroupBuilder::padKeys); packedKeys and every local
+   /// entry hold them as zeros, so whole keys compare with memcmp
+   uint32_t keyPad = 0;
    std::deque<KeyColumn> keyColumns;
    std::vector<char> packedKeys;
 #ifdef VW_GROUP_NO_CONCAT

@@ -565,6 +565,10 @@ config_flags() {
     # the default concatenation with the AVX-512 hash pass run per block of
     # 128 row-kernel keys, in L1 (VW_GROUP_CONCAT_HASH_MODE=blocked)
     hash_simd_blocked)   echo "$(config_flags hash_simd_concat) -DVW_GROUP_CONCAT_HASH=ON -DVW_GROUP_CONCAT_HASH_MODE=blocked" ;;
+    # compound group keys of 3, 5..7, 9..15 bytes padded to 4 / 8 / 16 (TPC-H
+    # Q3: 12 -> 16), on cmake_defaults and on the default concatenation
+    base_pad)            echo "$(config_flags cmake_defaults) -DVW_GROUP_KEY_PAD=ON" ;;
+    hash_simd_concat_pad) echo "$(config_flags hash_simd_concat) -DVW_GROUP_KEY_PAD=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

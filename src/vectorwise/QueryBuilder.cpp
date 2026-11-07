@@ -823,7 +823,28 @@ QueryBuilder::HashGroupBuilder::having(DS input,
 }
 #endif
 
+void QueryBuilder::HashGroupBuilder::padKeys() {
+   if (keysPadded) return;
+   keysPadded = true;
+#ifdef VW_GROUP_KEY_PAD
+   // round a compound key of 3, 5..7 or 9..15 bytes up to 4, 8 or 16: such
+   // keys then take HashGroup's 4/8-byte integer paths or its fixed 16-byte
+   // path instead of the variable-length one. The padding bytes follow the
+   // key columns in the packed key and in the entries; values come after.
+   auto& op = *group;
+   const uint32_t k = op.totalKeySize;
+   if (op.keyColumns.size() < 2 || k >= 16) return;
+   const uint32_t to = k <= 2 ? k : k <= 4 ? 4 : k <= 8 ? 8 : 16;
+   if (to == k) return;
+   op.keyPad = to - k;
+   op.totalKeySize = to;
+   op.preAggregation.ht_entry_size += op.keyPad;
+   op.globalAggregation.ht_entry_size += op.keyPad;
+#endif
+}
+
 QueryBuilder::HashGroupBuilder::~HashGroupBuilder() {
+   padKeys();
    // a group-by's output has one row per key: a single key column is unique
    if (keyOutputs.size() == 1) base.uniqueBuffers.insert(keyOutputs.front());
 
@@ -1042,6 +1063,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addKey(
 QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
     DS col, primitives::FAggrInit aggrInit, primitives::FAggr aggr,
     primitives::FAggrRow aggrGlobal, primitives::FGatherVal gather, DS out) {
+   padKeys();
 
    auto& op = *this->group;
    auto& local = op.preAggregation;
@@ -1098,6 +1120,7 @@ QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
 QueryBuilder::HashGroupBuilder& QueryBuilder::HashGroupBuilder::addValue(
     DS col, DS sel, primitives::FAggrInit aggrInit, primitives::FAggrSel aggr,
     primitives::FAggrRow aggrGlobal, primitives::FGatherVal gather, DS out) {
+   padKeys();
 
    auto& op = *this->group;
    auto& local = op.preAggregation;

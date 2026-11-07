@@ -658,6 +658,10 @@ bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
    p = Plan();
    if (isa == Isa::Row) {
       if (cols == 0 || cols > kMaxCols) return false;
+      // a row kernel stores the sum of its widths per key (not a padded key)
+      uint32_t sum = 0;
+      for (size_t c = 0; c < cols; ++c) sum += width[c];
+      if (sum != keySize) return false;
       for (const RowEntry& e : kRowKernels) {
          if (e.cols != cols) continue;
          bool match = true;

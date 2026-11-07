@@ -292,6 +292,17 @@ if(VW_GROUP_CONCAT_HASH)
   endif()
   message(STATUS "Building with VW_GROUP_CONCAT_HASH ()")
 endif()
+# VW_GROUP_KEY_PAD: HashGroup pads a compound key of 3, 5..7 or 9..15 bytes
+# with zero bytes to 4, 8 or 16 (TPC-H Q3: 12 -> 16): such keys take the
+# 4/8-byte integer hash and compare, or a 16-byte path with the length fixed
+# (inlined byte hash and compare), instead of the variable-length one. Entries
+# grow by the padding; hashes of padded keys differ from unpadded ones (they
+# never leave the operator).
+OPTION(VW_GROUP_KEY_PAD "Pad compound group keys to 4/8/16 bytes in VectorWise HashGroup" OFF)
+if(VW_GROUP_KEY_PAD)
+  ADD_DEFINITIONS(-DVW_GROUP_KEY_PAD=1)
+  message(STATUS "Building with VW_GROUP_KEY_PAD")
+endif()
 # dubliner (Cascade Lake) drops from ~2.6 to ~2.3 GHz under the AVX-512 hash
 # (TPC-H Q18 hash_simd, 2026-11-06): the fused concat + hash kernels use the
 # scalar MurmurHash there

@@ -2674,6 +2674,26 @@ void HashGroup::globalFindOrCreate(void* data, size_t n) {
 }
 #endif
 
+namespace {
+/// a 16-byte packed key (VW_GROUP_KEY_PAD pads 9..15-byte keys to it):
+/// hashed and compared as bytes like a char* key, but with the length fixed,
+/// so the hash loop and the comparison are inlined; hashes are identical to
+/// the char* path's for 16-byte keys
+struct Key16 {
+   char bytes[16];
+};
+/// keys hashed and compared as bytes (char*: totalKeySize of them)
+template <typename T>
+constexpr bool kByteKey =
+    std::is_same_v<T, char*> || std::is_same_v<T, Key16>;
+template <typename T> constexpr uint32_t keySizeOf(uint32_t totalKeySize) {
+   if constexpr (std::is_same_v<T, char*>)
+      return totalKeySize;
+   else
+      return sizeof(T);
+}
+} // namespace
+
 #ifdef VW_GROUP_NO_CONCAT
 #define VW_GROUP_KEY_DATA keyData
 #else
@@ -2732,6 +2752,9 @@ void HashGroup::resolvePaths() {
    case 2: keyStep = VW_KEY_STEP(uint16_t); break;
    case 4: keyStep = VW_KEY_STEP(uint32_t); break;
    case 8: keyStep = VW_KEY_STEP(uint64_t); break;
+#ifdef VW_GROUP_KEY_PAD
+   case 16: keyStep = VW_KEY_STEP(Key16); break;
+#endif
    default: keyStep = VW_KEY_STEP(char*); break;
    }
 #undef VW_KEY_STEP
@@ -2798,8 +2821,8 @@ inline __mmask16 runHeadMask16(const char* cur, const char* prv) {
 // run's entry, branch-free. The first row of a vector is always a head.
 template <typename T, int Mode, bool Runs>
 void HashGroup::keyStepT(pos_t n) {
-   constexpr bool wide = std::is_same_v<T, char*>;
-   const uint32_t keySize = wide ? totalKeySize : sizeof(T);
+   constexpr bool wide = kByteKey<T>;
+   const uint32_t keySize = keySizeOf<T>(totalKeySize);
    const char* __restrict__ base;
    const pos_t* __restrict__ ksel = nullptr;
    if constexpr (Mode == kPacked) {
@@ -2917,6 +2940,11 @@ void HashGroup::keyStepT(pos_t n) {
          auto alloc = groupStore.allocate(entrySize);
          if (!alloc) throw std::runtime_error("malloc failed");
          entry = reinterpret_cast<EntryHeader*>(alloc);
+#ifdef VW_GROUP_KEY_PAD
+         // buildScatter writes the key columns only: zero the padding
+         std::memset(reinterpret_cast<char*>(entry + 1) + keySize - keyPad, 0,
+                     keyPad);
+#endif
          preAggregation.allocations.emplace_back(alloc, 1);
          hashes[i] = hash;
          preAggregation.groupRepresentatives[0] = i;
@@ -3080,6 +3108,9 @@ void HashGroup::Hash(pos_t n) {
       case 2: Hash_T<uint16_t>(n); break;
       case 4: Hash_T<uint32_t>(n); break;
       case 8: Hash_T<uint64_t>(n); break;
+#ifdef VW_GROUP_KEY_PAD
+      case 16: Hash_T<Key16>(n); break;
+#endif
       default: Hash_T<char*>(n); break;
    }
 }
@@ -3088,33 +3119,33 @@ template <typename T> void HashGroup::Hash_T(pos_t n) {
 #if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH) && !defined(VW_USE_CRC32)
    // packed 1/2/4/8-byte keys: AVX-512 MurmurHash64A, bit-identical to
    // hashFn.hashKey(key) below
-   if constexpr (!std::is_same_v<T, char*>) {
+   if constexpr (!kByteKey<T>) {
       primitives::simd_hash::hash_keys<T>(n, VW_GROUP_KEY_DATA,
                                           preAggregation.groupHashes);
       return;
    }
 #endif
-   uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
+   const uint32_t keySize = keySizeOf<T>(totalKeySize);
    char* __restrict__ keys = VW_GROUP_KEY_DATA;
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
 
 #if defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32) && defined(VW_HAVE_SIMD_CRC)
    // packed 1/2/4/8-byte keys: VPCLMULQDQ CRC32Hash, 8 keys per zmm,
    // bit-identical to hashFn.hashKey(key) below
-   if constexpr (!std::is_same_v<T, char*>) {
+   if constexpr (!kByteKey<T>) {
       primitives::simd_crc::hash_keys<T>(n, keys, hashes);
       return;
    }
 #endif
 #if defined(VW_CRC32_FAST) && defined(VW_USE_CRC32)
    // wide keys: 4 keys' chunk chains interleaved, bit-identical to the loop
-   if constexpr (std::is_same_v<T, char*>) {
+   if constexpr (kByteKey<T>) {
       hashFn.hashKeys(keys, keySize, n, 0, hashes);
       return;
    }
 #endif
    for (pos_t i = 0; i < n; i++) {
-      if constexpr (std::is_same_v<T, char*>) {
+      if constexpr (kByteKey<T>) {
          hashes[i] = hashFn.hashKey(keys + i * keySize, keySize, 0);
       } else {
          T key;
@@ -3132,13 +3163,16 @@ void HashGroup::Lookup(pos_t n) {
       case 2: VW_LOOKUP(uint16_t); break;
       case 4: VW_LOOKUP(uint32_t); break;
       case 8: VW_LOOKUP(uint64_t); break;
+#ifdef VW_GROUP_KEY_PAD
+      case 16: VW_LOOKUP(Key16); break;
+#endif
       default: VW_LOOKUP(char*); break;
 #undef VW_LOOKUP
    }
 }
 
 template <typename T> void HashGroup::Lookup_T(pos_t n) {
-   uint32_t keySize = std::is_same_v<T, char*> ? totalKeySize : sizeof(T);
+   const uint32_t keySize = keySizeOf<T>(totalKeySize);
    char* __restrict__ keys = VW_GROUP_KEY_DATA;
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
 #ifdef VW_GROUP_AGGR_SEL
@@ -3158,7 +3192,7 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
    for (pos_t i = 0; i < n; i++) {
 #ifdef VW_FUSE_HASH
       hash_t hash;
-      if constexpr (std::is_same_v<T, char*>) {
+      if constexpr (kByteKey<T>) {
          hash = hashFn.hashKey(keys + i * keySize, keySize, 0);
       } else {
          T key;
@@ -3217,6 +3251,11 @@ template <typename T> void HashGroup::Lookup_T(pos_t n) {
          }
 
          entry = reinterpret_cast<EntryHeader*>(alloc);
+#ifdef VW_GROUP_KEY_PAD
+         // buildScatter writes the key columns only: zero the padding
+         std::memset(reinterpret_cast<char*>(entry + 1) + keySize - keyPad, 0,
+                     keyPad);
+#endif
          preAggregation.allocations.emplace_back(alloc, 1);
 
 #ifdef VW_FUSE_HASH
