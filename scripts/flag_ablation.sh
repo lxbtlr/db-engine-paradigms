@@ -569,6 +569,9 @@ config_flags() {
     # Q3: 12 -> 16), on cmake_defaults and on the default concatenation
     base_pad)            echo "$(config_flags cmake_defaults) -DVW_GROUP_KEY_PAD=ON" ;;
     hash_simd_concat_pad) echo "$(config_flags hash_simd_concat) -DVW_GROUP_KEY_PAD=ON" ;;
+    # cmake_defaults with only the AVX-512 MurmurHash kernels (join probe
+    # profiling baseline)
+    base_simdhash)       echo "$(config_flags cmake_defaults) -DVW_SIMD_HASH=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)
@@ -648,7 +651,7 @@ cpu_has() { grep -q -w "$1" /proc/cpuinfo; }
 kept=""
 for cfg in $CONFIGS; do
   case "$cfg" in
-    hash_simd) cpu_has avx512f && cpu_has avx512dq || { log "skipping hash_simd: no AVX-512F/DQ on this CPU"; continue; } ;;
+    hash_simd|base_simdhash) cpu_has avx512f && cpu_has avx512dq || { log "skipping $cfg: no AVX-512F/DQ on this CPU"; continue; } ;;
     hash_crc32_vpclmul) cpu_has vpclmulqdq && cpu_has avx512vl && cpu_has avx512bw && cpu_has avx512dq ||
                         { log "skipping hash_crc32_vpclmul: no VPCLMULQDQ + AVX-512 on this CPU"; continue; } ;;
     join_simd) cpu_has avx512f || { log "skipping join_simd: no AVX-512F on this CPU"; continue; } ;;
