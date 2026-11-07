@@ -233,44 +233,53 @@ if(VW_GROUP_DISPATCH)
   message(STATUS "Building with VW_GROUP_DISPATCH")
 endif()
 
-# VW_GROUP_CONCAT_SIMD: HashGroup packs its key columns in one pass, a byte
-# permute per column planned once from the key shape (SimdConcat.hpp), in
-# Concat and in VW_GROUP_DISPATCH's compound key step. AVX-512 VBMI where the
-# compiler targets it (Ice Lake and newer), else AVX2, else NEON; key shapes
-# it does not cover keep the per-column copy.
-# VW_GROUP_CONCAT_SEL: how keys read through a selection vector are loaded:
-# stage (scalar loads into a stack buffer) or gather (vpgather / NEON lane
-# loads).
-OPTION(VW_GROUP_CONCAT_SIMD "One-pass SIMD compound key concatenation in VectorWise HashGroup" OFF)
+# VW_GROUP_CONCAT_SIMD: HashGroup packs its key columns in one pass, planned
+# once from the key shape (SimdConcat.hpp), in Concat and in
+# VW_GROUP_DISPATCH's compound key step:
+#   VW_GROUP_CONCAT_ROW (default ON): key shapes with a row kernel (TPC-H
+#     Q1's) are assembled per row in a 64-bit register: one index load and
+#     one store per row; the only kernel that wins on keys read through a
+#     selection vector (run_concatbench, 2026-11-06)
+#   VW_GROUP_CONCAT_SHUFFLE: which other shapes take the vector kernels (a
+#     byte permute per column; AVX-512 VBMI on Ice Lake and newer, else
+#     AVX2, else NEON): dense (default; every key column dense, where they
+#     win), all, or off; the rest keep the per-column copy
+#   VW_GROUP_CONCAT_SEL: how the vector kernels load keys read through a
+#     selection vector: stage (scalar loads into a stack buffer) or gather
+#     (vpgather / NEON lane loads)
+OPTION(VW_GROUP_CONCAT_SIMD "One-pass compound key concatenation in VectorWise HashGroup" OFF)
+OPTION(VW_GROUP_CONCAT_ROW "VW_GROUP_CONCAT_SIMD: per-row register kernels for the instantiated key shapes" ON)
+set(VW_GROUP_CONCAT_SHUFFLE "dense" CACHE STRING "VW_GROUP_CONCAT_SIMD vector kernels for: dense, all or off")
 set(VW_GROUP_CONCAT_SEL "stage" CACHE STRING "VW_GROUP_CONCAT_SIMD selection-vector loads: stage or gather")
 if(VW_GROUP_CONCAT_SIMD)
   ADD_DEFINITIONS(-DVW_GROUP_CONCAT_SIMD=1)
+  if(VW_GROUP_CONCAT_ROW)
+    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_ROW=1)
+  endif()
+  if(VW_GROUP_CONCAT_SHUFFLE STREQUAL "all")
+    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_SHUFFLE_ALL=1)
+  elseif(VW_GROUP_CONCAT_SHUFFLE STREQUAL "off")
+    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_SHUFFLE_OFF=1)
+  elseif(NOT VW_GROUP_CONCAT_SHUFFLE STREQUAL "dense")
+    message(FATAL_ERROR "VW_GROUP_CONCAT_SHUFFLE must be dense, all or off")
+  endif()
   if(VW_GROUP_CONCAT_SEL STREQUAL "gather")
     ADD_DEFINITIONS(-DVW_GROUP_CONCAT_GATHER=1)
   elseif(NOT VW_GROUP_CONCAT_SEL STREQUAL "stage")
     message(FATAL_ERROR "VW_GROUP_CONCAT_SEL must be stage or gather")
   endif()
-  message(STATUS "Building with VW_GROUP_CONCAT_SIMD (${VW_GROUP_CONCAT_SEL})")
+  message(STATUS "Building with VW_GROUP_CONCAT_SIMD (row ${VW_GROUP_CONCAT_ROW}, shuffle ${VW_GROUP_CONCAT_SHUFFLE}, sel ${VW_GROUP_CONCAT_SEL})")
 endif()
-# VW_GROUP_CONCAT_ROW (needs VW_GROUP_CONCAT_SIMD): keys of the shapes with a
-# row kernel (SimdConcat.hpp; TPC-H Q1's) are assembled per row in a 64-bit
-# register instead; other shapes take the vector kernels.
-OPTION(VW_GROUP_CONCAT_ROW "VW_GROUP_CONCAT_SIMD: per-row register kernels for the instantiated key shapes" OFF)
-if(VW_GROUP_CONCAT_ROW)
-  if(NOT VW_GROUP_CONCAT_SIMD)
-    message(FATAL_ERROR "VW_GROUP_CONCAT_ROW extends VW_GROUP_CONCAT_SIMD; enable VW_GROUP_CONCAT_SIMD")
-  endif()
-  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_ROW=1)
-  message(STATUS "Building with VW_GROUP_CONCAT_ROW")
-endif()
-# VW_GROUP_CONCAT_HASH (needs VW_GROUP_CONCAT_ROW): for key shapes with a row
-# kernel, the packed key is hashed (MurmurHash64A, AVX-512 where available)
-# in the same pass that builds it, and HashGroup's hash pass is skipped.
-# Without effect under VW_USE_CRC32 (the fused kernels hash with Murmur).
+# VW_GROUP_CONCAT_HASH (needs VW_GROUP_CONCAT_SIMD and VW_GROUP_CONCAT_ROW):
+# for key shapes with a row kernel, the packed key is hashed (MurmurHash64A,
+# AVX-512 where available) in the same pass that builds it, and HashGroup's
+# hash pass is skipped. Without effect under VW_USE_CRC32 (the fused kernels
+# hash with Murmur). Slower than the row kernel plus the separate AVX-512
+# hash pass on Sapphire Rapids (port 5), faster on Zen 4.
 OPTION(VW_GROUP_CONCAT_HASH "VW_GROUP_CONCAT_ROW: fuse the packed-key hash into the row kernels" OFF)
 if(VW_GROUP_CONCAT_HASH)
-  if(NOT VW_GROUP_CONCAT_ROW)
-    message(FATAL_ERROR "VW_GROUP_CONCAT_HASH extends VW_GROUP_CONCAT_ROW; enable VW_GROUP_CONCAT_ROW")
+  if(NOT VW_GROUP_CONCAT_SIMD OR NOT VW_GROUP_CONCAT_ROW)
+    message(FATAL_ERROR "VW_GROUP_CONCAT_HASH needs VW_GROUP_CONCAT_SIMD and VW_GROUP_CONCAT_ROW")
   endif()
   ADD_DEFINITIONS(-DVW_GROUP_CONCAT_HASH=1)
   message(STATUS "Building with VW_GROUP_CONCAT_HASH")

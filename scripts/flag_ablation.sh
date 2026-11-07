@@ -547,15 +547,21 @@ config_flags() {
     fair_compound)       echo "$(config_flags fair_kinds) -DVW_PROJ_COMPOUND=ON" ;;
     fair_bloom)          echo "$(config_flags fair_compound) -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
     # one-pass compound key concatenation (Q1, Q3, Q18 group keys), on the
-    # cmake_defaults baseline; selection-vector keys staged or gathered, or
-    # (row) the key built per row in a register for the shapes with a kernel
-    base_concat)         echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON" ;;
-    base_concat_gather)  echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_SEL=gather" ;;
-    base_concat_row)     echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=ON" ;;
+    # cmake_defaults baseline: the vector kernels for every shape, selection-
+    # vector keys staged or gathered, or (row) the row kernels first; flags
+    # spelled out so they keep the meaning of the 2026-11-06 runs
+    base_concat)         echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=OFF -DVW_GROUP_CONCAT_SHUFFLE=all" ;;
+    base_concat_gather)  echo "$(config_flags base_concat) -DVW_GROUP_CONCAT_SEL=gather" ;;
+    base_concat_row)     echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=ON -DVW_GROUP_CONCAT_SHUFFLE=all" ;;
     # the row kernels on the AVX-512 MurmurHash base, unfused and with the
     # packed-key hash fused into them (VW_GROUP_CONCAT_HASH)
-    hash_simd_row)       echo "$(config_flags hash_simd) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=ON" ;;
+    hash_simd_row)       echo "$(config_flags hash_simd) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=ON -DVW_GROUP_CONCAT_SHUFFLE=all" ;;
     hash_simd_fused)     echo "$(config_flags hash_simd_row) -DVW_GROUP_CONCAT_HASH=ON" ;;
+    # the default concatenation (row kernels, vector kernels for all-dense
+    # keys) on the AVX-512 MurmurHash base, and both with group dispatch
+    hash_simd_concat)    echo "$(config_flags hash_simd) -DVW_GROUP_CONCAT_SIMD=ON" ;;
+    hash_simd_gdisp)     echo "$(config_flags hash_simd) $GDISP" ;;
+    hash_simd_gdisp_concat) echo "$(config_flags hash_simd_gdisp) -DVW_GROUP_CONCAT_SIMD=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

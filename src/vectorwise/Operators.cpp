@@ -2975,11 +2975,21 @@ void HashGroup::planConcat() {
 #endif
 #ifdef VW_GROUP_CONCAT_ROW
    // the row kernel instantiated for this key shape, if there is one
-   if (!sc::build(concatPlan, sc::Isa::Row, selLoad, cols, width, offset,
-                  sel, totalKeySize))
+   if (sc::build(concatPlan, sc::Isa::Row, selLoad, cols, width, offset, sel,
+                 totalKeySize))
+      return;
 #endif
-      sc::build(concatPlan, sc::best(), selLoad, cols, width, offset, sel,
-                totalKeySize);
+   // the vector kernels: by default only for all-dense keys, where they
+   // beat the per-column copy (a key read through a selection vector costs
+   // an index and a value load per row either way)
+#if defined(VW_GROUP_CONCAT_SHUFFLE_OFF)
+   return;
+#elif !defined(VW_GROUP_CONCAT_SHUFFLE_ALL)
+   for (size_t c = 0; c < cols; ++c)
+      if (sel[c]) return;
+#endif
+   sc::build(concatPlan, sc::best(), selLoad, cols, width, offset, sel,
+             totalKeySize);
 }
 
 bool HashGroup::concatSimd(pos_t n) {
