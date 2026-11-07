@@ -133,6 +133,15 @@ bool runHash(const Plan& p, HashMode mode, pos_t n, const char* const* data,
 /// whether runHash has an AVX-512 hash (Simd, Blocked) in this build
 bool simdHashAvailable();
 
+/// one key column of a width other than 1/2/4/8 bytes (Concat_T<char*>,
+/// VW_GROUP_CONCAT_WIDE): each value copied by two fixed-size moves that
+/// overlap in its middle, chosen once per call from the width (3: 2 + 2,
+/// 5..7: 4 + 4, 9..15: 8 + 8, 16..32: 16 + 16, 33..64: 32 + 32), reading
+/// and writing only the value's own bytes; wider values by memcpy. dest is
+/// the column's first byte in the first packed key.
+void copyWideColumn(pos_t n, const char* src, const pos_t* sel, char* dest,
+                    uint32_t keySize, uint32_t width);
+
 /// the reference: one strided pass per column, as HashGroup::Concat_T
 /// (width fixed per column for 1/2/4/8 bytes, memcpy of col width else)
 void runColumns(size_t cols, const uint32_t* width, const uint32_t* offset,

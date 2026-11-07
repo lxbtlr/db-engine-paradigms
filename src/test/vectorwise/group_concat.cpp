@@ -259,3 +259,35 @@ TEST(GroupConcat, FusedHash) {
       EXPECT_FALSE(runHash(p, mode, 32, data, sel, out.data(), hashes.data()));
    }
 }
+
+// VW_GROUP_CONCAT_WIDE: copyWideColumn writes exactly what the per-column
+// memcpy writes, for every width it takes, dense and through a selection
+// vector, the column in the middle of the key, without reading past a
+// column that ends at a protected page
+TEST(GroupConcat, WideColumns) {
+   std::mt19937_64 rng(23);
+   for (uint32_t w = 3; w <= 70; ++w) {
+      if (w == 4 || w == 8) continue;
+      const uint32_t off = 5, keySize = off + w + 3;
+      for (bool useSel : {false, true}) {
+         for (pos_t n : {pos_t(0), pos_t(1), pos_t(7), pos_t(100), kRows}) {
+            const size_t rows = useSel ? kRows : std::max<pos_t>(n, 1);
+            GuardedColumn col(rows * w, rng);
+            std::vector<pos_t> s;
+            if (useSel) {
+               for (pos_t i = 0; i < n; ++i) s.push_back(pos_t(rng() % kRows));
+               if (n) s[n - 1] = kRows - 1;
+            }
+            const pos_t* sel = useSel ? s.data() : nullptr;
+            std::vector<char> want(size_t(n) * keySize + kSlack, 0x5a),
+                got(want.size(), 0x5a);
+            const char* data[] = {col.data};
+            const pos_t* sels[] = {sel};
+            runColumns(1, &w, &off, keySize, n, data, sels, want.data());
+            copyWideColumn(n, col.data, sel, got.data() + off, keySize, w);
+            ASSERT_EQ(want, got) << "w=" << w << " sel=" << useSel
+                                 << " n=" << n;
+         }
+      }
+   }
+}

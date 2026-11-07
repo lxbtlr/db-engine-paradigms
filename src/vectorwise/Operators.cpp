@@ -3092,6 +3092,15 @@ template <typename T> void HashGroup::Concat_T(pos_t n, const KeyColumn& col) {
    pos_t* __restrict__ sel = col.sel;
    char* __restrict__ dest = packedKeys.data() + col.offset;
 
+#ifdef VW_GROUP_CONCAT_WIDE
+   // wide columns: two fixed-size overlapping moves per value, not a
+   // memcpy call whose length is only known at run time
+   if constexpr (std::is_same_v<T, char*>) {
+      primitives::simd_concat::copyWideColumn(n, src, sel, dest, keySize,
+                                              colSize);
+      return;
+   }
+#endif
    if (sel) {
       for (pos_t i = 0; i < n; i++) {
          std::memcpy(dest + i * keySize, src + sel[i] * colSize, colSize);

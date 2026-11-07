@@ -9,8 +9,8 @@
 //                  one shared index load, one store per row (K <= 8)
 //   row_tmpl       row_gpr with the widths fixed at compile time (preset
 //                  shapes whose columns are all s or all d)
-//   wide_fixed     scalar per column, widths > 8 copied by two overlapping
-//                  fixed-size moves instead of a memcpy call (wide shapes)
+//   wide_fixed     VW_GROUP_CONCAT_WIDE: columns other than 1/2/4/8 bytes
+//                  copied by copyWideColumn (two overlapping fixed moves)
 //   <isa>_stage    VW_GROUP_CONCAT_SIMD, selection-vector columns staged by
 //                  scalar loads (isa: vbmi, avx2, neon; those compiled in)
 //   <isa>_gather   the same with vpgather / NEON lane loads
@@ -135,42 +135,17 @@ void fusedScalar(const Shape& s, pos_t n, const char* const* data,
    }
 }
 
-/// copy of w bytes (8 < w <= 32) by two overlapping fixed-size moves
-inline void copyOverlap(char* d, const char* src, uint32_t w) {
-   if (w <= 16) {
-      uint64_t a, b;
-      std::memcpy(&a, src, 8);
-      std::memcpy(&b, src + w - 8, 8);
-      std::memcpy(d, &a, 8);
-      std::memcpy(d + w - 8, &b, 8);
-   } else {
-      char a[16], b[16];
-      std::memcpy(a, src, 16);
-      std::memcpy(b, src + w - 16, 16);
-      std::memcpy(d, a, 16);
-      std::memcpy(d + w - 16, b, 16);
-   }
-}
-
-/// per column; widths > 8 by copyOverlap (> 32: memcpy)
+/// per column; widths other than 1/2/4/8 by copyWideColumn
+/// (VW_GROUP_CONCAT_WIDE)
 void wideFixed(const Shape& s, pos_t n, const char* const* data,
                const pos_t* const* sel, char* out) {
    const uint32_t K = s.keySize;
    for (size_t c = 0; c < s.width.size(); ++c) {
       const uint32_t w = s.width[c];
-      if (w <= 8 || w > 32) {
+      if (w == 1 || w == 2 || w == 4 || w == 8)
          runColumns(1, &w, &s.offset[c], K, n, &data[c], &sel[c], out);
-         continue;
-      }
-      char* dest = out + s.offset[c];
-      const char* src = data[c];
-      if (sel[c]) {
-         for (pos_t i = 0; i < n; ++i)
-            copyOverlap(dest + size_t(i) * K, src + size_t(sel[c][i]) * w, w);
-      } else {
-         for (pos_t i = 0; i < n; ++i)
-            copyOverlap(dest + size_t(i) * K, src + size_t(i) * w, w);
-      }
+      else
+         copyWideColumn(n, data[c], sel[c], out + s.offset[c], K, w);
    }
 }
 
@@ -726,7 +701,8 @@ int main(int argc, char** argv) {
       for (bool l1 : l1Modes)
          for (unsigned selPct : sels) {
             Input in = makeInput(s, rows, vecSize, l1, selPct, rng);
-            std::vector<char> out(vecSize * 16 + kSlack);
+            // -P pads keys up to 16 bytes
+            std::vector<char> out(vecSize * std::max(16u, s.keySize) + kSlack);
             double scalarNs = 0;
             for (const auto& v : variants) {
                const bool ok =

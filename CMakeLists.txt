@@ -292,6 +292,16 @@ if(VW_GROUP_CONCAT_HASH)
   endif()
   message(STATUS "Building with VW_GROUP_CONCAT_HASH ()")
 endif()
+# VW_GROUP_CONCAT_WIDE: HashGroup copies key columns wider than 8 bytes (and
+# of 3, 5..7 bytes) into the packed key with two fixed-size moves that
+# overlap in the value's middle, chosen once from the width, instead of a
+# memcpy per row whose length is only known at run time (TPC-H Q9 / Q18
+# Char(25), SSB Char(7..15)). Independent of VW_GROUP_CONCAT_SIMD.
+OPTION(VW_GROUP_CONCAT_WIDE "Fixed-size copies of wide key columns in VectorWise HashGroup" OFF)
+if(VW_GROUP_CONCAT_WIDE)
+  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_WIDE=1)
+  message(STATUS "Building with VW_GROUP_CONCAT_WIDE")
+endif()
 # VW_GROUP_KEY_PAD: HashGroup pads a compound key of 3, 5..7 or 9..15 bytes
 # with zero bytes to 4, 8 or 16 (TPC-H Q3: 12 -> 16): such keys take the
 # 4/8-byte integer hash and compare, or a 16-byte path with the length fixed

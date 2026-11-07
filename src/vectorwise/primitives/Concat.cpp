@@ -799,6 +799,40 @@ bool simdHashAvailable() {
 #endif
 }
 
+namespace {
+/// copyWideColumn for widths A <= w < 2A: bytes [0, A) and [w - A, w)
+template <size_t A>
+void columnPassOverlap(pos_t n, const char* __restrict__ src,
+                       const pos_t* __restrict__ sel, char* __restrict__ dest,
+                       uint32_t keySize, uint32_t w) {
+   auto copy = [w](char* d, const char* s) {
+      char head[A], tail[A];
+      std::memcpy(head, s, A);
+      std::memcpy(tail, s + w - A, A);
+      std::memcpy(d, head, A);
+      std::memcpy(d + w - A, tail, A);
+   };
+   if (sel) {
+      for (pos_t i = 0; i < n; i++)
+         copy(dest + size_t(i) * keySize, src + size_t(sel[i]) * w);
+   } else {
+      for (pos_t i = 0; i < n; i++)
+         copy(dest + size_t(i) * keySize, src + size_t(i) * w);
+   }
+}
+} // namespace
+
+void copyWideColumn(pos_t n, const char* src, const pos_t* sel, char* dest,
+                    uint32_t keySize, uint32_t width) {
+   if (width < 2) return columnPassWide(0, n, src, sel, dest, keySize, width);
+   if (width < 4) return columnPassOverlap<2>(n, src, sel, dest, keySize, width);
+   if (width < 8) return columnPassOverlap<4>(n, src, sel, dest, keySize, width);
+   if (width < 16) return columnPassOverlap<8>(n, src, sel, dest, keySize, width);
+   if (width < 32) return columnPassOverlap<16>(n, src, sel, dest, keySize, width);
+   if (width <= 64) return columnPassOverlap<32>(n, src, sel, dest, keySize, width);
+   columnPassWide(0, n, src, sel, dest, keySize, width);
+}
+
 void runColumns(size_t cols, const uint32_t* width, const uint32_t* offset,
                 uint32_t keySize, pos_t n, const char* const* data,
                 const pos_t* const* sel, char* out) {
