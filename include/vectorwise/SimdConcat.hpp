@@ -58,11 +58,18 @@ constexpr size_t kSlack = 64;
 
 using RowFn = void (*)(pos_t n, const char* const* data, const pos_t* sel,
                        char* out);
+/// a row kernel that also hashes each key (VW_GROUP_CONCAT_HASH)
+using RowHashFn = void (*)(pos_t n, const char* const* data, const pos_t* sel,
+                           char* out, uint64_t* hashes);
 
 struct Plan {
    bool ok = false;
    /// Row: the instantiation for this key shape
    RowFn row = nullptr;
+   /// Row: the same, fused with HashGroup's packed-key hash, scalar and
+   /// AVX-512 (nullptr where not compiled in)
+   RowHashFn rowHash = nullptr;
+   RowHashFn rowHashSimd = nullptr;
    Isa isa = Isa::Scalar;
    SelLoad selLoad = SelLoad::Stage;
    uint32_t keySize = 0;
@@ -101,6 +108,18 @@ bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
 /// vectors take the per-column copy.
 void run(const Plan& p, pos_t n, const char* const* data,
          const pos_t* const* sel, char* out);
+
+/// Row plans: run() plus hashes[i] = MurMurHash::hashKey(uint64_t(key_i)),
+/// seed 0, the key zero-extended (bit-identical to HashGroup::Hash_T and
+/// simd_hash::hash_keys), in one pass while the key is in a register.
+/// simd: the AVX-512 kernel (8 keys per zmm) where it is compiled in; not on
+/// dubliner (VW_CONCAT_NO_AVX512_HASH: AVX-512 downclocks Cascade Lake).
+/// false (nothing written) for other plans and for selection-vector
+/// columns that do not share one selection vector.
+bool runHash(const Plan& p, bool simd, pos_t n, const char* const* data,
+             const pos_t* const* sel, char* out, uint64_t* hashes);
+/// whether runHash(simd = true) has an AVX-512 kernel in this build
+bool simdHashAvailable();
 
 /// the reference: one strided pass per column, as HashGroup::Concat_T
 /// (width fixed per column for 1/2/4/8 bytes, memcpy of col width else)

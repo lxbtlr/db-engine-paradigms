@@ -263,6 +263,24 @@ if(VW_GROUP_CONCAT_ROW)
   ADD_DEFINITIONS(-DVW_GROUP_CONCAT_ROW=1)
   message(STATUS "Building with VW_GROUP_CONCAT_ROW")
 endif()
+# VW_GROUP_CONCAT_HASH (needs VW_GROUP_CONCAT_ROW): for key shapes with a row
+# kernel, the packed key is hashed (MurmurHash64A, AVX-512 where available)
+# in the same pass that builds it, and HashGroup's hash pass is skipped.
+# Without effect under VW_USE_CRC32 (the fused kernels hash with Murmur).
+OPTION(VW_GROUP_CONCAT_HASH "VW_GROUP_CONCAT_ROW: fuse the packed-key hash into the row kernels" OFF)
+if(VW_GROUP_CONCAT_HASH)
+  if(NOT VW_GROUP_CONCAT_ROW)
+    message(FATAL_ERROR "VW_GROUP_CONCAT_HASH extends VW_GROUP_CONCAT_ROW; enable VW_GROUP_CONCAT_ROW")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_HASH=1)
+  message(STATUS "Building with VW_GROUP_CONCAT_HASH")
+endif()
+# dubliner (Cascade Lake) drops from ~2.6 to ~2.3 GHz under the AVX-512 hash
+# (TPC-H Q18 hash_simd, 2026-11-06): the fused concat + hash kernels use the
+# scalar MurmurHash there
+if(TARGET_MACHINE STREQUAL "dubliner")
+  ADD_DEFINITIONS(-DVW_CONCAT_NO_AVX512_HASH=1)
+endif()
 
 # VW_AGGR_FUSED: HashGroup updates all int64 SUM / COUNT(*) aggregates of a
 # row's pre-aggregation entry in one pass instead of one pass per aggregate

@@ -21,13 +21,23 @@
 // (Q3 orderkey, orderdate, shippriority), q18 = 25d4d4d8d4s (Q18 c_name,
 // custkey, orderdate, totalprice, l_orderkey).
 //
+// Hash mode (-H): concat plus HashGroup's hash of the packed keys
+// (MurmurHash64A, every variant's hashes checked against scalar+hash):
+//   scalar+hash      today's Concat_T, then Hash_T's scalar pass
+//   scalar+simdhash  Concat_T, then simd_hash::hash_keys (VW_SIMD_HASH)
+//   row+hash, row+simdhash   row_tmpl, then either pass
+//   fused, fused_simd        VW_GROUP_CONCAT_HASH: key and hash in one pass
+//                            (the library's row shapes; simd: AVX-512)
+//
 // Usage: run_concatbench [-k shape,...] [-s selPct,...] [-m l1|stream|both]
-//                        [-v vecSize] [-N rows] [-r reps]
+//                        [-v vecSize] [-N rows] [-r reps] [-H]
 //   l1: one vector of rows, repeated (vecs = N / vecSize); stream: N rows
 //   of each column walked vector by vector.
 // Output: CSV on stdout, ns per selected row (best of reps), speedup over
 // scalar; every variant's packed keys are checked against scalar (`ok`).
+#include "common/runtime/Hash.hpp"
 #include "vectorwise/SimdConcat.hpp"
+#include "vectorwise/SimdHash.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -274,6 +284,53 @@ void rowGprN(const Shape& s, pos_t n, const char* const* data,
    }
 }
 
+/// -H: the hashes of the variant last run (HashGroup's groupHashes)
+std::vector<uint64_t> gHashes;
+
+template <typename T>
+void hashKeysT(pos_t n, const char* keys, uint64_t* out) {
+   const runtime::MurMurHash h;
+   for (pos_t i = 0; i < n; ++i) {
+      T k;
+      std::memcpy(&k, keys + size_t(i) * sizeof(T), sizeof(T));
+      out[i] = h.hashKey(uint64_t(k));
+   }
+}
+/// HashGroup::Hash_T without VW_SIMD_HASH: scalar MurmurHash64A of each
+/// packed key, zero-extended for 1/2/4/8 bytes
+void hashPass(const Shape& s, pos_t n, const char* keys) {
+   uint64_t* out = gHashes.data();
+   switch (s.keySize) {
+   case 1: hashKeysT<uint8_t>(n, keys, out); break;
+   case 2: hashKeysT<uint16_t>(n, keys, out); break;
+   case 4: hashKeysT<uint32_t>(n, keys, out); break;
+   case 8: hashKeysT<uint64_t>(n, keys, out); break;
+   default: {
+      const runtime::MurMurHash h;
+      for (pos_t i = 0; i < n; ++i)
+         out[i] = h.hashKey(keys + size_t(i) * s.keySize, int(s.keySize), 0);
+   }
+   }
+}
+/// HashGroup::Hash_T with VW_SIMD_HASH (simd_hash::hash_keys); false where
+/// it is not compiled in or the key is not 1/2/4/8 bytes
+bool simdHashPass(const Shape& s, pos_t n, const char* keys, bool dryRun) {
+#ifdef VW_HAVE_SIMD_HASH
+   namespace sh = vectorwise::primitives::simd_hash;
+   uint64_t* out = gHashes.data();
+   switch (s.keySize) {
+   case 1: if (!dryRun) sh::hash_keys<uint8_t>(n, keys, out); return true;
+   case 2: if (!dryRun) sh::hash_keys<uint16_t>(n, keys, out); return true;
+   case 4: if (!dryRun) sh::hash_keys<uint32_t>(n, keys, out); return true;
+   case 8: if (!dryRun) sh::hash_keys<uint64_t>(n, keys, out); return true;
+   default: return false;
+   }
+#else
+   (void)s, (void)n, (void)keys, (void)dryRun;
+   return false;
+#endif
+}
+
 using Fn = std::function<void(pos_t, const char* const*, const pos_t* const*,
                               char*)>;
 struct Variant {
@@ -342,9 +399,9 @@ double pass(const Shape& s, const Input& in, size_t vecSize, bool l1,
    return std::chrono::duration<double, std::nano>(t1 - t0).count();
 }
 
-/// fn's packed keys equal scalar's for the first vectors
+/// fn's packed keys (-H: and hashes) equal ref's for the first vectors
 bool verify(const Shape& s, const Input& in, size_t vecSize, bool l1,
-            const Fn& fn, const Fn& ref) {
+            const Fn& fn, const Fn& ref, bool hashes) {
    const size_t cols = s.width.size();
    std::vector<char> a(vecSize * s.keySize + kSlack),
        b(vecSize * s.keySize + kSlack);
@@ -362,8 +419,11 @@ bool verify(const Shape& s, const Input& in, size_t vecSize, bool l1,
       }
       dense += n;
       ref(n, data, sel, a.data());
+      const std::vector<uint64_t> want(gHashes.begin(), gHashes.begin() + n);
       fn(n, data, sel, b.data());
       if (std::memcmp(a.data(), b.data(), size_t(n) * s.keySize)) return false;
+      if (hashes && !std::equal(want.begin(), want.end(), gHashes.begin()))
+         return false;
    }
    return true;
 }
@@ -379,7 +439,8 @@ int main(int argc, char** argv) {
    size_t vecSize = 1024, rows = size_t(1) << 23;
    int reps = 5;
    int opt;
-   while ((opt = getopt(argc, argv, "k:s:m:v:N:r:")) != -1) {
+   bool hashMode = false;
+   while ((opt = getopt(argc, argv, "k:s:m:v:N:r:H")) != -1) {
       switch (opt) {
       case 'k': shapes = split(optarg); break;
       case 's':
@@ -390,6 +451,7 @@ int main(int argc, char** argv) {
       case 'v': vecSize = std::stoul(optarg); break;
       case 'N': rows = std::stoul(optarg); break;
       case 'r': reps = std::stoi(optarg); break;
+      case 'H': hashMode = true; break;
       default:
          std::fprintf(stderr, "usage: %s [-k shape,..] [-s selPct,..] "
                               "[-m l1|stream|both] [-v vec] [-N rows] [-r reps]\n",
@@ -397,6 +459,7 @@ int main(int argc, char** argv) {
          return 1;
       }
    }
+   gHashes.assign(vecSize + 8, 0);
    std::vector<bool> l1Modes;
    if (modes == "l1" || modes == "both") l1Modes.push_back(true);
    if (modes == "stream" || modes == "both") l1Modes.push_back(false);
@@ -461,6 +524,59 @@ int main(int argc, char** argv) {
                  [pp](pos_t n, const char* const* d, const pos_t* const* sel,
                       char* o) { run(*pp, n, d, sel, o); }});
          }
+      if (hashMode) {
+         // concat + HashGroup's hash of the packed keys
+         variants.clear();
+         variants.push_back({"scalar+hash", [&s](pos_t n, const char* const* d,
+                                                  const pos_t* const* sl,
+                                                  char* o) {
+                                runColumns(s.width.size(), s.width.data(),
+                                           s.offset.data(), s.keySize, n, d,
+                                           sl, o);
+                                hashPass(s, n, o);
+                             }});
+         if (simdHashPass(s, 0, nullptr, true))
+            variants.push_back({"scalar+simdhash",
+                                [&s](pos_t n, const char* const* d,
+                                     const pos_t* const* sl, char* o) {
+                                   runColumns(s.width.size(), s.width.data(),
+                                              s.offset.data(), s.keySize, n,
+                                              d, sl, o);
+                                   simdHashPass(s, n, o, false);
+                                }});
+         if (TmplFn f = rowTmplFor(s.spec)) {
+            variants.push_back({"row+hash", [&s, f](pos_t n, const char* const* d,
+                                                     const pos_t* const* sl,
+                                                     char* o) {
+                                   f(n, d, sl, o);
+                                   hashPass(s, n, o);
+                                }});
+            if (simdHashPass(s, 0, nullptr, true))
+               variants.push_back({"row+simdhash",
+                                   [&s, f](pos_t n, const char* const* d,
+                                           const pos_t* const* sl, char* o) {
+                                      f(n, d, sl, o);
+                                      simdHashPass(s, n, o, false);
+                                   }});
+         }
+         bool selFlags[kMaxCols];
+         for (size_t c = 0; c < cols; ++c) selFlags[c] = s.sel[c];
+         Plan rp;
+         if (build(rp, Isa::Row, SelLoad::Stage, cols, s.width.data(),
+                   s.offset.data(), selFlags, s.keySize)) {
+            plans.push_back(rp);
+            const Plan* pp = &plans.back();
+            for (bool simd : {false, true}) {
+               if (simd && !simdHashAvailable()) continue;
+               variants.push_back(
+                   {simd ? "fused_simd" : "fused",
+                    [pp, simd](pos_t n, const char* const* d,
+                               const pos_t* const* sl, char* o) {
+                       runHash(*pp, simd, n, d, sl, o, gHashes.data());
+                    }});
+            }
+         }
+      }
 
       for (bool l1 : l1Modes)
          for (unsigned selPct : sels) {
@@ -468,7 +584,8 @@ int main(int argc, char** argv) {
             std::vector<char> out(vecSize * s.keySize + kSlack);
             double scalarNs = 0;
             for (const auto& v : variants) {
-               const bool ok = verify(s, in, vecSize, l1, v.fn, variants[0].fn);
+               const bool ok = verify(s, in, vecSize, l1, v.fn, variants[0].fn,
+                                      hashMode);
                double best = 1e300;
                pass(s, in, vecSize, l1, v.fn, out, sink); // warm
                for (int r = 0; r < reps; ++r)

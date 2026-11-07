@@ -698,7 +698,13 @@ class HashGroup : public UnaryOperator {
    /// per column) for shapes it does not cover
    primitives::simd_concat::Plan concatPlan;
    bool concatPlanned = false;
+   void planConcat();
    bool concatSimd(pos_t n);
+#ifdef VW_GROUP_CONCAT_HASH
+   /// VW_GROUP_CONCAT_HASH: packedKeys and preAggregation.groupHashes in one
+   /// pass by the plan's fused row kernel; false (Concat + Hash) without one
+   bool concatHash(pos_t n);
+#endif
 #endif
 
    void Hash(pos_t n);

@@ -2,6 +2,8 @@
 // microbenchmark and tests call them); HashGroup uses them only with the
 // option.
 #include "vectorwise/SimdConcat.hpp"
+#include "common/runtime/Hash.hpp"
+#include "vectorwise/SimdHash.hpp"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -11,6 +13,11 @@
 #endif
 #ifdef VW_CONCAT_HAVE_NEON
 #include <arm_neon.h>
+#endif
+// fused concat + hash on AVX-512 (simd_hash::murmur), except where the
+// target downclocks under AVX-512 (VW_CONCAT_NO_AVX512_HASH, dubliner)
+#if defined(VW_HAVE_SIMD_HASH) && !defined(VW_CONCAT_NO_AVX512_HASH)
+#define VW_CONCAT_FUSED_SIMD 1
 #endif
 
 namespace vectorwise {
@@ -441,6 +448,90 @@ void rowKernel(pos_t n, const char* const* data, const pos_t* sel,
                       std::make_index_sequence<sizeof...(W)>());
 }
 
+// Fused row kernels: the row kernel's key, zero-extended in its register, is
+// what HashGroup hashes (MurMurHash::hashKey(uint64_t(key)), seed 0), so it
+// is hashed there instead of in a second pass over packedKeys. AVX-512
+// (VW_CONCAT_FUSED_SIMD): 8 keys move from their registers into one zmm,
+// simd_hash::murmur hashes them, and keys of 1/2/4/8 bytes are stored by
+// one narrowing store.
+constexpr bool kHash64 = sizeof(runtime::MurMurHash::hash_t) == 8;
+
+template <bool Sel, bool Simd, size_t... W, size_t... C>
+void rowHashImpl(pos_t n, const char* const* data,
+                 const pos_t* __restrict__ sel, char* __restrict__ out,
+                 uint64_t* __restrict__ hashes, std::index_sequence<C...>) {
+   constexpr size_t K = (W + ...);
+   static_assert(K <= 8, "row kernels hold the key in 64 bits");
+   constexpr size_t ws[] = {W...};
+   constexpr auto offs = [] {
+      std::array<size_t, sizeof...(W)> o{};
+      size_t acc = 0;
+      for (size_t c = 0; c < sizeof...(W); ++c) o[c] = acc, acc += ws[c];
+      return o;
+   }();
+   constexpr bool pow2 = K == 1 || K == 2 || K == 4 || K == 8;
+   const char* d[] = {data[C]...};
+   auto keyAt = [&](pos_t i) -> uint64_t {
+      const size_t r = Sel ? sel[i] : i;
+      return ((loadW<ws[C]>(d[C] + r * ws[C]) << (8 * offs[C])) | ...);
+   };
+   auto store = [&](pos_t i, uint64_t key) {
+      std::memcpy(out + size_t(i) * K, &key, pow2 ? K : 8);
+   };
+   pos_t i = 0;
+#ifdef VW_CONCAT_FUSED_SIMD
+   if constexpr (Simd) {
+      const __m512i seed = _mm512_setzero_si512();
+      for (; i + 8 <= n; i += 8) {
+         uint64_t k[8];
+         for (int j = 0; j < 8; ++j) k[j] = keyAt(i + j);
+         const __m512i v = _mm512_set_epi64(
+             (long long)k[7], (long long)k[6], (long long)k[5],
+             (long long)k[4], (long long)k[3], (long long)k[2],
+             (long long)k[1], (long long)k[0]);
+         char* dst = out + size_t(i) * K;
+         if constexpr (K == 1) {
+            _mm_storel_epi64(reinterpret_cast<__m128i*>(dst),
+                             _mm512_cvtepi64_epi8(v));
+         } else if constexpr (K == 2) {
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(dst),
+                             _mm512_cvtepi64_epi16(v));
+         } else if constexpr (K == 4) {
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst),
+                                _mm512_cvtepi64_epi32(v));
+         } else if constexpr (K == 8) {
+            _mm512_storeu_si512(dst, v);
+         } else {
+            for (int j = 0; j < 8; ++j) store(i + j, k[j]);
+         }
+         _mm512_storeu_si512(hashes + i, primitives::simd_hash::murmur(v, seed));
+      }
+   }
+#endif
+   const runtime::MurMurHash h;
+   for (; i < n; ++i) {
+      const uint64_t key = keyAt(i);
+      store(i, key);
+      hashes[i] = h.hashKey(key);
+   }
+}
+template <bool Sel, bool Simd, size_t... W>
+void rowHashKernel(pos_t n, const char* const* data, const pos_t* sel,
+                   char* out, uint64_t* hashes) {
+   rowHashImpl<Sel, Simd, W...>(n, data, sel, out, hashes,
+                                std::make_index_sequence<sizeof...(W)>());
+}
+template <bool Sel, size_t... W> constexpr RowHashFn rowHashScalar() {
+   return kHash64 ? rowHashKernel<Sel, false, W...> : nullptr;
+}
+template <bool Sel, size_t... W> constexpr RowHashFn rowHashSimd() {
+#ifdef VW_CONCAT_FUSED_SIMD
+   return kHash64 ? rowHashKernel<Sel, true, W...> : nullptr;
+#else
+   return nullptr;
+#endif
+}
+
 /// The instantiated key shapes: every column through the one selection
 /// vector (sel) or every column dense. Only the compound group keys of the
 /// TPC-H / SSB plans that fit 8 bytes of 1/2/4/8-byte columns are listed
@@ -453,10 +544,15 @@ struct RowEntry {
    uint32_t cols;
    uint8_t width[kMaxCols];
    RowFn fn;
+   RowHashFn hash, hashSimd;
 };
+#define VW_ROW_SHAPE(SEL, COLS, ...)                                          \
+   {SEL, COLS, {__VA_ARGS__}, rowKernel<SEL, __VA_ARGS__>,                     \
+    rowHashScalar<SEL, __VA_ARGS__>(), rowHashSimd<SEL, __VA_ARGS__>()}
 const RowEntry kRowKernels[] = {
-    {true, 2, {1, 1}, rowKernel<true, 1, 1>}, // Q1
+    VW_ROW_SHAPE(true, 2, 1, 1), // Q1
 };
+#undef VW_ROW_SHAPE
 
 uint32_t pow2ceil(uint32_t x) {
    uint32_t p = 1;
@@ -527,6 +623,8 @@ bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
             p.sel[c] = sel[c];
          }
          p.row = e.fn;
+         p.rowHash = e.hash;
+         p.rowHashSimd = e.hashSimd;
          p.ok = true;
          return true;
       }
@@ -619,6 +717,28 @@ void run(const Plan& p, pos_t n, const char* const* data,
    }
    default: tail(p, 0, n, data, sel, out); return;
    }
+}
+
+bool runHash(const Plan& p, bool simd, pos_t n, const char* const* data,
+             const pos_t* const* sel, char* out, uint64_t* hashes) {
+   if (p.isa != Isa::Row || !p.rowHash) return false;
+   const pos_t* s = nullptr;
+   for (uint32_t c = 0; c < p.cols; ++c) {
+      if (!p.sel[c]) continue;
+      if (s && sel[c] != s) return false;
+      s = sel[c];
+   }
+   (simd && p.rowHashSimd ? p.rowHashSimd : p.rowHash)(n, data, s, out,
+                                                       hashes);
+   return true;
+}
+
+bool simdHashAvailable() {
+#ifdef VW_CONCAT_FUSED_SIMD
+   return kHash64;
+#else
+   return false;
+#endif
 }
 
 void runColumns(size_t cols, const uint32_t* width, const uint32_t* offset,

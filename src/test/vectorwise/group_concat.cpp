@@ -5,6 +5,7 @@
 // vector sizes around the block boundaries; it may not write past
 // n * K + kSlack, and may not read past a column's last value (columns end
 // at a protected page).
+#include "common/runtime/Hash.hpp"
 #include "vectorwise/SimdConcat.hpp"
 #include <gtest/gtest.h>
 #include <sys/mman.h>
@@ -213,4 +214,47 @@ TEST(GroupConcat, RowKernels) {
    const bool mixed[] = {true, false};
    EXPECT_FALSE(build(p, Isa::Row, SelLoad::Stage, 2, s.width.data(),
                       s.offset.data(), mixed, 2));
+}
+
+// VW_GROUP_CONCAT_HASH: the fused row kernels write the row kernel's keys
+// and MurMurHash::hashKey(uint64_t(key)) of each, scalar and AVX-512
+TEST(GroupConcat, FusedHash) {
+   std::mt19937_64 rng(17);
+   const uint32_t width[] = {1, 1}, offset[] = {0, 1};
+   const bool selFlags[] = {true, true};
+   Plan p;
+   ASSERT_TRUE(build(p, Isa::Row, SelLoad::Stage, 2, width, offset, selFlags,
+                     2));
+   std::vector<char> a(kRows), b(kRows);
+   for (auto& x : a) x = char(rng());
+   for (auto& x : b) x = char(rng());
+   const runtime::MurMurHash murmur;
+   for (bool simd : {false, true}) {
+      for (pos_t n : kSizes) {
+         std::vector<pos_t> s(n + 32);
+         for (pos_t i = 0; i < n; ++i) s[i] = pos_t(rng() % kRows);
+         std::sort(s.begin(), s.begin() + n);
+         const char* data[] = {a.data(), b.data()};
+         const pos_t* sel[] = {s.data(), s.data()};
+         std::vector<char> want(size_t(n) * 2 + kSlack), got(want.size());
+         std::vector<uint64_t> hashes(n + 1, 0);
+         runColumns(2, width, offset, 2, n, data, sel, want.data());
+         ASSERT_TRUE(runHash(p, simd, n, data, sel, got.data(), hashes.data()));
+         ASSERT_EQ(0, std::memcmp(want.data(), got.data(), size_t(n) * 2))
+             << "simd=" << simd << " n=" << n;
+         for (pos_t i = 0; i < n; ++i) {
+            uint16_t key;
+            std::memcpy(&key, want.data() + size_t(i) * 2, 2);
+            ASSERT_EQ(hashes[i], murmur.hashKey(uint64_t(key)))
+                << "simd=" << simd << " n=" << n << " row " << i;
+         }
+      }
+      // columns reading different selection vectors: not fused
+      std::vector<pos_t> s1(64, 0), s2(64, 1);
+      const char* data[] = {a.data(), b.data()};
+      const pos_t* sel[] = {s1.data(), s2.data()};
+      std::vector<char> out(64 * 2 + kSlack);
+      std::vector<uint64_t> hashes(64);
+      EXPECT_FALSE(runHash(p, simd, 32, data, sel, out.data(), hashes.data()));
+   }
 }

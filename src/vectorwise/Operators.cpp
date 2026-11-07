@@ -1965,6 +1965,10 @@ size_t HashGroup::next() {
          }
 #endif
 
+#ifdef VW_GROUP_CONCAT_HASH
+         // packed keys and their hashes in one pass where a row kernel fits
+         if (!concatHash(n)) {
+#endif
 #ifdef VW_GROUP_NO_CONCAT
          // One dense key of 1/2/4/8 bytes (TPC-H Q18: l_orderkey) already is
          // its packed form; Concat would only copy it.
@@ -1982,6 +1986,9 @@ size_t HashGroup::next() {
 #endif
 #ifndef VW_FUSE_HASH
          Hash(n);
+#endif
+#ifdef VW_GROUP_CONCAT_HASH
+         }
 #endif
          Lookup(n);
 
@@ -2947,36 +2954,39 @@ void HashGroup::keyStepT(pos_t n) {
 
 // CONCAT
 #ifdef VW_GROUP_CONCAT_SIMD
-bool HashGroup::concatSimd(pos_t n) {
+void HashGroup::planConcat() {
    namespace sc = primitives::simd_concat;
    const size_t cols = keyColumns.size();
-   if (!concatPlanned) {
-      // planned at the first vector: whether a key reads through a selection
-      // vector is fixed by the plan, its pointer is rebound per vector
-      concatPlanned = true;
-      if (cols <= sc::kMaxCols) {
-         uint32_t width[sc::kMaxCols], offset[sc::kMaxCols];
-         bool sel[sc::kMaxCols];
-         for (size_t c = 0; c < cols; ++c) {
-            width[c] = keyColumns[c].size;
-            offset[c] = keyColumns[c].offset;
-            sel[c] = keyColumns[c].sel != nullptr;
-         }
+   // planned at the first vector: whether a key reads through a selection
+   // vector is fixed by the plan, its pointer is rebound per vector
+   concatPlanned = true;
+   if (cols > sc::kMaxCols) return;
+   uint32_t width[sc::kMaxCols], offset[sc::kMaxCols];
+   bool sel[sc::kMaxCols];
+   for (size_t c = 0; c < cols; ++c) {
+      width[c] = keyColumns[c].size;
+      offset[c] = keyColumns[c].offset;
+      sel[c] = keyColumns[c].sel != nullptr;
+   }
 #ifdef VW_GROUP_CONCAT_GATHER
-         constexpr auto selLoad = sc::SelLoad::Gather;
+   constexpr auto selLoad = sc::SelLoad::Gather;
 #else
-         constexpr auto selLoad = sc::SelLoad::Stage;
+   constexpr auto selLoad = sc::SelLoad::Stage;
 #endif
 #ifdef VW_GROUP_CONCAT_ROW
-         // the row kernel instantiated for this key shape, if there is one
-         if (!sc::build(concatPlan, sc::Isa::Row, selLoad, cols, width,
-                        offset, sel, totalKeySize))
+   // the row kernel instantiated for this key shape, if there is one
+   if (!sc::build(concatPlan, sc::Isa::Row, selLoad, cols, width, offset,
+                  sel, totalKeySize))
 #endif
-            sc::build(concatPlan, sc::best(), selLoad, cols, width, offset,
-                      sel, totalKeySize);
-      }
-   }
+      sc::build(concatPlan, sc::best(), selLoad, cols, width, offset, sel,
+                totalKeySize);
+}
+
+bool HashGroup::concatSimd(pos_t n) {
+   namespace sc = primitives::simd_concat;
+   if (!concatPlanned) planConcat();
    if (!concatPlan.ok) return false;
+   const size_t cols = keyColumns.size();
    const char* data[sc::kMaxCols];
    const pos_t* sel[sc::kMaxCols];
    for (size_t c = 0; c < cols; ++c) {
@@ -2986,6 +2996,31 @@ bool HashGroup::concatSimd(pos_t n) {
    sc::run(concatPlan, n, data, sel, packedKeys.data());
    return true;
 }
+
+#ifdef VW_GROUP_CONCAT_HASH
+bool HashGroup::concatHash(pos_t n) {
+#if defined(VW_USE_CRC32) || defined(VW_FUSE_HASH) ||                         \
+    defined(VW_GROUP_NO_CONCAT) || (defined(HASH_SIZE) && HASH_SIZE == 32)
+   // the fused kernels hash with 64-bit MurmurHash64A into packedKeys'
+   // hashes; these builds hash otherwise or elsewhere
+   (void)n;
+   return false;
+#else
+   namespace sc = primitives::simd_concat;
+   if (!concatPlanned) planConcat();
+   if (!concatPlan.ok || concatPlan.isa != sc::Isa::Row) return false;
+   const size_t cols = keyColumns.size();
+   const char* data[sc::kMaxCols];
+   const pos_t* sel[sc::kMaxCols];
+   for (size_t c = 0; c < cols; ++c) {
+      data[c] = static_cast<const char*>(keyColumns[c].data);
+      sel[c] = keyColumns[c].sel;
+   }
+   return sc::runHash(concatPlan, true, n, data, sel, packedKeys.data(),
+                      reinterpret_cast<uint64_t*>(preAggregation.groupHashes));
+#endif
+}
+#endif
 #endif
 
 void HashGroup::Concat(pos_t n) {

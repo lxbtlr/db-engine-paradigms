@@ -552,6 +552,10 @@ config_flags() {
     base_concat)         echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON" ;;
     base_concat_gather)  echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_SEL=gather" ;;
     base_concat_row)     echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=ON" ;;
+    # the row kernels on the AVX-512 MurmurHash base, unfused and with the
+    # packed-key hash fused into them (VW_GROUP_CONCAT_HASH)
+    hash_simd_row)       echo "$(config_flags hash_simd) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=ON" ;;
+    hash_simd_fused)     echo "$(config_flags hash_simd_row) -DVW_GROUP_CONCAT_HASH=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

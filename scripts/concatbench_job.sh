@@ -14,6 +14,7 @@
 #   N         rows per column (stream), -N          [8388608]
 #   REPS      best of, -r                           [5]
 #   CPU       core the benchmark is pinned to       [0]
+#   HASH      1: -H, concat plus the packed-key hash  [0]
 #
 # Output: results/concatbench_<host>_<stamp>/ with machine.txt, tests.txt,
 # concatbench.csv, build.log.
@@ -41,7 +42,7 @@ mkdir -p "$OUT"
   echo "git:  $(git -C "$ROOT" rev-parse --short HEAD)"
   lscpu | grep -E 'Model name|MHz' || true
   echo "isa flags: $(grep -o -w -E 'avx2|avx512f|avx512vbmi|asimd' /proc/cpuinfo | sort -u | tr '\n' ' ')"
-  echo "SHAPES: ${SHAPES:-presets}  SELS: $SELS  MODES: $MODES  N: $N  REPS: $REPS"
+  echo "SHAPES: ${SHAPES:-presets}  SELS: $SELS  MODES: $MODES  N: $N  REPS: $REPS  HASH: ${HASH:-0}"
 } | tee "$OUT/machine.txt"
 
 cmake -S "$ROOT" -B "$B" -DCMAKE_BUILD_TYPE=Release -DCOMPILER="$COMPILER" \
@@ -55,6 +56,7 @@ grep -m1 -E 'CXX_FLAGS|ARCH' "$B/CMakeCache.txt" >> "$OUT/machine.txt" || true
 
 args=(-s "$SELS" -m "$MODES" -N "$N" -r "$REPS")
 [ -n "${SHAPES:-}" ] && args+=(-k "$SHAPES")
+[ "${HASH:-0}" = 1 ] && args+=(-H)
 taskset -c "$CPU" "$B/run_concatbench" "${args[@]}" > "$OUT/concatbench.csv" ||
   { echo "run_concatbench failed" >&2; exit 1; }
 column -t -s, "$OUT/concatbench.csv"
