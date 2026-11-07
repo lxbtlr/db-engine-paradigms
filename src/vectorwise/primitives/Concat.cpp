@@ -448,12 +448,15 @@ void rowKernel(pos_t n, const char* const* data, const pos_t* sel,
                       std::make_index_sequence<sizeof...(W)>());
 }
 
-// Fused row kernels: the row kernel's key, zero-extended in its register, is
-// what HashGroup hashes (MurMurHash::hashKey(uint64_t(key)), seed 0), so it
-// is hashed there instead of in a second pass over packedKeys. AVX-512
-// (VW_CONCAT_FUSED_SIMD): 8 keys move from their registers into one zmm,
-// simd_hash::murmur hashes them, and keys of 1/2/4/8 bytes are stored by
-// one narrowing store.
+// Fused row kernels: HashGroup hashes a packed key of 1/2/4/8 bytes as
+// MurMurHash::hashKey(uint64_t(key)), seed 0, which is the row kernel's
+// register zero-extended, and other keys by their bytes
+// (hashKey(key, K, 0)); so the key is hashed in the row loop instead of in
+// a second pass over packedKeys. AVX-512 (VW_CONCAT_FUSED_SIMD, 1/2/4/8
+// bytes): 8 keys move from their registers into one zmm, simd_hash::murmur
+// hashes them, and they are stored by one narrowing store. The blocked
+// kernel runs the row kernel over kHashBlock rows and then
+// simd_hash::hash_keys over that block, still in L1.
 constexpr bool kHash64 = sizeof(runtime::MurMurHash::hash_t) == 8;
 
 template <bool Sel, bool Simd, size_t... W, size_t... C>
@@ -480,7 +483,7 @@ void rowHashImpl(pos_t n, const char* const* data,
    };
    pos_t i = 0;
 #ifdef VW_CONCAT_FUSED_SIMD
-   if constexpr (Simd) {
+   if constexpr (Simd && pow2) {
       const __m512i seed = _mm512_setzero_si512();
       for (; i + 8 <= n; i += 8) {
          uint64_t k[8];
@@ -499,10 +502,8 @@ void rowHashImpl(pos_t n, const char* const* data,
          } else if constexpr (K == 4) {
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst),
                                 _mm512_cvtepi64_epi32(v));
-         } else if constexpr (K == 8) {
-            _mm512_storeu_si512(dst, v);
          } else {
-            for (int j = 0; j < 8; ++j) store(i + j, k[j]);
+            _mm512_storeu_si512(dst, v);
          }
          _mm512_storeu_si512(hashes + i, primitives::simd_hash::murmur(v, seed));
       }
@@ -512,7 +513,10 @@ void rowHashImpl(pos_t n, const char* const* data,
    for (; i < n; ++i) {
       const uint64_t key = keyAt(i);
       store(i, key);
-      hashes[i] = h.hashKey(key);
+      if constexpr (pow2)
+         hashes[i] = h.hashKey(key);
+      else
+         hashes[i] = h.hashKey(out + size_t(i) * K, int(K), 0);
    }
 }
 template <bool Sel, bool Simd, size_t... W>
@@ -520,6 +524,52 @@ void rowHashKernel(pos_t n, const char* const* data, const pos_t* sel,
                    char* out, uint64_t* hashes) {
    rowHashImpl<Sel, Simd, W...>(n, data, sel, out, hashes,
                                 std::make_index_sequence<sizeof...(W)>());
+}
+/// the hash pass of the blocked kernel over m packed keys: Hash_T's
+template <size_t K>
+void hashBlock(pos_t m, const char* keys, uint64_t* hashes) {
+#ifdef VW_CONCAT_FUSED_SIMD
+   using hash_t = primitives::simd_hash::hash_t;
+   auto* out = reinterpret_cast<hash_t*>(hashes);
+   if constexpr (K == 1) return primitives::simd_hash::hash_keys<uint8_t>(m, keys, out);
+   if constexpr (K == 2) return primitives::simd_hash::hash_keys<uint16_t>(m, keys, out);
+   if constexpr (K == 4) return primitives::simd_hash::hash_keys<uint32_t>(m, keys, out);
+   if constexpr (K == 8) return primitives::simd_hash::hash_keys<uint64_t>(m, keys, out);
+#endif
+   const runtime::MurMurHash h;
+   for (pos_t j = 0; j < m; ++j) {
+      const char* key = keys + size_t(j) * K;
+      if constexpr (K == 1 || K == 2 || K == 4 || K == 8) {
+         uint64_t v = 0;
+         std::memcpy(&v, key, K);
+         hashes[j] = h.hashKey(v);
+      } else {
+         hashes[j] = h.hashKey(key, int(K), 0);
+      }
+   }
+}
+template <bool Sel, size_t... W, size_t... C>
+void rowHashBlockedImpl(pos_t n, const char* const* data, const pos_t* sel,
+                        char* out, uint64_t* hashes,
+                        std::index_sequence<C...> cs) {
+   constexpr size_t K = (W + ...);
+   constexpr size_t ws[] = {W...};
+   for (pos_t i = 0; i < n; i += kHashBlock) {
+      const pos_t m = std::min<pos_t>(kHashBlock, pos_t(n - i));
+      const char* d[] = {(data[C] + (Sel ? 0 : size_t(i) * ws[C]))...};
+      rowImpl<Sel, W...>(m, d, Sel ? sel + i : nullptr, out + size_t(i) * K,
+                         cs);
+      hashBlock<K>(m, out + size_t(i) * K, hashes + i);
+   }
+}
+template <bool Sel, size_t... W>
+void rowHashBlockedKernel(pos_t n, const char* const* data, const pos_t* sel,
+                          char* out, uint64_t* hashes) {
+   rowHashBlockedImpl<Sel, W...>(n, data, sel, out, hashes,
+                                 std::make_index_sequence<sizeof...(W)>());
+}
+template <bool Sel, size_t... W> constexpr RowHashFn rowHashBlocked() {
+   return kHash64 ? rowHashBlockedKernel<Sel, W...> : nullptr;
 }
 template <bool Sel, size_t... W> constexpr RowHashFn rowHashScalar() {
    return kHash64 ? rowHashKernel<Sel, false, W...> : nullptr;
@@ -544,11 +594,12 @@ struct RowEntry {
    uint32_t cols;
    uint8_t width[kMaxCols];
    RowFn fn;
-   RowHashFn hash, hashSimd;
+   RowHashFn hash, hashSimd, hashBlocked;
 };
 #define VW_ROW_SHAPE(SEL, COLS, ...)                                          \
    {SEL, COLS, {__VA_ARGS__}, rowKernel<SEL, __VA_ARGS__>,                     \
-    rowHashScalar<SEL, __VA_ARGS__>(), rowHashSimd<SEL, __VA_ARGS__>()}
+    rowHashScalar<SEL, __VA_ARGS__>(), rowHashSimd<SEL, __VA_ARGS__>(),      \
+    rowHashBlocked<SEL, __VA_ARGS__>()}
 const RowEntry kRowKernels[] = {
     VW_ROW_SHAPE(true, 2, 1, 1), // Q1
 };
@@ -625,6 +676,7 @@ bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
          p.row = e.fn;
          p.rowHash = e.hash;
          p.rowHashSimd = e.hashSimd;
+         p.rowHashBlocked = e.hashBlocked;
          p.ok = true;
          return true;
       }
@@ -719,7 +771,7 @@ void run(const Plan& p, pos_t n, const char* const* data,
    }
 }
 
-bool runHash(const Plan& p, bool simd, pos_t n, const char* const* data,
+bool runHash(const Plan& p, HashMode mode, pos_t n, const char* const* data,
              const pos_t* const* sel, char* out, uint64_t* hashes) {
    if (p.isa != Isa::Row || !p.rowHash) return false;
    const pos_t* s = nullptr;
@@ -728,8 +780,10 @@ bool runHash(const Plan& p, bool simd, pos_t n, const char* const* data,
       if (s && sel[c] != s) return false;
       s = sel[c];
    }
-   (simd && p.rowHashSimd ? p.rowHashSimd : p.rowHash)(n, data, s, out,
-                                                       hashes);
+   RowHashFn fn = p.rowHash;
+   if (mode == HashMode::Simd && p.rowHashSimd) fn = p.rowHashSimd;
+   if (mode == HashMode::Blocked && p.rowHashBlocked) fn = p.rowHashBlocked;
+   fn(n, data, s, out, hashes);
    return true;
 }
 

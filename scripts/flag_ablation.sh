@@ -562,6 +562,9 @@ config_flags() {
     hash_simd_concat)    echo "$(config_flags hash_simd) -DVW_GROUP_CONCAT_SIMD=ON" ;;
     hash_simd_gdisp)     echo "$(config_flags hash_simd) $GDISP" ;;
     hash_simd_gdisp_concat) echo "$(config_flags hash_simd_gdisp) -DVW_GROUP_CONCAT_SIMD=ON" ;;
+    # the default concatenation with the AVX-512 hash pass run per block of
+    # 128 row-kernel keys, in L1 (VW_GROUP_CONCAT_HASH_MODE=blocked)
+    hash_simd_blocked)   echo "$(config_flags hash_simd_concat) -DVW_GROUP_CONCAT_HASH=ON -DVW_GROUP_CONCAT_HASH_MODE=blocked" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

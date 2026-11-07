@@ -3026,7 +3026,12 @@ bool HashGroup::concatHash(pos_t n) {
       data[c] = static_cast<const char*>(keyColumns[c].data);
       sel[c] = keyColumns[c].sel;
    }
-   return sc::runHash(concatPlan, true, n, data, sel, packedKeys.data(),
+#ifdef VW_GROUP_CONCAT_HASH_BLOCKED
+   constexpr auto mode = sc::HashMode::Blocked;
+#else
+   constexpr auto mode = sc::HashMode::Simd;
+#endif
+   return sc::runHash(concatPlan, mode, n, data, sel, packedKeys.data(),
                       reinterpret_cast<uint64_t*>(preAggregation.groupHashes));
 #endif
 }

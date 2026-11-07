@@ -28,6 +28,8 @@
 //   row+hash, row+simdhash   row_tmpl, then either pass
 //   fused, fused_simd        VW_GROUP_CONCAT_HASH: key and hash in one pass
 //                            (the library's row shapes; simd: AVX-512)
+//   fused_block              the row kernel over 128 rows, then hash_keys
+//                            over them (VW_GROUP_CONCAT_HASH_MODE=blocked)
 //
 // Usage: run_concatbench [-k shape,...] [-s selPct,...] [-m l1|stream|both]
 //                        [-v vecSize] [-N rows] [-r reps] [-H]
@@ -566,13 +568,16 @@ int main(int argc, char** argv) {
                    s.offset.data(), selFlags, s.keySize)) {
             plans.push_back(rp);
             const Plan* pp = &plans.back();
-            for (bool simd : {false, true}) {
-               if (simd && !simdHashAvailable()) continue;
+            const std::pair<const char*, HashMode> modes[] = {
+                {"fused", HashMode::Scalar},
+                {"fused_simd", HashMode::Simd},
+                {"fused_block", HashMode::Blocked}};
+            for (const auto& [label, mode] : modes) {
+               if (mode != HashMode::Scalar && !simdHashAvailable()) continue;
                variants.push_back(
-                   {simd ? "fused_simd" : "fused",
-                    [pp, simd](pos_t n, const char* const* d,
-                               const pos_t* const* sl, char* o) {
-                       runHash(*pp, simd, n, d, sl, o, gHashes.data());
+                   {label, [pp, mode = mode](pos_t n, const char* const* d,
+                                             const pos_t* const* sl, char* o) {
+                       runHash(*pp, mode, n, d, sl, o, gHashes.data());
                     }});
             }
          }

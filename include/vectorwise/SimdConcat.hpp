@@ -66,10 +66,12 @@ struct Plan {
    bool ok = false;
    /// Row: the instantiation for this key shape
    RowFn row = nullptr;
-   /// Row: the same, fused with HashGroup's packed-key hash, scalar and
-   /// AVX-512 (nullptr where not compiled in)
+   /// Row: the same, with HashGroup's packed-key hash: per row in the
+   /// kernel, scalar and AVX-512, or per block of rows after it (nullptr
+   /// where not compiled in)
    RowHashFn rowHash = nullptr;
    RowHashFn rowHashSimd = nullptr;
+   RowHashFn rowHashBlocked = nullptr;
    Isa isa = Isa::Scalar;
    SelLoad selLoad = SelLoad::Stage;
    uint32_t keySize = 0;
@@ -109,16 +111,26 @@ bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
 void run(const Plan& p, pos_t n, const char* const* data,
          const pos_t* const* sel, char* out);
 
-/// Row plans: run() plus hashes[i] = MurMurHash::hashKey(uint64_t(key_i)),
-/// seed 0, the key zero-extended (bit-identical to HashGroup::Hash_T and
-/// simd_hash::hash_keys), in one pass while the key is in a register.
-/// simd: the AVX-512 kernel (8 keys per zmm) where it is compiled in; not on
+/// how runHash hashes the row kernel's keys
+enum class HashMode : uint8_t {
+   Scalar,  ///< scalar MurmurHash64A per row, in the row loop
+   Simd,    ///< 8 keys per zmm from their registers, in the row loop
+   Blocked  ///< the row kernel over kHashBlock rows, then the AVX-512 hash
+            ///< pass (simd_hash::hash_keys) over that block, in L1
+};
+constexpr pos_t kHashBlock = 128;
+
+/// Row plans: run() plus hashes[i] = the hash HashGroup::Hash_T gives key
+/// i (MurmurHash64A, seed 0: of the zero-extended key for 1/2/4/8-byte
+/// keys, of its bytes otherwise; bit-identical to Hash_T and
+/// simd_hash::hash_keys), in one pass over the rows. Simd and Blocked fall
+/// back to Scalar where there is no AVX-512 hash: not compiled in, or
 /// dubliner (VW_CONCAT_NO_AVX512_HASH: AVX-512 downclocks Cascade Lake).
 /// false (nothing written) for other plans and for selection-vector
 /// columns that do not share one selection vector.
-bool runHash(const Plan& p, bool simd, pos_t n, const char* const* data,
+bool runHash(const Plan& p, HashMode mode, pos_t n, const char* const* data,
              const pos_t* const* sel, char* out, uint64_t* hashes);
-/// whether runHash(simd = true) has an AVX-512 kernel in this build
+/// whether runHash has an AVX-512 hash (Simd, Blocked) in this build
 bool simdHashAvailable();
 
 /// the reference: one strided pass per column, as HashGroup::Concat_T

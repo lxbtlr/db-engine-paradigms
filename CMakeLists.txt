@@ -276,13 +276,21 @@ endif()
 # hash pass is skipped. Without effect under VW_USE_CRC32 (the fused kernels
 # hash with Murmur). Slower than the row kernel plus the separate AVX-512
 # hash pass on Sapphire Rapids (port 5), faster on Zen 4.
+# VW_GROUP_CONCAT_HASH_MODE: fused (the hash in the row loop) or blocked (the
+# row kernel over 128 rows, then the AVX-512 hash pass over them in L1).
 OPTION(VW_GROUP_CONCAT_HASH "VW_GROUP_CONCAT_ROW: fuse the packed-key hash into the row kernels" OFF)
+set(VW_GROUP_CONCAT_HASH_MODE "fused" CACHE STRING "VW_GROUP_CONCAT_HASH: fused or blocked")
 if(VW_GROUP_CONCAT_HASH)
   if(NOT VW_GROUP_CONCAT_SIMD OR NOT VW_GROUP_CONCAT_ROW)
     message(FATAL_ERROR "VW_GROUP_CONCAT_HASH needs VW_GROUP_CONCAT_SIMD and VW_GROUP_CONCAT_ROW")
   endif()
   ADD_DEFINITIONS(-DVW_GROUP_CONCAT_HASH=1)
-  message(STATUS "Building with VW_GROUP_CONCAT_HASH")
+  if(VW_GROUP_CONCAT_HASH_MODE STREQUAL "blocked")
+    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_HASH_BLOCKED=1)
+  elseif(NOT VW_GROUP_CONCAT_HASH_MODE STREQUAL "fused")
+    message(FATAL_ERROR "VW_GROUP_CONCAT_HASH_MODE must be fused or blocked")
+  endif()
+  message(STATUS "Building with VW_GROUP_CONCAT_HASH ()")
 endif()
 # dubliner (Cascade Lake) drops from ~2.6 to ~2.3 GHz under the AVX-512 hash
 # (TPC-H Q18 hash_simd, 2026-11-06): the fused concat + hash kernels use the

@@ -217,7 +217,7 @@ TEST(GroupConcat, RowKernels) {
 }
 
 // VW_GROUP_CONCAT_HASH: the fused row kernels write the row kernel's keys
-// and MurMurHash::hashKey(uint64_t(key)) of each, scalar and AVX-512
+// and MurMurHash::hashKey(uint64_t(key)) of each, in every HashMode
 TEST(GroupConcat, FusedHash) {
    std::mt19937_64 rng(17);
    const uint32_t width[] = {1, 1}, offset[] = {0, 1};
@@ -229,7 +229,8 @@ TEST(GroupConcat, FusedHash) {
    for (auto& x : a) x = char(rng());
    for (auto& x : b) x = char(rng());
    const runtime::MurMurHash murmur;
-   for (bool simd : {false, true}) {
+   for (HashMode mode : {HashMode::Scalar, HashMode::Simd, HashMode::Blocked}) {
+      const int m = int(mode);
       for (pos_t n : kSizes) {
          std::vector<pos_t> s(n + 32);
          for (pos_t i = 0; i < n; ++i) s[i] = pos_t(rng() % kRows);
@@ -239,14 +240,14 @@ TEST(GroupConcat, FusedHash) {
          std::vector<char> want(size_t(n) * 2 + kSlack), got(want.size());
          std::vector<uint64_t> hashes(n + 1, 0);
          runColumns(2, width, offset, 2, n, data, sel, want.data());
-         ASSERT_TRUE(runHash(p, simd, n, data, sel, got.data(), hashes.data()));
+         ASSERT_TRUE(runHash(p, mode, n, data, sel, got.data(), hashes.data()));
          ASSERT_EQ(0, std::memcmp(want.data(), got.data(), size_t(n) * 2))
-             << "simd=" << simd << " n=" << n;
+             << "mode=" << m << " n=" << n;
          for (pos_t i = 0; i < n; ++i) {
             uint16_t key;
             std::memcpy(&key, want.data() + size_t(i) * 2, 2);
             ASSERT_EQ(hashes[i], murmur.hashKey(uint64_t(key)))
-                << "simd=" << simd << " n=" << n << " row " << i;
+                << "mode=" << m << " n=" << n << " row " << i;
          }
       }
       // columns reading different selection vectors: not fused
@@ -255,6 +256,6 @@ TEST(GroupConcat, FusedHash) {
       const pos_t* sel[] = {s1.data(), s2.data()};
       std::vector<char> out(64 * 2 + kSlack);
       std::vector<uint64_t> hashes(64);
-      EXPECT_FALSE(runHash(p, simd, 32, data, sel, out.data(), hashes.data()));
+      EXPECT_FALSE(runHash(p, mode, 32, data, sel, out.data(), hashes.data()));
    }
 }
