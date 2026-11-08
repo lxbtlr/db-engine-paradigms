@@ -21,6 +21,17 @@
 // (Q3 orderkey, orderdate, shippriority), q18 = 25d4d4d8d4s (Q18 c_name,
 // custkey, orderdate, totalprice, l_orderkey).
 //
+// Probe mode (-L), keys of 1/2/4/8 bytes whose columns take D values each
+// (-D, default 2,8,32; D^cols groups, at most 1433), against a table that
+// holds every group: HashGroup's dispatch key step (keyStepT, kPacked)
+//   cols+probe_<h>   Concat_T, then hash, chain walk, compare from packedKeys
+//   row+probe_<h>    row_tmpl (VW_GROUP_CONCAT_ROW), then the same loop
+//   rowkey_<h>       VW_GROUP_DISPATCH_ROWKEY: key built, hashed and
+//                    compared in a register; packedKeys not written
+// h = murmur (MurmurHash64A) or crc32 (CRC32Hash), hashKey(T) per row as
+// keyStepT; every variant's matched entries and speedup against
+// cols+probe of the same hash.
+//
 // Hash mode (-H): concat plus HashGroup's hash of the packed keys
 // (MurmurHash64A, every variant's hashes checked against scalar+hash):
 //   scalar+hash      today's Concat_T, then Hash_T's scalar pass
@@ -40,11 +51,14 @@
 //
 // Usage: run_concatbench [-k shape,...] [-s selPct,...] [-m l1|stream|both]
 //                        [-v vecSize] [-N rows] [-r reps] [-H] [-P]
+//                        [-L [-D values,...]] [-V variant]
+//   -V: only that variant (for perf stat; speedup is then meaningless)
 //   l1: one vector of rows, repeated (vecs = N / vecSize); stream: N rows
 //   of each column walked vector by vector.
 // Output: CSV on stdout, ns per selected row (best of reps), speedup over
 // scalar; every variant's packed keys are checked against scalar (`ok`).
 #include "common/runtime/Hash.hpp"
+#include "common/runtime/Hashmap.hpp"
 #include "vectorwise/SimdConcat.hpp"
 #include "vectorwise/SimdHash.hpp"
 #include <algorithm>
@@ -270,6 +284,9 @@ void rowGprN(const Shape& s, pos_t n, const char* const* data,
 
 /// -H: the hashes of the variant last run (HashGroup's groupHashes)
 std::vector<uint64_t> gHashes;
+/// -L: the entries the variant last run matched (HashGroup's htMatches)
+using Entry = runtime::Hashmap::EntryHeader;
+std::vector<Entry*> gMatches;
 
 template <typename T>
 void hashKeysT(pos_t n, const char* keys, uint64_t* out) {
@@ -320,6 +337,8 @@ using Fn = std::function<void(pos_t, const char* const*, const pos_t* const*,
 struct Variant {
    std::string name;
    Fn fn;
+   /// the variant checked against (-L: the first of the same hash)
+   size_t ref = 0;
 };
 
 struct Input {
@@ -383,9 +402,10 @@ double pass(const Shape& s, const Input& in, size_t vecSize, bool l1,
    return std::chrono::duration<double, std::nano>(t1 - t0).count();
 }
 
-/// fn's packed keys (-H: and hashes) equal ref's for the first vectors
+/// fn's packed keys (-H: and hashes; -L: instead, the matched entries, all
+/// found) equal ref's for the first vectors
 bool verify(const Shape& s, const Input& in, size_t vecSize, bool l1,
-            const Fn& fn, const Fn& ref, bool hashes) {
+            const Fn& fn, const Fn& ref, bool hashes, bool matches = false) {
    const size_t cols = s.width.size();
    std::vector<char> a(vecSize * s.keySize + kSlack),
        b(vecSize * s.keySize + kSlack);
@@ -403,8 +423,14 @@ bool verify(const Shape& s, const Input& in, size_t vecSize, bool l1,
       }
       dense += n;
       ref(n, data, sel, a.data());
+      const std::vector<Entry*> wantM(gMatches.begin(), gMatches.begin() + n);
       const std::vector<uint64_t> want(gHashes.begin(), gHashes.begin() + n);
       fn(n, data, sel, b.data());
+      if (matches) {
+         for (pos_t i = 0; i < n; ++i)
+            if (!wantM[i] || gMatches[i] != wantM[i]) return false;
+         continue;
+      }
       if (std::memcmp(a.data(), b.data(), size_t(n) * s.keySize)) return false;
       if (hashes && !std::equal(want.begin(), want.end(), gHashes.begin()))
          return false;
@@ -508,6 +534,130 @@ bool verifyPadded(const Shape& s, const Input& in, size_t vecSize, bool l1,
    }
    return true;
 }
+/// -L: HashGroup's dispatch key step for compound keys of 1/2/4/8 bytes
+/// (keyStepT<T, kPacked>) against a pre-aggregation table that holds every
+/// group of the input (all rows hit, as in TPC-H Q1 after its first vector):
+/// per row the hash (hashFn.hashKey(T)), the chain walk and the whole-key
+/// compare, the entry pointer to gMatches
+/// entries: header, then the key in 8 bytes
+constexpr size_t kProbeEntry = sizeof(Entry) + 8;
+struct ProbeTable {
+   runtime::Hashmap ht;
+   std::vector<char> entries;
+};
+ProbeTable gTabMurmur, gTabCrc;
+/// the table of every key whose columns take values 0..D-1, hashed by H
+template <typename H>
+void buildProbeTable(ProbeTable& t, const Shape& s, unsigned D) {
+   size_t groups = 1;
+   for (size_t c = 0; c < s.width.size(); ++c) groups *= D;
+   t.ht.setSize(1024); // HashGroup: initialMapSize
+   t.entries.assign(groups * kProbeEntry, 0);
+   const H h;
+   for (size_t g = 0; g < groups; ++g) {
+      uint64_t key = 0;
+      size_t rest = g;
+      for (size_t c = 0; c < s.width.size(); ++c) {
+         key |= uint64_t(rest % D) << (8 * s.offset[c]);
+         rest /= D;
+      }
+      Entry* e = reinterpret_cast<Entry*>(t.entries.data() + g * kProbeEntry);
+      e->hash = h.hashKey(key);
+      std::memcpy(e + 1, &key, 8);
+      t.ht.insert<false>(e, e->hash);
+   }
+}
+/// keyStepT<T, kPacked>'s pass 2 after concatResolved: the key loaded from
+/// packedKeys to hash it and again for each entry compare
+template <typename H, typename T>
+void probePacked(pos_t n, const char* keys, runtime::Hashmap& ht) {
+   const H h;
+   Entry** __restrict__ out = gMatches.data();
+   for (pos_t i = 0; i < n; ++i) {
+      const char* kp = keys + size_t(i) * sizeof(T);
+      T key;
+      std::memcpy(&key, kp, sizeof(T));
+      const auto hash = h.hashKey(key);
+      Entry* e;
+      for (e = ht.find_chain(hash); e; e = e->next) {
+         if (e->hash != hash) continue;
+         T x, y;
+         std::memcpy(&x, e + 1, sizeof(T));
+         std::memcpy(&y, kp, sizeof(T));
+         if (x == y) break;
+      }
+      out[i] = e;
+   }
+}
+template <typename H>
+void probePackedK(const Shape& s, pos_t n, const char* keys,
+                  runtime::Hashmap& ht) {
+   switch (s.keySize) {
+   case 1: probePacked<H, uint8_t>(n, keys, ht); break;
+   case 2: probePacked<H, uint16_t>(n, keys, ht); break;
+   case 4: probePacked<H, uint32_t>(n, keys, ht); break;
+   default: probePacked<H, uint64_t>(n, keys, ht); break;
+   }
+}
+/// VW_GROUP_DISPATCH_ROWKEY's keyStepRow: the key built, hashed and
+/// compared in a register (simd_concat::rowKey); nothing written but the
+/// matches
+template <typename H, bool Sel, size_t... W>
+void probeRow(pos_t n, const char* const* data, const pos_t* const* sel,
+              runtime::Hashmap& ht) {
+   constexpr size_t K = (W + ...);
+   using T = std::conditional_t<
+       K == 1, uint8_t,
+       std::conditional_t<K == 2, uint16_t,
+                          std::conditional_t<K == 4, uint32_t, uint64_t>>>;
+   const H h;
+   const pos_t* __restrict__ s = Sel ? sel[0] : nullptr;
+   Entry** __restrict__ out = gMatches.data();
+   for (pos_t i = 0; i < n; ++i) {
+      const size_t r = Sel ? size_t(s[i]) : size_t(i);
+      const T key = T(rowKey<W...>(data, r));
+      const auto hash = h.hashKey(key);
+      Entry* e;
+      for (e = ht.find_chain(hash); e; e = e->next) {
+         if (e->hash != hash) continue;
+         T x;
+         std::memcpy(&x, e + 1, sizeof(T));
+         if (x == key) break;
+      }
+      out[i] = e;
+   }
+}
+using ProbeRowFn = void (*)(pos_t, const char* const*, const pos_t* const*,
+                            runtime::Hashmap&);
+/// the instantiations for the preset shapes of 1/2/4/8 bytes
+template <typename H> ProbeRowFn probeRowFor(const std::string& spec) {
+   static const std::pair<const char*, ProbeRowFn> table[] = {
+       {"1s1s", probeRow<H, true, 1, 1>},
+       {"2s2s", probeRow<H, true, 2, 2>},
+       {"4s4s", probeRow<H, true, 4, 4>},
+       {"2s2s2s2s", probeRow<H, true, 2, 2, 2, 2>},
+       {"1s1s1s1s4s", probeRow<H, true, 1, 1, 1, 1, 4>},
+       {"2d2d", probeRow<H, false, 2, 2>},
+       {"4d4d", probeRow<H, false, 4, 4>},
+   };
+   for (auto& e : table)
+      if (spec == e.first) return e.second;
+   return nullptr;
+}
+/// -L input: every column's values in 0..D-1 (so the table holds every
+/// group the rows reach)
+void restrictDomain(const Shape& s, Input& in, unsigned D,
+                    std::mt19937_64& rng) {
+   for (size_t c = 0; c < s.width.size(); ++c) {
+      const uint32_t w = s.width[c];
+      auto& col = in.columns[c];
+      for (size_t r = 0; r + w <= col.size(); r += w) {
+         const uint64_t v = rng() % D;
+         std::memcpy(col.data() + r, &v, w);
+      }
+   }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -519,8 +669,10 @@ int main(int argc, char** argv) {
    size_t vecSize = 1024, rows = size_t(1) << 23;
    int reps = 5;
    int opt;
-   bool hashMode = false, padMode = false;
-   while ((opt = getopt(argc, argv, "k:s:m:v:N:r:HP")) != -1) {
+   bool hashMode = false, padMode = false, probeMode = false;
+   std::vector<unsigned> domains = {2, 8, 32};
+   std::string only; // -V: time only this variant (perf stat)
+   while ((opt = getopt(argc, argv, "k:s:m:v:N:r:HPLD:V:")) != -1) {
       switch (opt) {
       case 'k': shapes = split(optarg); break;
       case 's':
@@ -533,15 +685,23 @@ int main(int argc, char** argv) {
       case 'r': reps = std::stoi(optarg); break;
       case 'H': hashMode = true; break;
       case 'P': padMode = true; break;
+      case 'L': probeMode = true; break;
+      case 'V': only = optarg; break;
+      case 'D':
+         domains.clear();
+         for (auto& x : split(optarg)) domains.push_back(unsigned(std::stoul(x)));
+         break;
       default:
          std::fprintf(stderr, "usage: %s [-k shape,..] [-s selPct,..] "
-                              "[-m l1|stream|both] [-v vec] [-N rows] [-r reps]\n",
+                              "[-m l1|stream|both] [-v vec] [-N rows] [-r reps] "
+                              "[-H] [-P] [-L [-D values,..]] [-V variant]\n",
                       argv[0]);
          return 1;
       }
    }
    gHashes.assign(vecSize + 8, 0);
    gPadded.assign(vecSize * 16 + kSlack, 0);
+   gMatches.assign(vecSize + 8, nullptr);
    std::vector<bool> l1Modes;
    if (modes == "l1" || modes == "both") l1Modes.push_back(true);
    if (modes == "stream" || modes == "both") l1Modes.push_back(false);
@@ -698,31 +858,92 @@ int main(int argc, char** argv) {
          }
       }
 
+      if (probeMode) {
+         // concat + hash + probe of HashGroup's dispatch key step, for keys
+         // of 1/2/4/8 bytes: per column copy (Concat_T) or row kernel into
+         // packedKeys then the lookup loop, or the key in a register
+         // throughout (VW_GROUP_DISPATCH_ROWKEY); Murmur and CRC32
+         const uint32_t K = s.keySize;
+         if (K != 1 && K != 2 && K != 4 && K != 8) continue;
+         variants.clear();
+         const TmplFn rt = rowTmplFor(s.spec);
+         auto addHasher = [&](const char* hn, ProbeTable* tab,
+                              auto probeK, ProbeRowFn rowFn) {
+            const size_t first = variants.size();
+            variants.push_back(
+                {std::string("cols+probe_") + hn,
+                 [&s, tab, probeK](pos_t n, const char* const* d,
+                                   const pos_t* const* sl, char* o) {
+                    runColumns(s.width.size(), s.width.data(),
+                               s.offset.data(), s.keySize, n, d, sl, o);
+                    probeK(s, n, o, tab->ht);
+                 }});
+            variants.back().ref = first;
+            if (rt)
+               variants.push_back(
+                   {std::string("row+probe_") + hn,
+                    [&s, tab, probeK, rt](pos_t n, const char* const* d,
+                                          const pos_t* const* sl, char* o) {
+                       rt(n, d, sl, o);
+                       probeK(s, n, o, tab->ht);
+                    }});
+            if (rt) variants.back().ref = first;
+            if (rowFn)
+               variants.push_back(
+                   {std::string("rowkey_") + hn,
+                    [tab, rowFn](pos_t n, const char* const* d,
+                                 const pos_t* const* sl, char*) {
+                       rowFn(n, d, sl, tab->ht);
+                    }});
+            if (rowFn) variants.back().ref = first;
+         };
+         addHasher("murmur", &gTabMurmur, probePackedK<runtime::MurMurHash>,
+                   probeRowFor<runtime::MurMurHash>(s.spec));
+         addHasher("crc32", &gTabCrc, probePackedK<runtime::CRC32Hash>,
+                   probeRowFor<runtime::CRC32Hash>(s.spec));
+      }
+
+      for (unsigned D : probeMode ? domains : std::vector<unsigned>{0}) {
+      std::string label = s.name;
+      if (probeMode) {
+         size_t groups = 1;
+         for (size_t c = 0; c < cols; ++c) groups *= D;
+         // HashGroup flushes its pre-aggregation table at 1433 entries
+         if (groups > 1433 || D == 0 || D > 256) continue;
+         buildProbeTable<runtime::MurMurHash>(gTabMurmur, s, D);
+         buildProbeTable<runtime::CRC32Hash>(gTabCrc, s, D);
+         label += "/D" + std::to_string(D);
+      }
       for (bool l1 : l1Modes)
          for (unsigned selPct : sels) {
             Input in = makeInput(s, rows, vecSize, l1, selPct, rng);
+            if (probeMode) restrictDomain(s, in, D, rng);
             // -P pads keys up to 16 bytes
             std::vector<char> out(vecSize * std::max(16u, s.keySize) + kSlack);
-            double scalarNs = 0;
+            // speedup over the variant's reference (variants[0] but in -L)
+            std::vector<double> ns(variants.size(), 0);
             for (const auto& v : variants) {
+               if (!only.empty() && v.name != only) continue;
                const bool ok =
                    padMode && &v != &variants[0]
                        ? verifyPadded(s, in, vecSize, l1, v.fn, paddedSize(s))
-                       : verify(s, in, vecSize, l1, v.fn, variants[0].fn,
-                                hashMode);
+                       : verify(s, in, vecSize, l1, v.fn, variants[v.ref].fn,
+                                hashMode, probeMode);
                double best = 1e300;
                pass(s, in, vecSize, l1, v.fn, out, sink); // warm
                for (int r = 0; r < reps; ++r)
                   best = std::min(best, pass(s, in, vecSize, l1, v.fn, out, sink));
                const double perRow = best / double(in.selected ? in.selected : 1);
-               if (&v == &variants[0]) scalarNs = perRow;
+               ns[size_t(&v - variants.data())] = perRow;
+               const double refNs = ns[v.ref];
                std::printf("%s,%u,%zu,%s,%s,%u,%zu,%.4f,%.3f,%d\n",
-                           s.name.c_str(), s.keySize, cols, v.name.c_str(),
+                           label.c_str(), s.keySize, cols, v.name.c_str(),
                            l1 ? "l1" : "stream", selPct, vecSize, perRow,
-                           scalarNs / perRow, ok ? 1 : 0);
+                           refNs / perRow, ok ? 1 : 0);
                std::fflush(stdout);
             }
          }
+      }
    }
    std::fprintf(stderr, "sink %llu\n", (unsigned long long)sink);
    return 0;
