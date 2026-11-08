@@ -232,6 +232,21 @@ if(VW_GROUP_DISPATCH)
   ADD_DEFINITIONS(-DVW_GROUP_DISPATCH=1)
   message(STATUS "Building with VW_GROUP_DISPATCH")
 endif()
+# VW_GROUP_DISPATCH_ROWKEY (needs VW_GROUP_DISPATCH): for compound keys of an
+# instantiated shape (TPC-H Q1's two 1-byte keys through one selection
+# vector), the dispatch key step builds each row's key in a register, hashes
+# it and compares it with the chain entries there, and stores it only into
+# new entries, instead of packing the vector's keys into packedKeys first
+# and loading them back to hash and compare. Same hashes as the kPacked key
+# step. Without effect under VW_GROUP_RUN_HEADS (no CMake option).
+OPTION(VW_GROUP_DISPATCH_ROWKEY "VW_GROUP_DISPATCH: compound keys built, hashed and looked up in a register" OFF)
+if(VW_GROUP_DISPATCH_ROWKEY)
+  if(NOT VW_GROUP_DISPATCH)
+    message(FATAL_ERROR "VW_GROUP_DISPATCH_ROWKEY needs VW_GROUP_DISPATCH")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_DISPATCH_ROWKEY=1)
+  message(STATUS "Building with VW_GROUP_DISPATCH_ROWKEY")
+endif()
 
 # VW_GROUP_CONCAT_SIMD: HashGroup packs its key columns in one pass, planned
 # once from the key shape (SimdConcat.hpp), in Concat and in

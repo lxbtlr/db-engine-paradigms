@@ -539,6 +539,146 @@ TEST_F(HashGroupT, compoundKeyManyGroups) {
    ASSERT_EQ(found, expected.size());
 }
 
+// Compound keys of the shapes VW_GROUP_DISPATCH_ROWKEY builds in a register
+// (two 1-byte keys through one selection vector, TPC-H Q1; two 4-byte keys,
+// dense or through one selection vector), with enough groups to create
+// entries in several vectors and to share chains; every group's sum is
+// checked. Without the option (or VW_GROUP_DISPATCH) they run the existing
+// paths and must give the same groups.
+namespace {
+template <typename K> struct RowKeyPrims;
+template <> struct RowKeyPrims<types::Char<1>> {
+   static types::Char<1> make(uint64_t x) {
+      types::Char<1> c;
+      c.value = char('A' + x % 26);
+      return c;
+   }
+   static std::unique_ptr<algebra::Type> type() {
+      return make_unique<algebra::Char>(1);
+   }
+   static constexpr auto hashSel = &primitives::hash_sel_Char_1_col;
+   static constexpr auto rehashSel = &primitives::rehash_sel_Char_1_col;
+   static constexpr auto neqSel = &primitives::keys_not_equal_sel_Char_1_col;
+   static constexpr auto partSel = &primitives::partition_by_key_sel_Char_1_col;
+   static constexpr auto scatter = &primitives::scatter_sel_Char_1_col;
+   static constexpr auto neqRow = &primitives::keys_not_equal_row_Char_1_col;
+   static constexpr auto partRow = &primitives::partition_by_key_row_Char_1_col;
+   static constexpr auto scatterRow = &primitives::scatter_sel_row_Char_1_col;
+   static constexpr auto gather = &primitives::gather_val_Char_1_col;
+};
+template <> struct RowKeyPrims<int32_t> {
+   static int32_t make(uint64_t x) { return int32_t(x % 33) - 7; }
+   static std::unique_ptr<algebra::Type> type() {
+      return make_unique<algebra::Integer>();
+   }
+   static constexpr auto hash = &primitives::hash_int32_t_col;
+   static constexpr auto rehash = &primitives::rehash_int32_t_col;
+   static constexpr auto neq = &primitives::keys_not_equal_int32_t_col;
+   static constexpr auto part = &primitives::partition_by_key_int32_t_col;
+   static constexpr auto hashSel = &primitives::hash_sel_int32_t_col;
+   static constexpr auto rehashSel = &primitives::rehash_sel_int32_t_col;
+   static constexpr auto neqSel = &primitives::keys_not_equal_sel_int32_t_col;
+   static constexpr auto partSel = &primitives::partition_by_key_sel_int32_t_col;
+   static constexpr auto scatter = &primitives::scatter_sel_int32_t_col;
+   static constexpr auto neqRow = &primitives::keys_not_equal_row_int32_t_col;
+   static constexpr auto partRow = &primitives::partition_by_key_row_int32_t_col;
+   static constexpr auto scatterRow = &primitives::scatter_sel_row_int32_t_col;
+   static constexpr auto gather = &primitives::gather_val_int32_t_col;
+};
+} // namespace
+
+class HashGroupRowKey : public HashGroupT {
+ protected:
+   int64_t bound = 500;
+   template <typename K> void groupCheck(bool withSel);
+};
+
+template <typename K> void HashGroupRowKey::groupCheck(bool withSel) {
+   using P = RowKeyPrims<K>;
+   enum { grouped_k1, grouped_k2, aggregated_v, selScat, vSel };
+   constexpr size_t rows = 20000;
+   std::vector<K> k1(rows), k2(rows);
+   std::vector<int64_t> v(rows);
+   auto keyOf = [](const K& a, const K& b) {
+      int64_t x, y;
+      if constexpr (std::is_same_v<K, int32_t>)
+         x = a, y = b;
+      else
+         x = a.value, y = b.value;
+      return std::make_tuple(x, y);
+   };
+   std::map<std::tuple<int64_t, int64_t>, int64_t> expected;
+   std::mt19937_64 rng(11);
+   for (size_t i = 0; i < rows; ++i) {
+      k1[i] = P::make(rng());
+      k2[i] = P::make(rng() % 31);
+      v[i] = int64_t(rng() % 1000);
+      if (!withSel || v[i] < bound) expected[keyOf(k1[i], k2[i])] += v[i];
+   }
+   auto& rel = db["t"];
+   rel.insert("k1", P::type()) = std::move(k1);
+   rel.insert("k2", P::type()) = std::move(k2);
+   rel.insert("v", make_unique<algebra::BigInt>()) = std::move(v);
+   rel.nrTuples = rows;
+
+   auto t = Scan("t");
+   if (withSel) {
+      Select(Expression().addOp(primitives::sel_less_int64_t_col_int64_t_val,
+                                  Buffer(vSel, sizeof(pos_t)),
+                                  Column(t, "v"), Value(&bound)));
+      HashGroup()
+          .pushKeySelVec(Buffer(vSel), Buffer(selScat, sizeof(pos_t)))
+          .addKey(Column(t, "k1"), Buffer(vSel), *P::hashSel, *P::neqSel,
+                  *P::partSel, Buffer(selScat, sizeof(pos_t)), *P::scatter,
+                  *P::neqRow, *P::partRow, *P::scatterRow, *P::gather,
+                  Buffer(grouped_k1, sizeof(K)))
+          .addKey(Column(t, "k2"), Buffer(vSel), *P::rehashSel,
+                  *P::neqSel, *P::partSel, Buffer(selScat, sizeof(pos_t)),
+                  *P::scatter, *P::neqRow, *P::partRow, *P::scatterRow,
+                  *P::gather, Buffer(grouped_k2, sizeof(K)))
+          .addValue(Column(t, "v"), Buffer(vSel),
+                    primitives::aggr_init_plus_int64_t_col,
+                    primitives::aggr_sel_plus_int64_t_col,
+                    primitives::aggr_row_plus_int64_t_col,
+                    primitives::gather_val_int64_t_col,
+                    Buffer(aggregated_v, sizeof(int64_t)));
+   } else {
+      if constexpr (std::is_same_v<K, int32_t>)
+         HashGroup()
+             .addKey(Column(t, "k1"), *P::hash, *P::neq, *P::part,
+                     *P::scatter, *P::neqRow, *P::partRow, *P::scatterRow,
+                     *P::gather, Buffer(grouped_k1, sizeof(K)))
+             .addKey(Column(t, "k2"), *P::rehash, *P::neq, *P::part,
+                     *P::scatter, *P::neqRow, *P::partRow, *P::scatterRow,
+                     *P::gather, Buffer(grouped_k2, sizeof(K)))
+             .addValue(Column(t, "v"), primitives::aggr_init_plus_int64_t_col,
+                       primitives::aggr_plus_int64_t_col,
+                       primitives::aggr_row_plus_int64_t_col,
+                       primitives::gather_val_int64_t_col,
+                       Buffer(aggregated_v, sizeof(int64_t)));
+   }
+
+   auto root = popOperator();
+   size_t found = 0;
+   std::set<std::tuple<int64_t, int64_t>> seen;
+   while (auto n = root->next()) {
+      found += n;
+      auto keys1 = (K*)Buffer(grouped_k1).data;
+      auto keys2 = (K*)Buffer(grouped_k2).data;
+      auto aggrs = (int64_t*)Buffer(aggregated_v).data;
+      for (size_t i = 0; i < n; ++i) {
+         const auto key = keyOf(keys1[i], keys2[i]);
+         ASSERT_TRUE(seen.insert(key).second) << "duplicate group";
+         ASSERT_EQ(aggrs[i], expected.at(key));
+      }
+   }
+   ASSERT_EQ(found, expected.size());
+}
+
+TEST_F(HashGroupRowKey, char1Sel) { groupCheck<types::Char<1>>(true); }
+TEST_F(HashGroupRowKey, int32Sel) { groupCheck<int32_t>(true); }
+TEST_F(HashGroupRowKey, int32Dense) { groupCheck<int32_t>(false); }
+
 class HashGroupSmallBuf : public ::testing::Test,
                           public Query,
                           public QueryBuilder {

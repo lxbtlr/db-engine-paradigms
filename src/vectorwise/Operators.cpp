@@ -2758,6 +2758,12 @@ void HashGroup::resolvePaths() {
    default: keyStep = VW_KEY_STEP(char*); break;
    }
 #undef VW_KEY_STEP
+#ifdef VW_GROUP_DISPATCH_ROWKEY
+   // compound keys of an instantiated shape: built, hashed and compared in
+   // a register (keyStepRow), the kPacked step kept as its fallback
+   keyStepPacked = keyStep;
+   if (mode == kPacked && !runs) resolveRowKey();
+#endif
    // aggregate step: direct when it applies (its sticky fallback is inside
    // aggUpdate), else fused, else the interpreted passes
    aggStep = &HashGroup::aggEvaluate;
@@ -2980,6 +2986,144 @@ void HashGroup::keyStepT(pos_t n) {
    }
 #endif
 }
+#ifdef VW_GROUP_DISPATCH_ROWKEY
+// VW_GROUP_DISPATCH_ROWKEY: in keyStepT<T, kPacked>, a compound key is
+// written to packedKeys (concatResolved), loaded back to hash it, loaded
+// again for every compare with a chain entry, and copied into new entries.
+// For the key shapes below the key is built per row in a register instead
+// (simd_concat::rowKey, the row kernels' assembly: exact-width loads shifted
+// to their offsets, one index load per row), hashed there with the same
+// hashFn.hashKey(T) as keyStepT (bit-identical hashes), compared with each
+// chain entry's key as a T, and stored only into new entries. packedKeys is
+// not written: nothing after the key step reads it (buildScatter takes the
+// key columns through groupRepresentatives and the hashes from groupHashes,
+// the aggregate step reads htMatches, the spill reads the entries).
+// Group creation, maxFill, groupRepresentatives and groupHashes are as in
+// keyStepT. Not with VW_GROUP_RUN_HEADS (its pass 1 compares packedKeys).
+// Instantiated shapes: TPC-H Q1 (l_returnflag, l_linestatus through one
+// selection vector), plus two 4 + 4 byte shapes the HashGroup tests use.
+// The shape is a plan fact; whether every column reads the same selection
+// vector is checked per vector (as simd_concat::run does), and a vector
+// whose columns read different ones takes the kPacked key step.
+bool HashGroup::resolveRowKey() {
+   struct Shape {
+      bool sel;
+      uint32_t cols;
+      uint8_t width[2];
+      VecStep step;
+   };
+   static const Shape shapes[] = {
+       {true, 2, {1, 1}, &HashGroup::keyStepRow<true, 1, 1>}, // TPC-H Q1
+       {true, 2, {4, 4}, &HashGroup::keyStepRow<true, 4, 4>},
+       {false, 2, {4, 4}, &HashGroup::keyStepRow<false, 4, 4>},
+   };
+   const size_t cols = keyColumns.size();
+   if (keyPad || (totalKeySize != 1 && totalKeySize != 2 &&
+                  totalKeySize != 4 && totalKeySize != 8))
+      return false;
+   for (const Shape& s : shapes) {
+      if (s.cols != cols) continue;
+      bool match = true;
+      uint32_t off = 0;
+      for (size_t c = 0; c < cols && match; ++c) {
+         const KeyColumn& col = keyColumns[c];
+         match = col.size == s.width[c] && col.offset == off &&
+                 (col.sel != nullptr) == s.sel;
+         off += col.size;
+      }
+      if (!match || off != totalKeySize) continue;
+      keyStep = s.step;
+      return true;
+   }
+   return false;
+}
+
+template <bool Sel, size_t... W> void HashGroup::keyStepRow(pos_t n) {
+   namespace sc = primitives::simd_concat;
+   constexpr size_t K = (W + ...);
+   using T = std::conditional_t<
+       K == 1, uint8_t,
+       std::conditional_t<K == 2, uint16_t,
+                          std::conditional_t<K == 4, uint32_t, uint64_t>>>;
+   static_assert(K == 1 || K == 2 || K == 4 || K == 8, "integer keys only");
+   constexpr size_t cols = sizeof...(W);
+   const char* d[cols];
+   const pos_t* __restrict__ sel = nullptr;
+   for (size_t c = 0; c < cols; ++c)
+      d[c] = static_cast<const char*>(keyColumns[c].data);
+   if constexpr (Sel) {
+      sel = keyColumns[0].sel;
+      for (size_t c = 1; c < cols; ++c)
+         if (keyColumns[c].sel != sel) {
+            (this->*keyStepPacked)(n);
+            return;
+         }
+   }
+   hash_t* __restrict__ hashes = preAggregation.groupHashes;
+   EntryHeader** __restrict__ matches = preAggregation.htMatches;
+   const size_t entrySize = preAggregation.ht_entry_size;
+#ifdef VW_GROUP_BATCH_CREATE
+   pos_t created = 0;
+   EntryHeader* firstNew = nullptr;
+#endif
+   for (pos_t i = 0; i < n; ++i) {
+      const size_t r = Sel ? size_t(sel[i]) : size_t(i);
+      const T key = T(sc::rowKey<W...>(d, r));
+      const hash_t hash = hashFn.hashKey(key);
+      EntryHeader* entry;
+      for (entry = ht.find_chain(hash); entry; entry = entry->next) {
+         if (entry->hash != hash) continue;
+         T other;
+         std::memcpy(&other, entry + 1, sizeof(T));
+         if (other == key) break;
+      }
+      // unlikely: without it gcc keeps the create path's values in
+      // registers and spills the hit path's (two stack loads per row)
+      if (!entry) [[unlikely]] {
+#ifdef VW_GROUP_BATCH_CREATE
+         if (newUsed == newCap) {
+            newCap = maxFill + vecSize;
+            newUsed = 0;
+            auto alloc = groupStore.allocate(newCap * entrySize);
+            if (!alloc) throw std::runtime_error("malloc failed");
+            newBlock = reinterpret_cast<EntryHeader*>(alloc);
+            preAggregation.allocations.emplace_back(alloc, 0);
+         }
+         entry = addBytes(newBlock, newUsed * entrySize);
+         ++newUsed;
+         ++preAggregation.allocations.back().second;
+         if (!created) firstNew = entry;
+         entry->hash = hash;
+         // the one store of the key: later rows of this vector compare it
+         std::memcpy(reinterpret_cast<char*>(entry + 1), &key, sizeof(T));
+         hashes[i] = hash;
+         preAggregation.groupRepresentatives[created++] = i;
+#else
+         // one allocation and one buildScatter per new group, as keyStepT
+         // (the shapes here have no padding)
+         auto alloc = groupStore.allocate(entrySize);
+         if (!alloc) throw std::runtime_error("malloc failed");
+         entry = reinterpret_cast<EntryHeader*>(alloc);
+         preAggregation.allocations.emplace_back(alloc, 1);
+         hashes[i] = hash;
+         preAggregation.groupRepresentatives[0] = i;
+         preAggregation.scatterStart = entry;
+         preAggregation.buildScatter.evaluate(1);
+#endif
+         ht.insert<false>(entry, hash);
+         ++preAggregation.entries_in_ht;
+      }
+      matches[i] = entry;
+   }
+#ifdef VW_GROUP_BATCH_CREATE
+   if (created) {
+      preAggregation.scatterStart = firstNew;
+      preAggregation.buildScatter.evaluate(created);
+   }
+#endif
+}
+#endif // VW_GROUP_DISPATCH_ROWKEY
+
 #endif // VW_GROUP_DISPATCH
 
 // CONCAT

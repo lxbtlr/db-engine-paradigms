@@ -24,6 +24,9 @@
 //===----------------------------------------------------------------------===//
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <type_traits>
+#include <utility>
 #include "vectorwise/defs.hpp"
 
 #if defined(__x86_64__) && defined(__AVX512F__) && defined(__AVX512BW__) &&   \
@@ -147,6 +150,40 @@ void copyWideColumn(pos_t n, const char* src, const pos_t* sel, char* dest,
 void runColumns(size_t cols, const uint32_t* width, const uint32_t* offset,
                 uint32_t keySize, pos_t n, const char* const* data,
                 const pos_t* const* sel, char* out);
+
+/// VW_GROUP_DISPATCH_ROWKEY: row r's key of the column widths W... (1, 2,
+/// 4 or 8 bytes, at most 8 in all) in a 64-bit register, as the row kernels
+/// build it: column c's value loaded at its exact width from d[c] + r * W_c
+/// and shifted to its byte offset (the widths before it). Its low K bytes
+/// are the packed key's bytes, the rest zero, so it is the integer Hash_T
+/// and Lookup_T read from packedKeys for 1/2/4/8-byte keys.
+template <size_t W> inline uint64_t loadWidth(const char* p) {
+   static_assert(W == 1 || W == 2 || W == 4 || W == 8, "column width");
+   using U = std::conditional_t<
+       W == 1, uint8_t,
+       std::conditional_t<W == 2, uint16_t,
+                          std::conditional_t<W == 4, uint32_t, uint64_t>>>;
+   U v;
+   std::memcpy(&v, p, W);
+   return v;
+}
+/// the byte offset of column c: the sum of the widths before it
+template <size_t... W> constexpr size_t widthsBefore(size_t c) {
+   constexpr size_t ws[] = {W...};
+   size_t acc = 0;
+   for (size_t i = 0; i < c; ++i) acc += ws[i];
+   return acc;
+}
+template <size_t... W, size_t... C>
+inline uint64_t rowKeyImpl(const char* const* d, size_t r,
+                           std::index_sequence<C...>) {
+   static_assert((W + ...) <= 8, "row keys hold the key in 64 bits");
+   return ((loadWidth<W>(d[C] + r * W) << (8 * widthsBefore<W...>(C))) | ...);
+}
+template <size_t... W>
+inline uint64_t rowKey(const char* const* d, size_t r) {
+   return rowKeyImpl<W...>(d, r, std::make_index_sequence<sizeof...(W)>());
+}
 
 } // namespace simd_concat
 } // namespace primitives

@@ -740,6 +740,18 @@ class HashGroup : public UnaryOperator {
 #endif
    void concatResolved(pos_t n);
    void aggEvaluate(pos_t n) { updateGroups.evaluate(n); }
+#ifdef VW_GROUP_DISPATCH_ROWKEY
+   /// VW_GROUP_DISPATCH_ROWKEY: compound keys of an instantiated shape
+   /// (column widths W..., every column through one selection vector (Sel)
+   /// or every column dense, 1/2/4/8 bytes in all) are built per row in a
+   /// register, hashed and compared with the entries there; packedKeys is
+   /// not written. keyStepPacked: the kPacked key step, for vectors whose
+   /// key columns read different selection vectors
+   template <bool Sel, size_t... W> void keyStepRow(pos_t n);
+   VecStep keyStepPacked = nullptr;
+   /// keyStep = the row-key step for this key shape; false if none fits
+   bool resolveRowKey();
+#endif
 #endif
 #ifdef VW_GROUP_BATCH_CREATE
    /// VW_GROUP_BATCH_CREATE: pre-aggregation entries are carved from one
