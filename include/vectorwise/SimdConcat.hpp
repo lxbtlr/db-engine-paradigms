@@ -33,6 +33,9 @@
 #if defined(__x86_64__) && defined(__AVX2__)
 #define VW_CONCAT_HAVE_AVX2 1
 #endif
+#if defined(__x86_64__) && defined(__AVX512BW__) && defined(__AVX512VL__)
+#define VW_CONCAT_HAVE_MASKED 1
+#endif
 #if defined(__aarch64__) && defined(__ARM_NEON)
 #define VW_CONCAT_HAVE_NEON 1
 #endif
@@ -44,8 +47,16 @@ namespace simd_concat {
 /// Row (VW_GROUP_CONCAT_ROW) is not a vector kernel: per row the key is
 /// assembled in a 64-bit register by a function instantiated for the key's
 /// column widths, one index load per row when every column reads the same
-/// selection vector, one store per row (keys up to 8 bytes)
-enum class Isa : uint8_t { Scalar, Avx2, Vbmi, Neon, Row };
+/// selection vector, one store per row (keys up to 8 bytes).
+/// RowGeneric and RowMasked (VW_GROUP_CONCAT_ROW_GENERIC) are row kernels
+/// for any key of up to 16 bytes, instantiated per column count only:
+/// RowGeneric in two 64-bit registers, each piece of a column loaded by
+/// the 8 bytes that end with it and shifted into place by plan-time
+/// amounts; RowMasked (AVX-512BW/VL) in one xmm, each column by one masked
+/// byte load placed at its key offset.
+enum class Isa : uint8_t {
+   Scalar, Avx2, Vbmi, Neon, Row, RowGeneric, RowMasked
+};
 /// how a column read through a selection vector is brought into a register
 enum class SelLoad : uint8_t {
    Stage, ///< scalar loads into a stack buffer, then a vector load
@@ -61,6 +72,21 @@ using RowFn = void (*)(pos_t n, const char* const* data, const pos_t* sel,
 /// a row kernel that also hashes each key (VW_GROUP_CONCAT_HASH)
 using RowHashFn = void (*)(pos_t n, const char* const* data, const pos_t* sel,
                            char* out, uint64_t* hashes);
+struct Plan;
+/// RowGeneric / RowMasked: the instantiation for the plan's piece / column
+/// count, which reads widths, offsets and shifts from the plan
+using GenericFn = void (*)(const Plan& p, pos_t n, const char* const* data,
+                           const pos_t* sel, char* out);
+
+/// RowGeneric keys up to 16 bytes, two 64-bit halves
+constexpr size_t kGenericMaxKey = 16;
+/// RowGeneric: a column split where it crosses the halves' boundary
+constexpr size_t kMaxPieces = kMaxCols + 1;
+/// RowGeneric: bytes [src, src + len) of column col's value go to key byte
+/// dst (len <= 8, within one half)
+struct Piece {
+   uint8_t col = 0, src = 0, len = 0, dst = 0;
+};
 
 struct Plan {
    bool ok = false;
@@ -72,6 +98,16 @@ struct Plan {
    RowHashFn rowHash = nullptr;
    RowHashFn rowHashSimd = nullptr;
    RowHashFn rowHashBlocked = nullptr;
+   /// RowGeneric / RowMasked
+   GenericFn generic = nullptr;
+   /// RowGeneric: the pieces, those of the low half first; RowMasked: one
+   /// per column (len = width, dst = offset), selection-vector ones first
+   uint32_t pieces = 0;
+   Piece piece[kMaxPieces] = {};
+   /// RowGeneric: a piece's 8-byte load starts before the column's first
+   /// byte for rows whose index (selection index; dense: row) is below
+   /// these; such rows take an exact byte copy
+   uint32_t selGuard = 0, denseGuard = 0;
    Isa isa = Isa::Scalar;
    SelLoad selLoad = SelLoad::Stage;
    uint32_t keySize = 0;
@@ -99,15 +135,18 @@ const char* name(Isa isa);
 /// plan column c (width[c] bytes at offset[c] of a K-byte key, read through
 /// a selection vector if sel[c]) for isa; false if the shape is not covered
 /// (column width not 1/2/4/8, key wider than a lane, too many columns,
-/// isa not compiled in; Row: no instantiation for the shape)
+/// isa not compiled in; Row: no instantiation for the shape; RowGeneric /
+/// RowMasked: key over 16 bytes or more than kMaxCols columns). Row needs
+/// keySize == the sum of the widths; RowGeneric / RowMasked take a
+/// padded key (VW_GROUP_KEY_PAD) and write its padding bytes as zero.
 bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
            const uint32_t* width, const uint32_t* offset, const bool* sel,
            uint32_t keySize);
 
 /// pack rows [0, n): out[i * K + offset[c] ..] = column c of row i, where
 /// row i of column c is data[c][i] or data[c][sel[c][i]]. Writes up to
-/// kSlack bytes past n * K. Row: columns reading different selection
-/// vectors take the per-column copy.
+/// kSlack bytes past n * K. Row, RowGeneric, RowMasked: columns reading
+/// different selection vectors take the per-column copy.
 void run(const Plan& p, pos_t n, const char* const* data,
          const pos_t* const* sel, char* out);
 

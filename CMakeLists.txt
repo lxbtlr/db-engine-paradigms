@@ -292,6 +292,30 @@ if(VW_GROUP_CONCAT_HASH)
   endif()
   message(STATUS "Building with VW_GROUP_CONCAT_HASH ()")
 endif()
+# VW_GROUP_CONCAT_ROW_GENERIC (needs VW_GROUP_CONCAT_SIMD): key shapes up to
+# 16 bytes (any column widths, padded keys included) without an instantiated
+# row kernel take a row kernel instantiated per column count only, with the
+# widths and offsets as plan-time tables (SimdConcat.hpp); all-dense keys
+# keep the vector kernels where those build. With VW_GROUP_CONCAT_ROW=OFF it
+# takes the instantiated shapes too (TPC-H Q1).
+# VW_GROUP_CONCAT_ROW_GENERIC_KERNEL: auto (masked byte loads into an xmm,
+# AVX-512BW/VL builds only; other builds unchanged) or gpr (two 64-bit
+# registers, any ISA; slower than the per-column copy on x86-64, laptop
+# run_concatbench 2026-11-08, kept for comparison and for NEON).
+OPTION(VW_GROUP_CONCAT_ROW_GENERIC "VW_GROUP_CONCAT_SIMD: shape-generic row kernels for keys up to 16 bytes" OFF)
+set(VW_GROUP_CONCAT_ROW_GENERIC_KERNEL "auto" CACHE STRING "VW_GROUP_CONCAT_ROW_GENERIC: auto or gpr")
+if(VW_GROUP_CONCAT_ROW_GENERIC)
+  if(NOT VW_GROUP_CONCAT_SIMD)
+    message(FATAL_ERROR "VW_GROUP_CONCAT_ROW_GENERIC needs VW_GROUP_CONCAT_SIMD")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_ROW_GENERIC=1)
+  if(VW_GROUP_CONCAT_ROW_GENERIC_KERNEL STREQUAL "gpr")
+    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_ROW_GENERIC_GPR=1)
+  elseif(NOT VW_GROUP_CONCAT_ROW_GENERIC_KERNEL STREQUAL "auto")
+    message(FATAL_ERROR "VW_GROUP_CONCAT_ROW_GENERIC_KERNEL must be auto or gpr")
+  endif()
+  message(STATUS "Building with VW_GROUP_CONCAT_ROW_GENERIC (${VW_GROUP_CONCAT_ROW_GENERIC_KERNEL})")
+endif()
 # VW_GROUP_CONCAT_WIDE: HashGroup copies key columns wider than 8 bytes (and
 # of 3, 5..7 bytes) into the packed key with two fixed-size moves that
 # overlap in the value's middle, chosen once from the width, instead of a

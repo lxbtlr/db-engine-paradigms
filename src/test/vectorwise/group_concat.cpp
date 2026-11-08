@@ -29,15 +29,22 @@ struct GuardedColumn {
    char* map = nullptr;
    size_t mapSize = 0;
    char* data = nullptr;
-   GuardedColumn(size_t bytes, std::mt19937_64& rng) {
+   /// front: the column's first byte is the first after a PROT_NONE page
+   /// instead (a read before the column would fault)
+   GuardedColumn(size_t bytes, std::mt19937_64& rng, bool front = false) {
       const size_t page = size_t(sysconf(_SC_PAGESIZE));
-      const size_t body = (bytes + page - 1) / page * page;
+      const size_t body = (std::max<size_t>(bytes, 1) + page - 1) / page * page;
       mapSize = body + page;
       map = static_cast<char*>(mmap(nullptr, mapSize, PROT_READ | PROT_WRITE,
                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
       EXPECT_NE(map, MAP_FAILED);
-      mprotect(map + body, page, PROT_NONE);
-      data = map + body - bytes;
+      if (front) {
+         mprotect(map, page, PROT_NONE);
+         data = map + page;
+      } else {
+         mprotect(map + body, page, PROT_NONE);
+         data = map + body - bytes;
+      }
       for (size_t b = 0; b < bytes; ++b) data[b] = char(rng());
    }
    ~GuardedColumn() { munmap(map, mapSize); }
@@ -77,7 +84,7 @@ std::vector<Isa> kernels() {
 /// selection-vector column reads the first one's selection vector (one
 /// filter feeding several key columns, TPC-H Q1)
 void check(const Plan& p, const Shape& s, pos_t n, bool ascending,
-           std::mt19937_64& rng, bool shared = false) {
+           std::mt19937_64& rng, bool shared = false, bool front = false) {
    const pos_t* first = nullptr;
    const size_t cols = s.width.size();
    std::vector<std::unique_ptr<GuardedColumn>> columns;
@@ -89,7 +96,7 @@ void check(const Plan& p, const Shape& s, pos_t n, bool ascending,
       // row selected so a read past it would fault
       const size_t rows = s.sel[c] ? kRows : std::max<pos_t>(n, 1);
       columns.push_back(
-          std::make_unique<GuardedColumn>(rows * s.width[c], rng));
+          std::make_unique<GuardedColumn>(rows * s.width[c], rng, front));
       data[c] = columns.back()->data;
       sel[c] = nullptr;
       if (s.sel[c]) {
@@ -105,6 +112,14 @@ void check(const Plan& p, const Shape& s, pos_t n, bool ascending,
    }
    const size_t bytes = size_t(n) * s.keySize;
    std::vector<char> want(bytes + kSlack, 0x5a), got(bytes + 2 * kSlack, 0x5a);
+   // a padded key (VW_GROUP_KEY_PAD): packedKeys starts zero, and the
+   // padding bytes must stay zero
+   uint32_t sum = 0;
+   for (uint32_t w : s.width) sum += w;
+   if (sum < s.keySize) {
+      std::fill(want.begin(), want.end(), 0);
+      std::fill(got.begin(), got.begin() + bytes + kSlack, 0);
+   }
    runColumns(cols, s.width.data(), s.offset.data(), s.keySize, n, data, sel,
               want.data());
    run(p, n, data, sel, got.data());
@@ -289,5 +304,101 @@ TEST(GroupConcat, WideColumns) {
                                  << " n=" << n;
          }
       }
+   }
+}
+
+// VW_GROUP_CONCAT_ROW_GENERIC: the shape-generic row kernels write exactly
+// the per-column copy's bytes for random keys of up to 16 bytes, columns of
+// any width 1..16 (3, 5..7 and 9..15 included, a column across byte 8),
+// dense and selection-vector columns mixed, padded keys (padding stays
+// zero), without reading before a column that starts after a protected
+// page or past one that ends before it; selection-vector columns reading
+// different selection vectors take the per-column copy
+TEST(GroupConcat, GenericRowKernels) {
+   std::mt19937_64 rng(29);
+   std::vector<Isa> isas = {Isa::RowGeneric};
+   if (available(Isa::RowMasked)) isas.push_back(Isa::RowMasked);
+   for (Isa isa : isas) {
+      for (int shape = 0; shape < 150; ++shape) {
+         Shape s;
+         const size_t cols = 1 + rng() % kMaxCols;
+         for (size_t c = 0; c < cols; ++c) {
+            // mostly narrow columns, so that many fit in 16 bytes
+            const uint32_t w = rng() % 4 ? 1 + rng() % 8 : 1 + rng() % 16;
+            if (s.keySize + w > kGenericMaxKey) break;
+            s.width.push_back(w);
+            s.offset.push_back(s.keySize);
+            s.sel.push_back(rng() % 2);
+            s.keySize += w;
+         }
+         if (s.width.empty()) continue;
+         // a third of the keys padded as VW_GROUP_KEY_PAD pads them
+         const uint32_t k = s.keySize;
+         if (rng() % 3 == 0 && s.width.size() >= 2 && k > 2) {
+            const uint32_t to = k <= 4 ? 4 : k <= 8 ? 8 : 16;
+            s.keySize = to;
+         }
+         bool selFlags[kMaxCols];
+         for (size_t c = 0; c < s.width.size(); ++c) selFlags[c] = s.sel[c];
+         Plan p;
+         ASSERT_TRUE(build(p, isa, SelLoad::Stage, s.width.size(),
+                           s.width.data(), s.offset.data(), selFlags,
+                           s.keySize))
+             << name(isa) << " K=" << s.keySize;
+         for (pos_t n : kSizes)
+            for (bool ascending : {true, false})
+               for (bool shared : {true, false})
+                  for (bool front : {false, true})
+                     check(p, s, n, ascending, rng, shared, front);
+      }
+   }
+}
+
+// the TPC-H / SSB group keys of up to 16 bytes, unpadded and padded
+TEST(GroupConcat, GenericQueryShapes) {
+   struct Q {
+      std::vector<uint32_t> width;
+      std::vector<bool> sel;
+      uint32_t pad;
+   };
+   const Q shapes[] = {
+       {{1, 1}, {true, true}, 0},                // TPC-H Q1
+       {{4, 4, 4}, {true, false, false}, 0},     // TPC-H Q3
+       {{4, 4, 4}, {true, false, false}, 4},     // Q3 padded to 16
+       {{4, 9}, {false, true}, 0},               // SSB q2.x
+       {{4, 9}, {false, true}, 3},               // q2.x padded to 16
+       {{4, 7}, {false, true}, 0},               // 11 bytes
+       {{16}, {true}, 0},                        // one 16-byte column
+   };
+   std::mt19937_64 rng(31);
+   std::vector<Isa> isas = {Isa::RowGeneric};
+   if (available(Isa::RowMasked)) isas.push_back(Isa::RowMasked);
+   for (Isa isa : isas)
+      for (const Q& q : shapes) {
+         Shape s;
+         bool selFlags[kMaxCols];
+         for (size_t c = 0; c < q.width.size(); ++c) {
+            s.width.push_back(q.width[c]);
+            s.offset.push_back(s.keySize);
+            s.sel.push_back(q.sel[c]);
+            selFlags[c] = q.sel[c];
+            s.keySize += q.width[c];
+         }
+         s.keySize += q.pad;
+         Plan p;
+         ASSERT_TRUE(build(p, isa, SelLoad::Stage, s.width.size(),
+                           s.width.data(), s.offset.data(), selFlags,
+                           s.keySize))
+             << name(isa) << " K=" << s.keySize;
+         for (pos_t n : kSizes)
+            for (bool front : {false, true})
+               check(p, s, n, true, rng, true, front);
+      }
+   // over 16 bytes: not covered
+   const uint32_t w[] = {8, 9}, o[] = {0, 8};
+   const bool sel[] = {false, true};
+   for (Isa isa : isas) {
+      Plan p;
+      EXPECT_FALSE(build(p, isa, SelLoad::Stage, 2, w, o, sel, 17));
    }
 }

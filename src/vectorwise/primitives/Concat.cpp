@@ -605,6 +605,219 @@ const RowEntry kRowKernels[] = {
 };
 #undef VW_ROW_SHAPE
 
+// Shape-generic row kernels (VW_GROUP_CONCAT_ROW_GENERIC): one pass over
+// the rows like the row kernels above, but instantiated per column count
+// (RowMasked) or piece count (RowGeneric) and selection mode, not per width
+// tuple; widths, offsets and shifts come from the plan into locals before
+// the row loop, which then has no per-column branch. Selection-vector and
+// dense columns differ only in how a row's value is found: sel[i] times
+// the width (a multiply: the width is not a constant), or a pointer bumped
+// by the width per row.
+//
+// RowGeneric: the key in two 64-bit halves. A column is split where it
+// crosses byte 8 (pieces). A piece of len bytes is read by the 8 bytes that
+// end with it, so it sits in the top len bytes of the load: >> (64 - 8 len)
+// drops the bytes before it, << 8 dst puts it at its key offset. The loads
+// never read past a value, only up to 7 bytes before it: for rows whose
+// value starts within 7 bytes of the column pointer (row index below
+// Plan::selGuard / denseGuard; dense rows are peeled, selection-vector rows
+// branch on the index) the row is built byte by byte instead. Stores: 8
+// bytes of the low half, 8 of the high one when the key is wider than 8
+// (both overlap the next row, which is written after; kSlack covers the
+// last). Mode: AnySel / AnyDense (all-sel and all-dense keys skip the
+// other stride). Two shifts, a multiply and four values per piece in
+// registers: it spills from two pieces on (x86-64), see AGENT_REPORT.md.
+//
+// RowMasked (AVX-512BW/VL): the key in one xmm; column c by
+// vmovdqu8 xmm{k_c}{z}, [value - offset_c], k_c = its key bytes, so the
+// value lands at its offset without a shift and masked-off bytes before or
+// after it are neither read nor faulted on; the columns are or-ed and the
+// key is stored by one 8- or 16-byte store. Columns in plan order
+// selection-vector first (template S), so dense ones carry no multiply and
+// selection-vector ones no pointer bump; when every selection-vector
+// column's width is a power of two its row offset is a shift.
+
+/// RowGeneric: row i built byte by byte (its 8-byte loads would start
+/// before a column pointer), stored as the kernel stores
+[[gnu::noinline, gnu::cold]] void genericRowExact(const Plan& p, pos_t i,
+                                                  size_t r,
+                                                  const char* const* data,
+                                                  char* out) {
+   unsigned char key[kGenericMaxKey] = {};
+   for (uint32_t c = 0; c < p.cols; ++c) {
+      const uint32_t w = p.width[c];
+      const char* src = data[c] + (p.sel[c] ? r : size_t(i)) * w;
+      for (uint32_t b = 0; b < w; ++b) key[p.offset[c] + b] = src[b];
+   }
+   std::memcpy(out + size_t(i) * p.keySize, key, p.keySize > 8 ? 16 : 8);
+}
+
+template <unsigned P, unsigned Plo, bool AnySel, bool AnyDense, size_t... J>
+void rowGenericImpl(const Plan& p, pos_t n, const char* const* data,
+                    const pos_t* __restrict__ sel, char* __restrict__ out,
+                    std::index_sequence<J...>) {
+   static_assert(AnySel || AnyDense);
+   constexpr bool Two = Plo < P;
+   const size_t K = p.keySize;
+   // per piece: the 8 bytes ending with it in row 0, its strides through
+   // the selection vector (ws) and densely (wd), its two shifts
+   uintptr_t base[P];
+   size_t ws[P], wd[P];
+   uint64_t sr[P], sl[P];
+   for (unsigned j = 0; j < P; ++j) {
+      const Piece& q = p.piece[j];
+      const size_t w = p.width[q.col];
+      base[j] = uintptr_t(data[q.col]) + q.src + q.len - 8;
+      ws[j] = p.sel[q.col] ? w : 0;
+      wd[j] = p.sel[q.col] ? 0 : w;
+      sr[j] = 64 - 8 * q.len;
+      sl[j] = 8 * (q.dst & 7);
+   }
+   pos_t i = 0;
+   if constexpr (AnyDense) {
+      const pos_t peel = std::min<pos_t>(n, pos_t(p.denseGuard));
+      for (; i < peel; ++i)
+         genericRowExact(p, i, AnySel ? size_t(sel[i]) : 0, data, out);
+      ((base[J] += size_t(i) * wd[J]), ...);
+   }
+   const size_t guard = p.selGuard;
+   // the inner loop runs to the end or to the next row below the guard,
+   // which the outer one builds exactly (the call stays out of the inner
+   // loop)
+   for (;; ++i) {
+      for (; i < n; ++i) {
+         size_t r = 0;
+         if constexpr (AnySel) {
+            r = sel[i];
+            if (__builtin_expect(r < guard, 0)) break;
+         }
+         uint64_t lo = 0, hi = 0;
+         auto piece = [&](auto jc) {
+            constexpr unsigned j = decltype(jc)::value;
+            const uintptr_t a = AnySel ? base[j] + r * ws[j] : base[j];
+            uint64_t x;
+            std::memcpy(&x, reinterpret_cast<const char*>(a), 8);
+            if constexpr (AnyDense) base[j] += wd[j];
+            const uint64_t v = (x >> sr[j]) << sl[j];
+            if constexpr (j < Plo)
+               lo |= v;
+            else
+               hi |= v;
+         };
+         (piece(std::integral_constant<unsigned, J>()), ...);
+         char* o = out + size_t(i) * K;
+         std::memcpy(o, &lo, 8);
+         if constexpr (Two) std::memcpy(o + 8, &hi, 8);
+      }
+      if (i >= n) break;
+      genericRowExact(p, i, sel[i], data, out);
+      if constexpr (AnyDense) ((base[J] += wd[J]), ...);
+   }
+}
+template <unsigned P, unsigned Plo, bool S, bool D>
+void rowGeneric(const Plan& p, pos_t n, const char* const* data,
+                const pos_t* sel, char* out) {
+   rowGenericImpl<P, Plo, S, D>(p, n, data, sel, out,
+                                std::make_index_sequence<P>());
+}
+template <unsigned P, unsigned Plo> GenericFn genericFor(bool s, bool d) {
+   return s && d ? rowGeneric<P, Plo, true, true>
+          : s    ? rowGeneric<P, Plo, true, false>
+                 : rowGeneric<P, Plo, false, true>;
+}
+template <unsigned P, size_t... L>
+GenericFn genericLo(unsigned plo, bool s, bool d, std::index_sequence<L...>) {
+   GenericFn f = nullptr;
+   ((plo == L + 1 ? void(f = genericFor<P, L + 1>(s, d)) : void()), ...);
+   return f;
+}
+/// the RowGeneric instantiation for P pieces, plo of them in the low half
+template <size_t... Q>
+GenericFn genericPick(unsigned P, unsigned plo, bool s, bool d,
+                      std::index_sequence<Q...>) {
+   GenericFn f = nullptr;
+   ((P == Q + 1 ? void(f = genericLo<Q + 1>(plo, s, d,
+                                            std::make_index_sequence<Q + 1>()))
+                : void()),
+    ...);
+   return f;
+}
+
+#ifdef VW_CONCAT_HAVE_MASKED
+/// RowMasked over the plan's columns in piece order: the S
+/// selection-vector columns first (their row offset sel[i] * w, a shift
+/// when every one's width is a power of two), then the dense ones (a
+/// pointer bumped by w per row)
+template <unsigned C, unsigned S, bool Wide, bool Shift, size_t... J>
+void rowMaskedImpl(const Plan& p, pos_t n, const char* const* data,
+                   const pos_t* __restrict__ sel, char* __restrict__ out,
+                   std::index_sequence<J...>) {
+   const size_t K = p.keySize;
+   // per column: its row 0 minus its key offset, its stride (sel: the
+   // width or its log2), its key bytes
+   uintptr_t base[C];
+   size_t stride[C];
+   __mmask16 m[C];
+   for (unsigned j = 0; j < C; ++j) {
+      const Piece& q = p.piece[j];
+      const size_t w = q.len;
+      base[j] = uintptr_t(data[q.col]) - q.dst;
+      stride[j] = Shift && j < S ? size_t(__builtin_ctz(uint32_t(w))) : w;
+      m[j] = __mmask16(((1u << w) - 1) << q.dst);
+   }
+   for (pos_t i = 0; i < n; ++i) {
+      const size_t r = S ? size_t(sel[i]) : 0;
+      __m128i key = _mm_setzero_si128();
+      auto column = [&](auto jc) {
+         constexpr unsigned j = decltype(jc)::value;
+         uintptr_t a;
+         if constexpr (j < S)
+            a = base[j] + (Shift ? r << stride[j] : r * stride[j]);
+         else
+            a = base[j], base[j] += stride[j];
+         key = _mm_or_si128(
+             key, _mm_maskz_loadu_epi8(m[j], reinterpret_cast<const void*>(a)));
+      };
+      (column(std::integral_constant<unsigned, J>()), ...);
+      char* o = out + size_t(i) * K;
+      if constexpr (Wide)
+         _mm_storeu_si128(reinterpret_cast<__m128i*>(o), key);
+      else
+         _mm_storel_epi64(reinterpret_cast<__m128i*>(o), key);
+   }
+}
+template <unsigned C, unsigned S, bool Wide, bool Shift>
+void rowMasked(const Plan& p, pos_t n, const char* const* data,
+               const pos_t* sel, char* out) {
+   rowMaskedImpl<C, S, Wide, Shift>(p, n, data, sel, out,
+                                    std::make_index_sequence<C>());
+}
+template <unsigned C, size_t... S>
+GenericFn maskedS(unsigned s, bool wide, bool shift,
+                  std::index_sequence<S...>) {
+   GenericFn f = nullptr;
+   ((s == S ? void(f = wide ? (shift ? rowMasked<C, S, true, true>
+                                     : rowMasked<C, S, true, false>)
+                            : (shift ? rowMasked<C, S, false, true>
+                                     : rowMasked<C, S, false, false>))
+            : void()),
+    ...);
+   return f;
+}
+/// the RowMasked instantiation for C columns, s of them selection-vector
+/// ones, keys over 8 bytes (wide)
+template <size_t... Q>
+GenericFn maskedPick(unsigned C, unsigned s, bool wide, bool shift,
+                     std::index_sequence<Q...>) {
+   GenericFn f = nullptr;
+   ((C == Q + 1 ? void(f = maskedS<Q + 1>(s, wide, shift,
+                                          std::make_index_sequence<Q + 2>()))
+                : void()),
+    ...);
+   return f;
+}
+#endif
+
 uint32_t pow2ceil(uint32_t x) {
    uint32_t p = 1;
    while (p < x) p <<= 1;
@@ -628,7 +841,11 @@ Isa best() {
 bool available(Isa isa) {
    switch (isa) {
    case Isa::Scalar:
-   case Isa::Row: return true;
+   case Isa::Row:
+   case Isa::RowGeneric: return true;
+#ifdef VW_CONCAT_HAVE_MASKED
+   case Isa::RowMasked: return true;
+#endif
 #ifdef VW_CONCAT_HAVE_AVX2
    case Isa::Avx2: return true;
 #endif
@@ -648,6 +865,8 @@ const char* name(Isa isa) {
    case Isa::Vbmi: return "vbmi";
    case Isa::Neon: return "neon";
    case Isa::Row: return "row";
+   case Isa::RowGeneric: return "row_generic";
+   case Isa::RowMasked: return "row_masked";
    default: return "scalar";
    }
 }
@@ -685,6 +904,79 @@ bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
          return true;
       }
       return false;
+   }
+   if (isa == Isa::RowGeneric || isa == Isa::RowMasked) {
+      if (!available(isa)) return false;
+      if (cols == 0 || cols > kMaxCols || keySize == 0 ||
+          keySize > kGenericMaxKey)
+         return false;
+      bool anySel = false, anyDense = false;
+      for (size_t c = 0; c < cols; ++c) {
+         if (width[c] == 0 || offset[c] + width[c] > keySize) return false;
+         anySel |= sel[c];
+         anyDense |= !sel[c];
+      }
+      p.isa = isa;
+      p.keySize = keySize;
+      p.cols = uint32_t(cols);
+      for (size_t c = 0; c < cols; ++c) {
+         p.width[c] = uint8_t(width[c]);
+         p.offset[c] = offset[c];
+         p.sel[c] = sel[c];
+      }
+      if (isa == Isa::RowMasked) {
+#ifdef VW_CONCAT_HAVE_MASKED
+         // one piece per column, the selection-vector columns first
+         uint32_t s = 0;
+         bool shift = true;
+         for (int pass = 0; pass < 2; ++pass)
+            for (size_t c = 0; c < cols; ++c) {
+               if (sel[c] != (pass == 0)) continue;
+               p.piece[p.pieces++] = {uint8_t(c), 0, uint8_t(width[c]),
+                                      uint8_t(offset[c])};
+               if (sel[c]) {
+                  ++s;
+                  shift &= (width[c] & (width[c] - 1)) == 0;
+               }
+            }
+         p.generic = maskedPick(uint32_t(cols), s, keySize > 8, shift,
+                                std::make_index_sequence<kMaxCols>());
+#endif
+      } else {
+         // pieces: each column split at key byte 8, low half first
+         Piece lo[kMaxCols], hi[kMaxCols];
+         uint32_t nlo = 0, nhi = 0;
+         for (size_t c = 0; c < cols; ++c) {
+            const uint32_t w = width[c], off = offset[c], end = off + w;
+            if (off < 8)
+               lo[nlo++] = {uint8_t(c), 0, uint8_t(std::min(end, 8u) - off),
+                            uint8_t(off)};
+            if (end > 8) {
+               const uint32_t from = std::max(off, 8u);
+               hi[nhi++] = {uint8_t(c), uint8_t(from - off),
+                            uint8_t(end - from), uint8_t(from)};
+            }
+         }
+         // the high half is stored only when it has a piece (its padding
+         // bytes would otherwise not be written)
+         if (keySize > 8 && nhi == 0) return false;
+         p.pieces = nlo + nhi;
+         for (uint32_t j = 0; j < nlo; ++j) p.piece[j] = lo[j];
+         for (uint32_t j = 0; j < nhi; ++j) p.piece[nlo + j] = hi[j];
+         // rows whose piece load (8 bytes ending at src + len of the
+         // value) starts before the column pointer: idx * w + src + len < 8
+         for (uint32_t j = 0; j < p.pieces; ++j) {
+            const Piece& q = p.piece[j];
+            const uint32_t w = width[q.col], e = q.src + q.len;
+            const uint32_t g = e >= 8 ? 0 : (8 - e + w - 1) / w;
+            uint32_t& guard = sel[q.col] ? p.selGuard : p.denseGuard;
+            guard = std::max(guard, g);
+         }
+         p.generic = genericPick(p.pieces, nlo, anySel, anyDense,
+                                 std::make_index_sequence<kMaxPieces>());
+      }
+      p.ok = p.generic != nullptr;
+      return p.ok;
    }
    if (isa == Isa::Scalar || !available(isa)) return false;
    if (cols == 0 || cols > kMaxCols || keySize == 0) return false;
@@ -757,7 +1049,9 @@ void run(const Plan& p, pos_t n, const char* const* data,
 #ifdef VW_CONCAT_HAVE_NEON
    case Isa::Neon: runNeon(p, n, data, sel, out); return;
 #endif
-   case Isa::Row: {
+   case Isa::Row:
+   case Isa::RowGeneric:
+   case Isa::RowMasked: {
       // the kernel reads one selection vector for every column
       const pos_t* s = nullptr;
       for (uint32_t c = 0; c < p.cols; ++c) {
@@ -768,7 +1062,10 @@ void run(const Plan& p, pos_t n, const char* const* data,
          }
          s = sel[c];
       }
-      p.row(n, data, s, out);
+      if (p.isa == Isa::Row)
+         p.row(n, data, s, out);
+      else
+         p.generic(p, n, data, s, out);
       return;
    }
    default: tail(p, 0, n, data, sel, out); return;

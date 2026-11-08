@@ -579,6 +579,12 @@ config_flags() {
     # the default concatenation with fixed-size wide columns, and with padding
     hash_simd_concat_wide) echo "$(config_flags hash_simd_concat) -DVW_GROUP_CONCAT_WIDE=ON" ;;
     hash_simd_concat_wide_pad) echo "$(config_flags hash_simd_concat_wide) -DVW_GROUP_KEY_PAD=ON" ;;
+    # shape-generic row kernels (VW_GROUP_CONCAT_ROW_GENERIC, AVX-512BW
+    # masked loads): every key up to 16 bytes (TPC-H Q3, SSB q2.x) one pass;
+    # _q1 also replaces the instantiated Q1 kernel (ROW=OFF) to compare
+    hash_simd_concat_generic) echo "$(config_flags hash_simd_concat_wide_pad) -DVW_GROUP_CONCAT_ROW_GENERIC=ON" ;;
+    hash_simd_concat_generic_q1) echo "$(config_flags hash_simd_concat_generic) -DVW_GROUP_CONCAT_ROW=OFF" ;;
+    fair_concat_generic) echo "$(config_flags fair_concat) -DVW_GROUP_CONCAT_ROW_GENERIC=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

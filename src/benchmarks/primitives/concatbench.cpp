@@ -14,12 +14,19 @@
 //   <isa>_stage    VW_GROUP_CONCAT_SIMD, selection-vector columns staged by
 //                  scalar loads (isa: vbmi, avx2, neon; those compiled in)
 //   <isa>_gather   the same with vpgather / NEON lane loads
+//   row_generic    VW_GROUP_CONCAT_ROW_GENERIC: one row kernel per piece
+//                  count, widths as plan tables, two 64-bit halves (K <= 16)
+//   row_masked     the same per column count, masked byte loads into an
+//                  xmm (AVX-512BW/VL; K <= 16); -H: either + hash pass
 //
 // Shapes are <width><s|d>..., s = read through the vector's selection
 // vector (a scanned base column), d = a dense per-vector buffer (a join
 // output). Presets: q1 = 1s1s (Q1 returnflag, linestatus), q3 = 4s4d4d
 // (Q3 orderkey, orderdate, shippriority), q18 = 25d4d4d8d4s (Q18 c_name,
-// custkey, orderdate, totalprice, l_orderkey).
+// custkey, orderdate, totalprice, l_orderkey), q9 = 25d4d, ssb2 = 4d9s,
+// ssb3a = 4d10s10s, ssb3b = 4d15s15s, ssb4a = 4d7s15s, ssb4b = 4d9s10s.
+// A suffix +P adds P zero padding bytes to the key (VW_GROUP_KEY_PAD):
+// q3p = 4s4d4d+4, ssb2p = 4d9s+3 (16 bytes).
 //
 // Hash mode (-H): concat plus HashGroup's hash of the packed keys
 // (MurmurHash64A, every variant's hashes checked against scalar+hash):
@@ -78,9 +85,23 @@ bool parseShape(const std::string& name, Shape& s) {
    if (name == "q1") spec = "1s1s";
    if (name == "q3") spec = "4s4d4d";
    if (name == "q18") spec = "25d4d4d8d4s";
+   if (name == "q3p") spec = "4s4d4d+4";
+   if (name == "q9") spec = "25d4d";
+   if (name == "ssb2") spec = "4d9s";
+   if (name == "ssb2p") spec = "4d9s+3";
+   if (name == "ssb3a") spec = "4d10s10s";
+   if (name == "ssb3b") spec = "4d15s15s";
+   if (name == "ssb4a") spec = "4d7s15s";
+   if (name == "ssb4b") spec = "4d9s10s";
    s = Shape();
    s.name = name;
    s.spec = spec;
+   // +P: P zero padding bytes after the columns (VW_GROUP_KEY_PAD)
+   uint32_t pad = 0;
+   if (const size_t plus = spec.find('+'); plus != std::string::npos) {
+      pad = uint32_t(std::stoul(spec.substr(plus + 1)));
+      spec = spec.substr(0, plus);
+   }
    size_t i = 0;
    while (i < spec.size()) {
       size_t j = i;
@@ -95,6 +116,7 @@ bool parseShape(const std::string& name, Shape& s) {
       s.keySize += w;
       i = j + 1;
    }
+   s.keySize += pad;
    return !s.width.empty() && s.width.size() <= kMaxCols;
 }
 
@@ -589,7 +611,7 @@ int main(int argc, char** argv) {
                                 wideFixed(s, n, d, sl, o);
                              }});
       std::vector<Plan> plans; // stable addresses for the lambdas
-      plans.reserve(8);
+      plans.reserve(16);
       for (Isa isa : {Isa::Vbmi, Isa::Avx2, Isa::Neon})
          for (SelLoad sl : {SelLoad::Stage, SelLoad::Gather}) {
             bool selFlags[kMaxCols];
@@ -606,6 +628,20 @@ int main(int argc, char** argv) {
                  [pp](pos_t n, const char* const* d, const pos_t* const* sel,
                       char* o) { run(*pp, n, d, sel, o); }});
          }
+      // VW_GROUP_CONCAT_ROW_GENERIC: the shape-generic row kernels
+      for (Isa isa : {Isa::RowGeneric, Isa::RowMasked}) {
+         bool selFlags[kMaxCols];
+         for (size_t c = 0; c < cols; ++c) selFlags[c] = s.sel[c];
+         Plan p;
+         if (!build(p, isa, SelLoad::Stage, cols, s.width.data(),
+                    s.offset.data(), selFlags, s.keySize))
+            continue;
+         plans.push_back(p);
+         const Plan* pp = &plans.back();
+         variants.push_back({name(isa), [pp](pos_t n, const char* const* d,
+                                             const pos_t* const* sel,
+                                             char* o) { run(*pp, n, d, sel, o); }});
+      }
       if (hashMode) {
          // concat + HashGroup's hash of the packed keys
          variants.clear();
@@ -643,6 +679,28 @@ int main(int argc, char** argv) {
          }
          bool selFlags[kMaxCols];
          for (size_t c = 0; c < cols; ++c) selFlags[c] = s.sel[c];
+         // the shape-generic row kernels, then either hash pass
+         for (Isa isa : {Isa::RowGeneric, Isa::RowMasked}) {
+            Plan gp;
+            if (!build(gp, isa, SelLoad::Stage, cols, s.width.data(),
+                       s.offset.data(), selFlags, s.keySize))
+               continue;
+            plans.push_back(gp);
+            const Plan* pp = &plans.back();
+            variants.push_back({std::string(name(isa)) + "+hash",
+                                [&s, pp](pos_t n, const char* const* d,
+                                         const pos_t* const* sl, char* o) {
+                                   run(*pp, n, d, sl, o);
+                                   hashPass(s, n, o);
+                                }});
+            if (simdHashPass(s, 0, nullptr, true))
+               variants.push_back({std::string(name(isa)) + "+simdhash",
+                                   [&s, pp](pos_t n, const char* const* d,
+                                            const pos_t* const* sl, char* o) {
+                                      run(*pp, n, d, sl, o);
+                                      simdHashPass(s, n, o, false);
+                                   }});
+         }
          Plan rp;
          if (build(rp, Isa::Row, SelLoad::Stage, cols, s.width.data(),
                    s.offset.data(), selFlags, s.keySize)) {

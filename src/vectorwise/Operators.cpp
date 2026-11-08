@@ -3009,6 +3009,31 @@ void HashGroup::planConcat() {
                  totalKeySize))
       return;
 #endif
+#ifdef VW_GROUP_CONCAT_ROW_GENERIC
+   // any other key of up to 16 bytes (padded ones too): the row kernel
+   // instantiated for its column count. All-dense keys keep the vector
+   // kernels where those build (vpermb beats it there, run_concatbench
+   // 2d2d). auto: the masked kernel only (AVX-512BW/VL); the 64-bit one
+   // loses to the per-column copy on x86 and is taken only when asked for
+   // (VW_GROUP_CONCAT_ROW_GENERIC_KERNEL=gpr).
+   {
+      bool allDense = true;
+      for (size_t c = 0; c < cols; ++c) allDense &= !sel[c];
+#ifndef VW_GROUP_CONCAT_SHUFFLE_OFF
+      if (allDense && sc::build(concatPlan, sc::best(), selLoad, cols, width,
+                                offset, sel, totalKeySize))
+         return;
+#endif
+#ifdef VW_GROUP_CONCAT_ROW_GENERIC_GPR
+      constexpr auto generic = sc::Isa::RowGeneric;
+#else
+      constexpr auto generic = sc::Isa::RowMasked;
+#endif
+      if (sc::build(concatPlan, generic, selLoad, cols, width, offset, sel,
+                    totalKeySize))
+         return;
+   }
+#endif
    // the vector kernels: by default only for all-dense keys, where they
    // beat the per-column copy (a key read through a selection vector costs
    // an index and a value load per row either way)
