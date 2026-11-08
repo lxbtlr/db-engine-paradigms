@@ -11,6 +11,11 @@
 //                  shapes whose columns are all s or all d)
 //   wide_fixed     VW_GROUP_CONCAT_WIDE: columns other than 1/2/4/8 bytes
 //                  copied by copyWideColumn (two overlapping fixed moves)
+//   wide_row       VW_GROUP_CONCAT_WIDE_ROW: one pass over the rows, one
+//                  shared index load per row, per column a byte-masked
+//                  load and store (AVX-512BW)
+//   wide_row_moves the same pass with two overlapping fixed-size moves per
+//                  value (the kernel without AVX-512BW)
 //   <isa>_stage    VW_GROUP_CONCAT_SIMD, selection-vector columns staged by
 //                  scalar loads (isa: vbmi, avx2, neon; those compiled in)
 //   <isa>_gather   the same with vpgather / NEON lane loads
@@ -19,7 +24,8 @@
 // vector (a scanned base column), d = a dense per-vector buffer (a join
 // output). Presets: q1 = 1s1s (Q1 returnflag, linestatus), q3 = 4s4d4d
 // (Q3 orderkey, orderdate, shippriority), q18 = 25d4d4d8d4s (Q18 c_name,
-// custkey, orderdate, totalprice, l_orderkey).
+// custkey, orderdate, totalprice, l_orderkey), q9 = 25d4d (Q9 nation,
+// year).
 //
 // Hash mode (-H): concat plus HashGroup's hash of the packed keys
 // (MurmurHash64A, every variant's hashes checked against scalar+hash):
@@ -39,7 +45,9 @@
 //                    memcmp with the length fixed)
 //
 // Usage: run_concatbench [-k shape,...] [-s selPct,...] [-m l1|stream|both]
-//                        [-v vecSize] [-N rows] [-r reps] [-H] [-P]
+//                        [-v vecSize] [-N rows] [-r reps] [-H] [-P] [-D]
+//   -D: sel columns after the first read their own selection vectors
+//   (same row count per vector; SSB q3.x / q4.x keys), not the shared one
 //   l1: one vector of rows, repeated (vecs = N / vecSize); stream: N rows
 //   of each column walked vector by vector.
 // Output: CSV on stdout, ns per selected row (best of reps), speedup over
@@ -78,6 +86,7 @@ bool parseShape(const std::string& name, Shape& s) {
    if (name == "q1") spec = "1s1s";
    if (name == "q3") spec = "4s4d4d";
    if (name == "q18") spec = "25d4d4d8d4s";
+   if (name == "q9") spec = "25d4d";
    s = Shape();
    s.name = name;
    s.spec = spec;
@@ -326,14 +335,24 @@ struct Input {
    std::vector<std::vector<char>> columns; // per column
    std::vector<pos_t> sel;                 // per vector, concatenated
    std::vector<pos_t> selN;                // selected rows per vector
+   /// -D: each sel column but the first its own selection vectors, the
+   /// same number of rows per vector (SSB q3 / q4 keys read through
+   /// different join match vectors); empty: every column reads sel
+   std::vector<std::vector<pos_t>> colSel;
    size_t vecs = 0;
    size_t selected = 0;
 };
+/// the selection vectors column c reads
+const pos_t* selBase(const Input& in, size_t c) {
+   return c < in.colSel.size() && !in.colSel[c].empty()
+              ? in.colSel[c].data()
+              : in.sel.data();
+}
 
 /// columns of `rows` rows; sel vectors over vectors of vecSize rows. l1:
-/// one vector, repeated.
+/// one vector, repeated. distinct: Input::colSel.
 Input makeInput(const Shape& s, size_t rows, size_t vecSize, bool l1,
-                unsigned selPct, std::mt19937_64& rng) {
+                unsigned selPct, bool distinct, std::mt19937_64& rng) {
    Input in;
    const size_t colRows = l1 ? vecSize : rows;
    for (uint32_t w : s.width) {
@@ -349,6 +368,23 @@ Input makeInput(const Shape& s, size_t rows, size_t vecSize, bool l1,
       for (size_t i = 0; i < vecSize; ++i)
          if (rng() % 100 < selPct) in.sel[v * vecSize + n++] = pos_t(i);
       in.selN.push_back(n);
+   }
+   if (distinct) {
+      bool first = true;
+      in.colSel.resize(s.width.size());
+      std::vector<pos_t> all(vecSize);
+      for (size_t c = 0; c < s.width.size(); ++c) {
+         if (!s.sel[c] || std::exchange(first, false)) continue;
+         auto& cs = in.colSel[c];
+         cs.resize(in.sel.size());
+         for (size_t v = 0; v < selVecs; ++v) {
+            for (size_t i = 0; i < vecSize; ++i) all[i] = pos_t(i);
+            std::shuffle(all.begin(), all.end(), rng);
+            std::sort(all.begin(), all.begin() + in.selN[v]);
+            std::copy(all.begin(), all.begin() + in.selN[v],
+                      cs.begin() + v * vecSize);
+         }
+      }
    }
    for (size_t v = 0; v < in.vecs; ++v) in.selected += in.selN[l1 ? 0 : v];
    return in;
@@ -369,7 +405,7 @@ double pass(const Shape& s, const Input& in, size_t vecSize, bool l1,
          const char* col = in.columns[c].data();
          if (s.sel[c]) {
             data[c] = col + (l1 ? 0 : v * vecSize * s.width[c]);
-            sel[c] = in.sel.data() + sv * vecSize;
+            sel[c] = selBase(in, c) + sv * vecSize;
          } else {
             data[c] = col + (l1 ? 0 : dense * s.width[c]);
             sel[c] = nullptr;
@@ -399,7 +435,7 @@ bool verify(const Shape& s, const Input& in, size_t vecSize, bool l1,
          const char* col = in.columns[c].data();
          data[c] = s.sel[c] ? col + (l1 ? 0 : v * vecSize * s.width[c])
                             : col + (l1 ? 0 : dense * s.width[c]);
-         sel[c] = s.sel[c] ? in.sel.data() + sv * vecSize : nullptr;
+         sel[c] = s.sel[c] ? selBase(in, c) + sv * vecSize : nullptr;
       }
       dense += n;
       ref(n, data, sel, a.data());
@@ -493,7 +529,7 @@ bool verifyPadded(const Shape& s, const Input& in, size_t vecSize, bool l1,
          const char* col = in.columns[c].data();
          data[c] = s.sel[c] ? col + (l1 ? 0 : v * vecSize * s.width[c])
                             : col + (l1 ? 0 : dense * s.width[c]);
-         sel[c] = s.sel[c] ? in.sel.data() + sv * vecSize : nullptr;
+         sel[c] = s.sel[c] ? selBase(in, c) + sv * vecSize : nullptr;
       }
       dense += n;
       runColumns(cols, s.width.data(), s.offset.data(), K, n, data, sel,
@@ -519,8 +555,8 @@ int main(int argc, char** argv) {
    size_t vecSize = 1024, rows = size_t(1) << 23;
    int reps = 5;
    int opt;
-   bool hashMode = false, padMode = false;
-   while ((opt = getopt(argc, argv, "k:s:m:v:N:r:HP")) != -1) {
+   bool hashMode = false, padMode = false, distinct = false;
+   while ((opt = getopt(argc, argv, "k:s:m:v:N:r:HPD")) != -1) {
       switch (opt) {
       case 'k': shapes = split(optarg); break;
       case 's':
@@ -533,6 +569,7 @@ int main(int argc, char** argv) {
       case 'r': reps = std::stoi(optarg); break;
       case 'H': hashMode = true; break;
       case 'P': padMode = true; break;
+      case 'D': distinct = true; break;
       default:
          std::fprintf(stderr, "usage: %s [-k shape,..] [-s selPct,..] "
                               "[-m l1|stream|both] [-v vec] [-N rows] [-r reps]\n",
@@ -581,13 +618,35 @@ int main(int argc, char** argv) {
                              }});
       if (TmplFn f = rowTmplFor(s.spec))
          variants.push_back({"row_tmpl", f});
-      if (std::any_of(s.width.begin(), s.width.end(),
-                      [](uint32_t w) { return w > 8; }))
+      const bool wide = std::any_of(s.width.begin(), s.width.end(),
+                                    [](uint32_t w) {
+                                       return w != 1 && w != 2 &&
+                                              w != 4 && w != 8;
+                                    });
+      std::vector<Plan> widePlans; // stable addresses for the lambdas
+      widePlans.reserve(3);
+      if (wide) {
          variants.push_back({"wide_fixed",
                              [&s](pos_t n, const char* const* d,
                                   const pos_t* const* sl, char* o) {
                                 wideFixed(s, n, d, sl, o);
                              }});
+         bool selFlags[kMaxCols];
+         for (size_t c = 0; c < cols; ++c) selFlags[c] = s.sel[c];
+         for (bool fallback : {false, true}) {
+            if (!fallback && !wideRowMasked()) continue;
+            Plan p;
+            if (!buildWideRow(p, cols, s.width.data(), s.offset.data(),
+                              selFlags, s.keySize, fallback))
+               continue;
+            widePlans.push_back(p);
+            const Plan* pp = &widePlans.back();
+            variants.push_back(
+                {fallback ? "wide_row_moves" : "wide_row",
+                 [pp](pos_t n, const char* const* d, const pos_t* const* sel,
+                      char* o) { run(*pp, n, d, sel, o); }});
+         }
+      }
       std::vector<Plan> plans; // stable addresses for the lambdas
       plans.reserve(8);
       for (Isa isa : {Isa::Vbmi, Isa::Avx2, Isa::Neon})
@@ -700,7 +759,7 @@ int main(int argc, char** argv) {
 
       for (bool l1 : l1Modes)
          for (unsigned selPct : sels) {
-            Input in = makeInput(s, rows, vecSize, l1, selPct, rng);
+            Input in = makeInput(s, rows, vecSize, l1, selPct, distinct, rng);
             // -P pads keys up to 16 bytes
             std::vector<char> out(vecSize * std::max(16u, s.keySize) + kSlack);
             double scalarNs = 0;

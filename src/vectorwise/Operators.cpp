@@ -3009,6 +3009,30 @@ void HashGroup::planConcat() {
                  totalKeySize))
       return;
 #endif
+#ifdef VW_GROUP_CONCAT_WIDE_ROW
+   // keys with a column of a width other than 1/2/4/8 bytes (which the row
+   // and vector kernels do not take): one pass over the rows, per column a
+   // byte-masked move of the value. Only with AVX-512BW: the fallback's
+   // per-column switch between move sizes costs more than the per-column
+   // passes save (run_concatbench wide_row_moves, 2026-11-07). By default
+   // only where a wide column is read through a selection vector (SSB
+   // q2..q4): keys whose wide columns are dense join buffers (TPC-H Q9,
+   // Q18) gain nothing from it while those are in L1
+   // (VW_GROUP_CONCAT_WIDE_ROW_FOR=all takes them too)
+   bool wideRow = false;
+   for (size_t c = 0; c < cols; ++c) {
+      const bool wide =
+          width[c] != 1 && width[c] != 2 && width[c] != 4 && width[c] != 8;
+#ifdef VW_GROUP_CONCAT_WIDE_ROW_ALL
+      wideRow |= wide;
+#else
+      wideRow |= wide && sel[c];
+#endif
+   }
+   if (wideRow && sc::wideRowMasked() &&
+       sc::buildWideRow(concatPlan, cols, width, offset, sel, totalKeySize))
+      return;
+#endif
    // the vector kernels: by default only for all-dense keys, where they
    // beat the per-column copy (a key read through a selection vector costs
    // an index and a value load per row either way)

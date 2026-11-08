@@ -302,6 +302,32 @@ if(VW_GROUP_CONCAT_WIDE)
   ADD_DEFINITIONS(-DVW_GROUP_CONCAT_WIDE=1)
   message(STATUS "Building with VW_GROUP_CONCAT_WIDE")
 endif()
+# VW_GROUP_CONCAT_WIDE_ROW (needs VW_GROUP_CONCAT_SIMD): keys with a column
+# of a width other than 1/2/4/8 bytes (TPC-H Q9 / Q18, SSB q2..q4) are
+# packed in one pass over the rows instead of one per column: per row one
+# index load for the columns sharing the selection vector, per column one
+# byte-masked load and store, a kernel per number of dense and of
+# selection-vector columns with the widths as plan data. AVX-512BW builds
+# only (manchego, dubliner, the Zen 4 laptop); elsewhere the per-column
+# copy stays (the kernel's non-masked form, two overlapping moves per
+# value, is slower than it; run_concatbench wide_row_moves).
+# VW_GROUP_CONCAT_WIDE_ROW_FOR: sel (default; a wide key column is read
+# through a selection vector: SSB q2..q4) or all (also TPC-H Q9, Q18, whose
+# wide columns are dense join buffers: no gain while they sit in L1).
+OPTION(VW_GROUP_CONCAT_WIDE_ROW "VW_GROUP_CONCAT_SIMD: one pass over the rows for keys with wide columns" OFF)
+set(VW_GROUP_CONCAT_WIDE_ROW_FOR "sel" CACHE STRING "VW_GROUP_CONCAT_WIDE_ROW for keys with a wide column: sel (read through a selection vector) or all")
+if(VW_GROUP_CONCAT_WIDE_ROW)
+  if(NOT VW_GROUP_CONCAT_SIMD)
+    message(FATAL_ERROR "VW_GROUP_CONCAT_WIDE_ROW needs VW_GROUP_CONCAT_SIMD")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_WIDE_ROW=1)
+  if(VW_GROUP_CONCAT_WIDE_ROW_FOR STREQUAL "all")
+    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_WIDE_ROW_ALL=1)
+  elseif(NOT VW_GROUP_CONCAT_WIDE_ROW_FOR STREQUAL "sel")
+    message(FATAL_ERROR "VW_GROUP_CONCAT_WIDE_ROW_FOR must be sel or all")
+  endif()
+  message(STATUS "Building with VW_GROUP_CONCAT_WIDE_ROW (for ${VW_GROUP_CONCAT_WIDE_ROW_FOR})")
+endif()
 # VW_GROUP_KEY_PAD: HashGroup pads a compound key of 3, 5..7 or 9..15 bytes
 # with zero bytes to 4, 8 or 16 (TPC-H Q3: 12 -> 16): such keys take the
 # 4/8-byte integer hash and compare, or a 16-byte path with the length fixed

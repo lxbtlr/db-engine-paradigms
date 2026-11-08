@@ -291,3 +291,58 @@ TEST(GroupConcat, WideColumns) {
       }
    }
 }
+
+// VW_GROUP_CONCAT_WIDE_ROW: the WideRow kernels (masked where AVX-512BW is
+// compiled in, the overlapping-moves one always) write the per-column
+// copy's bytes for random shapes of 1..8 columns of 1..64 bytes, dense and
+// selection-vector columns mixed, the selection vector shared (the kernel)
+// or not (the per-column fallback), keys padded with bytes after the
+// columns (which must stay as they were: VW_GROUP_KEY_PAD's zeros), and
+// columns ending at protected pages
+TEST(GroupConcat, WideRow) {
+   std::mt19937_64 rng(29);
+   std::vector<bool> fallbacks = {true};
+   if (wideRowMasked()) fallbacks.push_back(false);
+   for (int shape = 0; shape < 200; ++shape) {
+      Shape s;
+      const size_t cols = 1 + rng() % kMaxCols;
+      bool selFlags[kMaxCols];
+      for (size_t c = 0; c < cols; ++c) {
+         // mostly the TPC-H / SSB widths, else any of 1..64
+         static const uint32_t common[] = {1, 2, 4, 8, 7, 9, 10, 15, 25};
+         const uint32_t w =
+             rng() % 2 ? common[rng() % 9] : uint32_t(1 + rng() % 64);
+         s.width.push_back(w);
+         s.offset.push_back(s.keySize);
+         s.sel.push_back(rng() % 2);
+         selFlags[c] = s.sel[c];
+         s.keySize += w;
+      }
+      s.keySize += uint32_t(rng() % 4); // padding
+      for (bool fallback : fallbacks) {
+         Plan p;
+         ASSERT_TRUE(buildWideRow(p, cols, s.width.data(), s.offset.data(),
+                                  selFlags, s.keySize, fallback));
+         EXPECT_EQ(p.wideBytes == 0, fallback);
+         for (pos_t n : {pos_t(0), pos_t(1), pos_t(7), pos_t(64), pos_t(513),
+                         kRows})
+            for (bool shared : {true, false})
+               check(p, s, n, shared, rng, shared);
+      }
+   }
+   // columns not in key offset order, every isa's build entry point
+   const uint32_t w[] = {4, 25, 9}, off[] = {34, 0, 25};
+   const bool sel[] = {true, false, true};
+   Shape s{{4, 25, 9}, {34, 0, 25}, {true, false, true}, 43};
+   Plan p;
+   ASSERT_TRUE(build(p, Isa::WideRow, SelLoad::Stage, 3, w, off, sel, 43));
+   for (pos_t n : kSizes) check(p, s, n, true, rng, true);
+   // shapes it does not take: a column over 64 bytes, overlapping columns,
+   // a column past the key
+   const uint32_t w65[] = {65}, o0[] = {0};
+   EXPECT_FALSE(buildWideRow(p, 1, w65, o0, sel, 65));
+   const uint32_t wo[] = {9, 4}, oo[] = {0, 8};
+   EXPECT_FALSE(buildWideRow(p, 2, wo, oo, sel, 13));
+   const uint32_t wp[] = {9}, op[] = {5};
+   EXPECT_FALSE(buildWideRow(p, 1, wp, op, sel, 13));
+}

@@ -8,7 +8,8 @@
 #include <array>
 #include <cstring>
 #include <utility>
-#if defined(VW_CONCAT_HAVE_VBMI) || defined(VW_CONCAT_HAVE_AVX2)
+#if defined(VW_CONCAT_HAVE_VBMI) || defined(VW_CONCAT_HAVE_AVX2) ||          \
+    defined(VW_CONCAT_HAVE_MASKED)
 #include <immintrin.h>
 #endif
 #ifdef VW_CONCAT_HAVE_NEON
@@ -605,6 +606,132 @@ const RowEntry kRowKernels[] = {
 };
 #undef VW_ROW_SHAPE
 
+// WideRow kernels (VW_GROUP_CONCAT_WIDE_ROW): one pass over the rows for
+// keys with columns of any width up to 64 bytes. Instantiated per number of
+// dense (D) and selection-vector (S) columns, not per width: widths, masks
+// and offsets are plan data held in locals. The plan orders the dense
+// columns first; their values are walked by pointers that advance by their
+// width per row, the selection-vector columns' are at the row's shared
+// index (loaded once per row) times their width. Each value is moved by one
+// byte-masked load (no byte read past the value, so no over-read and no
+// fault) and one byte-masked store (AVX-512BW), or without AVX-512BW by two
+// fixed-size moves that overlap in its middle (copyWideColumn's), chosen
+// per column by a switch whose pattern repeats every row.
+#ifdef VW_CONCAT_HAVE_MASKED
+template <size_t V>
+inline void wideMove(char* dst, const char* src, uint64_t m) {
+   if constexpr (V == 16) {
+      _mm_mask_storeu_epi8(dst, __mmask16(m),
+                           _mm_maskz_loadu_epi8(__mmask16(m), src));
+   } else if constexpr (V == 32) {
+      _mm256_mask_storeu_epi8(dst, __mmask32(m),
+                              _mm256_maskz_loadu_epi8(__mmask32(m), src));
+   } else {
+      _mm512_mask_storeu_epi8(dst, __mmask64(m),
+                              _mm512_maskz_loadu_epi8(__mmask64(m), src));
+   }
+}
+#endif
+
+template <size_t A> inline void moveA(char* dst, const char* src) {
+   char v[A];
+   std::memcpy(v, src, A);
+   std::memcpy(dst, v, A);
+}
+template <size_t A>
+inline void movePair(char* dst, const char* src, size_t w) {
+   char head[A], tail[A];
+   std::memcpy(head, src, A);
+   std::memcpy(tail, src + w - A, A);
+   std::memcpy(dst, head, A);
+   std::memcpy(dst + w - A, tail, A);
+}
+/// the fallback's move of one value (Plan::moveCode)
+inline void moveCoded(char* dst, const char* src, size_t w, uint8_t code) {
+   switch (code) {
+   case 1: moveA<1>(dst, src); break;
+   case 2: moveA<2>(dst, src); break;
+   case 4: moveA<4>(dst, src); break;
+   case 8: moveA<8>(dst, src); break;
+   case 16: moveA<16>(dst, src); break;
+   case 32: moveA<32>(dst, src); break;
+   case 0x82: movePair<2>(dst, src, w); break;
+   case 0x84: movePair<4>(dst, src, w); break;
+   case 0x88: movePair<8>(dst, src, w); break;
+   case 0x90: movePair<16>(dst, src, w); break;
+   default: movePair<32>(dst, src, w); break;
+   }
+}
+
+/// V: the masked kernels' register width (16, 32, 64), 0 for the fallback;
+/// Shared: every selection-vector column reads the same selection vector
+/// (one index load per row), else each its own (one per column and row)
+template <size_t D, size_t S, size_t V, bool Shared>
+void wideRowKernel(const Plan& p, pos_t n, const char* const* data,
+                   const pos_t* const* sel, char* __restrict__ out) {
+   constexpr size_t C = D + S;
+   const char* src[C]; // dense: the current row's value; sel: the column
+   const pos_t* sp[S + 1];
+   size_t w[C], off[C];
+   uint64_t m[C];
+   uint8_t code[C];
+   for (size_t k = 0; k < C; ++k) {
+      const size_t c = p.order[k];
+      src[k] = data[c];
+      w[k] = p.width[c];
+      off[k] = p.offset[c];
+      m[k] = p.byteMask[c];
+      code[k] = p.moveCode[c];
+      if (k >= D) sp[k - D] = sel[c];
+   }
+   (void)m, (void)code, (void)sp;
+   const size_t K = p.keySize;
+   for (pos_t i = 0; i < n; ++i) {
+      char* row = out + size_t(i) * K;
+      size_t s = 0;
+      if constexpr (Shared && S > 0) s = sp[0][i];
+#pragma GCC unroll 8
+      for (size_t k = 0; k < C; ++k) {
+         const char* v = src[k];
+         if (k >= D) v += (Shared ? s : size_t(sp[k - D][i])) * w[k];
+#ifdef VW_CONCAT_HAVE_MASKED
+         if constexpr (V != 0)
+            wideMove<V>(row + off[k], v, m[k]);
+         else
+#endif
+            moveCoded(row + off[k], v, w[k], code[k]);
+         if (k < D) src[k] += w[k];
+      }
+   }
+}
+
+/// the WideRow instantiations, [D * 9 + S][masked V = 0 (fallback), 16,
+/// 32, 64][Shared]; nullptr where D + S is 0 or over kMaxCols, or V not
+/// compiled in
+template <size_t I, size_t V, bool Shared> constexpr WideFn wideAt() {
+   constexpr size_t D = I / (kMaxCols + 1), S = I % (kMaxCols + 1);
+#ifndef VW_CONCAT_HAVE_MASKED
+   if constexpr (V != 0) return nullptr;
+   else
+#endif
+   if constexpr (D + S == 0 || D + S > kMaxCols)
+      return nullptr;
+   else
+      return wideRowKernel<D, S, V, Shared>;
+}
+using WidePair = std::array<WideFn, 2>;
+template <size_t I, size_t V> constexpr WidePair widePair() {
+   return {{wideAt<I, V, false>(), wideAt<I, V, true>()}};
+}
+template <size_t... I>
+constexpr std::array<std::array<WidePair, 4>, sizeof...(I)>
+wideTable(std::index_sequence<I...>) {
+   return {{{widePair<I, 0>(), widePair<I, 16>(), widePair<I, 32>(),
+             widePair<I, 64>()}...}};
+}
+constexpr auto kWideKernels =
+    wideTable(std::make_index_sequence<(kMaxCols + 1) * (kMaxCols + 1)>());
+
 uint32_t pow2ceil(uint32_t x) {
    uint32_t p = 1;
    while (p < x) p <<= 1;
@@ -628,7 +755,8 @@ Isa best() {
 bool available(Isa isa) {
    switch (isa) {
    case Isa::Scalar:
-   case Isa::Row: return true;
+   case Isa::Row:
+   case Isa::WideRow: return true;
 #ifdef VW_CONCAT_HAVE_AVX2
    case Isa::Avx2: return true;
 #endif
@@ -648,6 +776,7 @@ const char* name(Isa isa) {
    case Isa::Vbmi: return "vbmi";
    case Isa::Neon: return "neon";
    case Isa::Row: return "row";
+   case Isa::WideRow: return "wide_row";
    default: return "scalar";
    }
 }
@@ -656,6 +785,8 @@ bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
            const uint32_t* width, const uint32_t* offset, const bool* sel,
            uint32_t keySize) {
    p = Plan();
+   if (isa == Isa::WideRow)
+      return buildWideRow(p, cols, width, offset, sel, keySize);
    if (isa == Isa::Row) {
       if (cols == 0 || cols > kMaxCols) return false;
       // a row kernel stores the sum of its widths per key (not a padded key)
@@ -771,6 +902,20 @@ void run(const Plan& p, pos_t n, const char* const* data,
       p.row(n, data, s, out);
       return;
    }
+   case Isa::WideRow: {
+      // whether the selection-vector columns read one selection vector
+      // (in a plan: the same buffer; TPC-H Q18, SSB q2.x have one such
+      // column, SSB q3.x / q4.x two through different ones)
+      const pos_t* s = nullptr;
+      bool shared = true;
+      for (uint32_t c = 0; c < p.cols; ++c) {
+         if (!p.sel[c]) continue;
+         shared &= !s || sel[c] == s;
+         s = sel[c];
+      }
+      (shared ? p.wide : p.wideSep)(p, n, data, sel, out);
+      return;
+   }
    default: tail(p, 0, n, data, sel, out); return;
    }
 }
@@ -831,6 +976,65 @@ void copyWideColumn(pos_t n, const char* src, const pos_t* sel, char* dest,
    if (width < 32) return columnPassOverlap<16>(n, src, sel, dest, keySize, width);
    if (width <= 64) return columnPassOverlap<32>(n, src, sel, dest, keySize, width);
    columnPassWide(0, n, src, sel, dest, keySize, width);
+}
+
+bool wideRowMasked() {
+#ifdef VW_CONCAT_HAVE_MASKED
+   return true;
+#else
+   return false;
+#endif
+}
+
+bool buildWideRow(Plan& p, size_t cols, const uint32_t* width,
+                  const uint32_t* offset, const bool* sel, uint32_t keySize,
+                  bool forceFallback) {
+   p = Plan();
+   if (cols == 0 || cols > kMaxCols) return false;
+   uint32_t maxWidth = 0;
+   for (size_t c = 0; c < cols; ++c) {
+      if (width[c] == 0 || width[c] > 64) return false;
+      if (offset[c] + width[c] > keySize) return false;
+      maxWidth = std::max(maxWidth, width[c]);
+   }
+   // no two columns share a key byte
+   uint8_t byOffset[kMaxCols];
+   for (size_t c = 0; c < cols; ++c) byOffset[c] = uint8_t(c);
+   std::sort(byOffset, byOffset + cols,
+             [&](uint8_t a, uint8_t b) { return offset[a] < offset[b]; });
+   for (size_t k = 1; k < cols; ++k) {
+      const uint8_t a = byOffset[k - 1], b = byOffset[k];
+      if (offset[a] + width[a] > offset[b]) return false;
+   }
+   p.isa = Isa::WideRow;
+   p.keySize = keySize;
+   p.cols = uint32_t(cols);
+   // the kernel takes the dense columns first (each store writes only its
+   // own value's bytes, so the order is free)
+   size_t dense = 0;
+   for (size_t c = 0; c < cols; ++c)
+      if (!sel[c]) p.order[dense++] = uint8_t(c);
+   for (size_t c = 0, k = dense; c < cols; ++c)
+      if (sel[c]) p.order[k++] = uint8_t(c);
+   for (size_t c = 0; c < cols; ++c) {
+      const uint32_t w = width[c];
+      p.width[c] = uint8_t(w);
+      p.offset[c] = offset[c];
+      p.sel[c] = sel[c];
+      p.byteMask[c] = w == 64 ? ~uint64_t(0) : (uint64_t(1) << w) - 1;
+      uint32_t a = 1;
+      while (a * 2 <= w && a < 32) a *= 2;
+      p.moveCode[c] = uint8_t(a == w ? a : (a | 0x80));
+   }
+   // the narrowest register that holds the widest value
+   const uint32_t v = maxWidth <= 16 ? 1 : maxWidth <= 32 ? 2 : 3;
+   const auto& fns = kWideKernels[dense * (kMaxCols + 1) + (cols - dense)];
+   const size_t vi = forceFallback || !fns[v][1] ? 0 : v;
+   p.wide = fns[vi][1];
+   p.wideSep = fns[vi][0];
+   p.wideBytes = vi ? 16u << (vi - 1) : 0;
+   p.ok = true;
+   return true;
 }
 
 void runColumns(size_t cols, const uint32_t* width, const uint32_t* offset,

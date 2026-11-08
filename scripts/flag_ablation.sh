@@ -549,6 +549,10 @@ config_flags() {
     # and vector kernels for all-dense keys, fixed-size wide columns, keys
     # padded to 4 / 8 / 16 bytes
     fair_concat)         echo "$(config_flags fair_compound) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_WIDE=ON -DVW_GROUP_KEY_PAD=ON" ;;
+    # fair_concat with the one-pass wide key packing (SSB q2..q4 keys; _all:
+    # also TPC-H Q9 / Q18), AVX-512BW machines; elsewhere = fair_concat
+    fair_concat_row)     echo "$(config_flags fair_concat) -DVW_GROUP_CONCAT_WIDE_ROW=ON" ;;
+    fair_concat_row_all) echo "$(config_flags fair_concat_row) -DVW_GROUP_CONCAT_WIDE_ROW_FOR=all" ;;
     fair_bloom)          echo "$(config_flags fair_compound) -DVW_JOIN_BLOOM=ON -DVW_JOIN_FUSED_PROBE=ON" ;;
     # one-pass compound key concatenation (Q1, Q3, Q18 group keys), on the
     # cmake_defaults baseline: the vector kernels for every shape, selection-
@@ -579,6 +583,9 @@ config_flags() {
     # the default concatenation with fixed-size wide columns, and with padding
     hash_simd_concat_wide) echo "$(config_flags hash_simd_concat) -DVW_GROUP_CONCAT_WIDE=ON" ;;
     hash_simd_concat_wide_pad) echo "$(config_flags hash_simd_concat_wide) -DVW_GROUP_KEY_PAD=ON" ;;
+    # the same with the one-pass wide key packing (masked moves)
+    hash_simd_concat_wide_row) echo "$(config_flags hash_simd_concat_wide) -DVW_GROUP_CONCAT_WIDE_ROW=ON" ;;
+    hash_simd_concat_wide_row_all) echo "$(config_flags hash_simd_concat_wide_row) -DVW_GROUP_CONCAT_WIDE_ROW_FOR=all" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

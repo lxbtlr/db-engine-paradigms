@@ -36,6 +36,11 @@
 #if defined(__aarch64__) && defined(__ARM_NEON)
 #define VW_CONCAT_HAVE_NEON 1
 #endif
+/// WideRow's byte-masked loads and stores (AVX-512BW + VL, 16..64 bytes)
+#if defined(__x86_64__) && defined(__AVX512F__) && defined(__AVX512BW__) &&   \
+    defined(__AVX512VL__)
+#define VW_CONCAT_HAVE_MASKED 1
+#endif
 
 namespace vectorwise {
 namespace primitives {
@@ -44,8 +49,14 @@ namespace simd_concat {
 /// Row (VW_GROUP_CONCAT_ROW) is not a vector kernel: per row the key is
 /// assembled in a 64-bit register by a function instantiated for the key's
 /// column widths, one index load per row when every column reads the same
-/// selection vector, one store per row (keys up to 8 bytes)
-enum class Isa : uint8_t { Scalar, Avx2, Vbmi, Neon, Row };
+/// selection vector, one store per row (keys up to 8 bytes).
+/// WideRow (VW_GROUP_CONCAT_WIDE_ROW) is not one either: one pass over the
+/// rows for keys with a column of a width other than 1/2/4/8 bytes, per row
+/// one index load (one per selection-vector column if they read different
+/// selection vectors) and per column one move of the value into the packed
+/// row (AVX-512BW: a byte-masked load and store; else two overlapping
+/// fixed-size moves), for any widths up to 64 bytes
+enum class Isa : uint8_t { Scalar, Avx2, Vbmi, Neon, Row, WideRow };
 /// how a column read through a selection vector is brought into a register
 enum class SelLoad : uint8_t {
    Stage, ///< scalar loads into a stack buffer, then a vector load
@@ -61,6 +72,12 @@ using RowFn = void (*)(pos_t n, const char* const* data, const pos_t* sel,
 /// a row kernel that also hashes each key (VW_GROUP_CONCAT_HASH)
 using RowHashFn = void (*)(pos_t n, const char* const* data, const pos_t* sel,
                            char* out, uint64_t* hashes);
+struct Plan;
+/// a WideRow kernel (instantiated per number of dense and of selection-
+/// vector columns, register width, shared selection vector or not),
+/// reading its column tables from the plan
+using WideFn = void (*)(const Plan& p, pos_t n, const char* const* data,
+                        const pos_t* const* sel, char* out);
 
 struct Plan {
    bool ok = false;
@@ -89,6 +106,18 @@ struct Plan {
    alignas(64) uint8_t ctrl[kMaxCols][64] = {};
    /// VBMI: output bytes of a block that come from column c
    uint64_t lanes[kMaxCols] = {};
+   /// WideRow: the kernels and their register width (16/32/64 bytes,
+   /// 0 for the fallback); the columns, dense ones first (order[k] = the
+   /// column moved k-th); per column the byte mask of its width (masked
+   /// kernels) or its moves (fallback; moveCode A: one move of A = w
+   /// bytes, for 1/2/4/8/16/32; A | 0x80: two moves of A bytes, at 0 and
+   /// w - A, for A < w < 2A or w = 64, A = 2/4/8/16/32)
+   WideFn wide = nullptr;    ///< every sel column reads one selection vector
+   WideFn wideSep = nullptr; ///< each its own
+   uint32_t wideBytes = 0;
+   uint8_t order[kMaxCols] = {};
+   uint8_t moveCode[kMaxCols] = {};
+   uint64_t byteMask[kMaxCols] = {};
 };
 
 /// the widest kernel compiled in: VBMI, else AVX2, else NEON, else Scalar
@@ -104,10 +133,22 @@ bool build(Plan& p, Isa isa, SelLoad selLoad, size_t cols,
            const uint32_t* width, const uint32_t* offset, const bool* sel,
            uint32_t keySize);
 
+/// WideRow (also build(Isa::WideRow)): any shape of up to kMaxCols columns
+/// of 1..64 bytes, columns not overlapping within a key of keySize
+/// (padding bytes after them allowed, left untouched); the masked kernel
+/// where AVX-512BW is compiled in (forceFallback: the overlapping-moves
+/// kernel anyway, for tests and run_concatbench)
+bool buildWideRow(Plan& p, size_t cols, const uint32_t* width,
+                  const uint32_t* offset, const bool* sel, uint32_t keySize,
+                  bool forceFallback = false);
+/// whether WideRow has its masked kernels in this build
+bool wideRowMasked();
+
 /// pack rows [0, n): out[i * K + offset[c] ..] = column c of row i, where
 /// row i of column c is data[c][i] or data[c][sel[c][i]]. Writes up to
 /// kSlack bytes past n * K. Row: columns reading different selection
-/// vectors take the per-column copy.
+/// vectors take the per-column copy; WideRow: they take its kernel with
+/// one index load per column.
 void run(const Plan& p, pos_t n, const char* const* data,
          const pos_t* const* sel, char* out);
 
