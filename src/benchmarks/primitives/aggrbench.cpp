@@ -36,6 +36,11 @@
 //   Output: impl,groups,dist,sel_pct,aggs,vec,max_fill,vecs_per_flush,
 //           ns_per_selected_row,ok
 //
+// Update mode: run_aggrbench -U [-g groups,..] [-s selPct,..] [-d q1|uniform|zipf|runs]
+//   HashGroup::aggUpdate alone on Q1's aggregate shape: fused, kinds,
+//   bucket (VW_AGGR_FUSED_BUCKET) and direct, swept over the groups per
+//   vector; see namespace upd.
+//
 // Partitioned mode: run_aggrbench -P [-g groups,..] [-a aggs,..] [-s selPct,..]
 //                                    [-p partitions] [-G on|off|both]
 //                                    [-d q1|uniform|zipf|runs] [-r vecs]
@@ -48,6 +53,7 @@
 //           selected input row; phase 2 includes the output walk)
 #include "common/runtime/Hash.hpp"
 #include "common/runtime/Hashmap.hpp"
+#include "vectorwise/AggrDirect.hpp"
 #include "vectorwise/SimdAggr.hpp"
 #include <algorithm>
 #include <chrono>
@@ -1114,12 +1120,360 @@ void benchConfig(unsigned groups, int selPct, unsigned aggs) {
 
 } // namespace part
 
+//--- update mode (-U) --------------------------------------------------------
+// HashGroup::aggUpdate alone, on TPC-H Q1's aggregate shape (the only query
+// with more than one aggregate): 2 dense columns (Buffers of the selected
+// rows, read as col[i]), 2 columns read through the selection (col[sel[i]])
+// and COUNT(*). entries[i] comes from a stand-in lookup (key -> entry),
+// timed in every impl; lookup_only times it alone, subtract it. The kernels
+// are copies of Operators.cpp's:
+//   fused    VW_AGGR_FUSED's aggrFusedBlock<5> (identity sel, column of ones)
+//   kinds    VW_AGGR_KINDS's aggrKindsBlock<2, 2, true>
+//   bucket   VW_AGGR_FUSED_BUCKET's updateGroupsBucket: assignGroupIds,
+//            bucket starts, counting sort, aggrBucketBlock<2, 2>, += size;
+//            never falls back here (HashGroup does above 256 groups/vector)
+//   direct   VW_AGGR_DIRECT without KINDS (sumCountN / sumN per column),
+//            only where every vector touches <= 8 groups
+//   direct_multi  VW_AGGR_DIRECT with KINDS (sumMultiN)
+// Entries: [next][hash][5 aggregates][group id slot], 64 B-aligned, one per
+// group, never flushed. -d q1|uniform|zipf|runs as in -x.
+// Output: impl,groups,dist,sel_pct,vec,groups_per_vec,vecs_over_256,
+//         ns_per_selected_row,ok
+namespace upd {
+
+using namespace vectorwise::primitives;
+using Entry = runtime::Hashmap::EntryHeader;
+constexpr size_t kAggOff = 16, kAggs = 5, kIdOff = kAggOff + 8 * kAggs;
+constexpr size_t kEntrySize = 64; // kIdOff + 8 rounded up to the line
+constexpr uint32_t kSub = 4;      // HashGroup::kBucketSub
+constexpr uint32_t kBucketCap = 256; // VW_AGGR_FUSED_BUCKET_MAX_GROUPS
+// Q1: disc_price, charge dense; quantity, extendedprice through sel; count
+constexpr size_t kDenseOff[2] = {kAggOff, kAggOff + 8};
+constexpr size_t kSelOff[2] = {kAggOff + 16, kAggOff + 24};
+constexpr size_t kCountOff = kAggOff + 32;
+
+enum class Impl { LookupOnly, Fused, Kinds, Bucket, Direct, DirectMulti };
+const char* implName(Impl i) {
+   switch (i) {
+   case Impl::LookupOnly: return "lookup_only";
+   case Impl::Fused: return "fused";
+   case Impl::Kinds: return "kinds";
+   case Impl::Bucket: return "bucket";
+   case Impl::Direct: return "direct";
+   default: return "direct_multi";
+   }
+}
+
+inline int64_t& at(Entry* e, size_t off) {
+   return *reinterpret_cast<int64_t*>(reinterpret_cast<char*>(e) + off);
+}
+
+/// aggrFusedBlock<K>
+template <size_t K>
+__attribute__((noinline)) void fusedBlock(pos_t n, Entry** __restrict__ entries,
+                                          const int64_t* const* cols,
+                                          const pos_t* const* sels,
+                                          const size_t* offsets) {
+   const int64_t* c[K];
+   const pos_t* s[K];
+   size_t o[K];
+   for (size_t d = 0; d < K; ++d) c[d] = cols[d], s[d] = sels[d], o[d] = offsets[d];
+   for (pos_t i = 0; i < n; i++) {
+      char* e = reinterpret_cast<char*>(entries[i]);
+      for (size_t d = 0; d < K; ++d)
+         *reinterpret_cast<int64_t*>(e + o[d]) += c[d][s[d][i]];
+   }
+}
+
+/// aggrKindsBlock<KD, KS, Count>
+template <size_t KD, size_t KS, bool Count>
+__attribute__((noinline)) void kindsBlock(pos_t n, Entry** __restrict__ entries,
+                                          const int64_t* const* dcols, const size_t* doffs,
+                                          const pos_t* __restrict__ sel,
+                                          const int64_t* const* scols, const size_t* soffs,
+                                          size_t countOff) {
+   const int64_t* dc[KD + 1];
+   size_t od[KD + 1];
+   const int64_t* sc[KS + 1];
+   size_t os[KS + 1];
+   for (size_t d = 0; d < KD; ++d) dc[d] = dcols[d], od[d] = doffs[d];
+   for (size_t d = 0; d < KS; ++d) sc[d] = scols[d], os[d] = soffs[d];
+   for (pos_t i = 0; i < n; i++) {
+      char* e = reinterpret_cast<char*>(entries[i]);
+      for (size_t d = 0; d < KD; ++d) *reinterpret_cast<int64_t*>(e + od[d]) += dc[d][i];
+      if constexpr (KS > 0) {
+         const pos_t s = sel[i];
+         for (size_t d = 0; d < KS; ++d) *reinterpret_cast<int64_t*>(e + os[d]) += sc[d][s];
+      }
+      if constexpr (Count) *reinterpret_cast<int64_t*>(e + countOff) += 1;
+   }
+}
+
+/// aggrBucketBlock<KD, KS>
+template <size_t KD, size_t KS>
+__attribute__((noinline)) void bucketBlock(uint32_t groups, Entry* const* __restrict__ touched,
+                                           const uint32_t* __restrict__ begin,
+                                           const uint32_t* __restrict__ size,
+                                           const pos_t* __restrict__ rows,
+                                           const int64_t* const* dcols, const size_t* doffs,
+                                           const pos_t* const* ssels,
+                                           const int64_t* const* scols, const size_t* soffs) {
+   const int64_t* dc[KD + 1];
+   size_t od[KD + 1];
+   const pos_t* ss[KS + 1];
+   const int64_t* sc[KS + 1];
+   size_t os[KS + 1];
+   for (size_t d = 0; d < KD; ++d) dc[d] = dcols[d], od[d] = doffs[d];
+   for (size_t d = 0; d < KS; ++d) ss[d] = ssels[d], sc[d] = scols[d], os[d] = soffs[d];
+   for (uint32_t g = 0; g < groups; ++g) {
+      char* e = reinterpret_cast<char*>(touched[g]);
+      int64_t a[KD + 1], b[KS + 1];
+      for (size_t d = 0; d < KD; ++d) a[d] = *reinterpret_cast<int64_t*>(e + od[d]);
+      for (size_t d = 0; d < KS; ++d) b[d] = *reinterpret_cast<int64_t*>(e + os[d]);
+      for (uint32_t k = begin[g], end = k + size[g]; k < end; ++k) {
+         const pos_t r = rows[k];
+         for (size_t d = 0; d < KD; ++d) a[d] += dc[d][r];
+         for (size_t d = 0; d < KS; ++d) b[d] += sc[d][ss[d][r]];
+      }
+      for (size_t d = 0; d < KD; ++d) *reinterpret_cast<int64_t*>(e + od[d]) = a[d];
+      for (size_t d = 0; d < KS; ++d) *reinterpret_cast<int64_t*>(e + os[d]) = b[d];
+   }
+}
+
+/// HashGroup's per-operator state for the bucket and direct paths
+struct State {
+   std::vector<Entry*> touched;
+   std::vector<uint16_t> lid, gidr;
+   std::vector<uint32_t> cnt, start, size, begin;
+   std::vector<pos_t> rows, identity;
+   std::vector<int64_t> ones;
+   explicit State(size_t maxGroups)
+       : touched(maxGroups), lid(vecSize), gidr(vecSize), cnt(maxGroups * kSub),
+         start(maxGroups * kSub), size(maxGroups), begin(maxGroups), rows(vecSize),
+         identity(vecSize), ones(vecSize, 1) {
+      for (size_t i = 0; i < vecSize; ++i) identity[i] = pos_t(i);
+   }
+
+   /// assignGroupIds<Count, Gid>, uncapped
+   template <bool Count, bool Gid>
+   uint32_t assignIds(pos_t n, Entry** __restrict__ entries, const pos_t* __restrict__ gsel) {
+      Entry** __restrict__ t = touched.data();
+      uint16_t* __restrict__ l_ = lid.data();
+      uint32_t* __restrict__ c = cnt.data();
+      uint16_t* __restrict__ g = gidr.data();
+      uint32_t used = 0;
+      for (pos_t i = 0; i < n; ++i) {
+         Entry* e = entries[i];
+         auto* slot = reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(e) + kIdOff);
+         uint32_t l = *slot;
+         if (l >= used || t[l] != e) {
+            l = used++;
+            t[l] = e;
+            *slot = l;
+            if constexpr (Count)
+               for (uint32_t s = 0; s < kSub; ++s) c[l * kSub + s] = 0;
+         }
+         l_[i] = uint16_t(l);
+         if constexpr (Count) ++c[l * kSub + (i & (kSub - 1))];
+         if constexpr (Gid) g[gsel[i]] = uint16_t(l);
+      }
+      return used;
+   }
+};
+
+__attribute__((noinline)) void updateFused(State& st, pos_t n, Entry** entries,
+                                           const int64_t* const* dense, const pos_t* sel,
+                                           const int64_t* const* selCols) {
+   const int64_t* cols[5] = {dense[0], dense[1], selCols[0], selCols[1], st.ones.data()};
+   const pos_t* sels[5] = {st.identity.data(), st.identity.data(), sel, sel,
+                           st.identity.data()};
+   const size_t offs[5] = {kDenseOff[0], kDenseOff[1], kSelOff[0], kSelOff[1], kCountOff};
+   fusedBlock<5>(n, entries, cols, sels, offs);
+}
+
+__attribute__((noinline)) void updateKinds(State&, pos_t n, Entry** entries,
+                                           const int64_t* const* dense, const pos_t* sel,
+                                           const int64_t* const* selCols) {
+   kindsBlock<2, 2, true>(n, entries, dense, kDenseOff, sel, selCols, kSelOff, kCountOff);
+}
+
+__attribute__((noinline)) void updateBucket(State& st, pos_t n, Entry** entries,
+                                            const int64_t* const* dense, const pos_t* sel,
+                                            const int64_t* const* selCols) {
+   const uint32_t t = st.assignIds<true, false>(n, entries, nullptr);
+   uint32_t* __restrict__ cnt = st.cnt.data();
+   uint32_t* __restrict__ start = st.start.data();
+   uint32_t* __restrict__ size = st.size.data();
+   uint32_t* __restrict__ begin = st.begin.data();
+   pos_t* __restrict__ rows = st.rows.data();
+   const uint16_t* __restrict__ lid = st.lid.data();
+   uint32_t pos = 0;
+   for (uint32_t g = 0; g < t; ++g) {
+      begin[g] = pos;
+      for (uint32_t s = 0; s < kSub; ++s) {
+         start[g * kSub + s] = pos;
+         pos += cnt[g * kSub + s];
+      }
+      size[g] = pos - begin[g];
+   }
+   for (pos_t i = 0; i < n; ++i) rows[start[lid[i] * kSub + (i & (kSub - 1))]++] = i;
+   const pos_t* ssels[2] = {sel, sel};
+   bucketBlock<2, 2>(t, st.touched.data(), begin, size, rows, dense, kDenseOff, ssels, selCols,
+                     kSelOff);
+   for (uint32_t g = 0; g < t; ++g) at(st.touched[g], kCountOff) += int64_t(size[g]);
+}
+
+template <bool Multi>
+__attribute__((noinline)) void updateDirect(State& st, pos_t n, Entry** entries,
+                                            const int64_t* const* dense, const pos_t* sel,
+                                            const int64_t* const* selCols) {
+   namespace ad = aggr_direct;
+   const size_t positions = n ? size_t(sel[n - 1]) + 1 : 0;
+   std::fill(st.gidr.data(), st.gidr.data() + positions, ad::kNone);
+   const uint32_t t = st.assignIds<false, true>(n, entries, sel);
+   const uint16_t* lid = st.lid.data();
+   const uint16_t* gidr = st.gidr.data();
+   int64_t cnt[8] = {};
+   auto addTo = [&](const int64_t* v, size_t off) {
+      for (uint32_t g = 0; g < t; ++g) at(st.touched[g], off) += v[g];
+   };
+   if constexpr (Multi) {
+      int64_t accs[ad::kMultiMax * 8];
+      auto multi = [&](const int64_t* const* cols, const size_t* offs, const uint16_t* ids,
+                       size_t rows, bool count) {
+         for (unsigned first = 0; first < 2; first += ad::kMultiMax) {
+            const unsigned k = std::min<unsigned>(ad::kMultiMax, 2 - first);
+            std::fill(accs, accs + ad::kMultiMax * 8, 0);
+            ad::sumMultiN(t, k, count && first == 0, ids, rows, cols + first, accs, cnt);
+            for (unsigned j = 0; j < k; ++j) addTo(accs + j * 8, offs[first + j]);
+         }
+      };
+      multi(dense, kDenseOff, lid, n, true);
+      multi(selCols, kSelOff, gidr, positions, false);
+   } else {
+      int64_t acc[8];
+      std::fill(acc, acc + t, 0);
+      ad::sumCountN(t, lid, n, dense[0], acc, cnt);
+      addTo(acc, kDenseOff[0]);
+      std::fill(acc, acc + t, 0);
+      ad::sumN(t, lid, n, dense[1], acc);
+      addTo(acc, kDenseOff[1]);
+      for (size_t d = 0; d < 2; ++d) {
+         std::fill(acc, acc + t, 0);
+         ad::sumN(t, gidr, positions, selCols[d], acc);
+         addTo(acc, kSelOff[d]);
+      }
+   }
+   addTo(cnt, kCountOff);
+}
+
+using UpdateFn = void (*)(State&, pos_t, Entry**, const int64_t* const*, const pos_t*,
+                          const int64_t* const*);
+
+void benchConfig(unsigned groups, int selPct) {
+   std::mt19937_64 rng(groups * 1000003ull + selPct * 101 + 7);
+   const xover::Stream s = xover::makeStream(groups, selPct, rng);
+   // columns read through the selection: base-table columns, streamed
+   std::vector<std::vector<int64_t>> selColData(2, std::vector<int64_t>(xover::kColVecs * vecSize));
+   for (auto& c : selColData)
+      for (auto& v : c) v = int64_t(rng() % 2000001) - 1000000;
+   // dense columns: per-vector Buffers (projection outputs), hot
+   std::vector<std::vector<int64_t>> denseData(2, std::vector<int64_t>(vecSize));
+   for (auto& c : denseData)
+      for (auto& v : c) v = int64_t(rng() % 2000001) - 1000000;
+   const int64_t* dense[2] = {denseData[0].data(), denseData[1].data()};
+
+   // groups touched per vector, over the vectors one trial walks
+   size_t touchedSum = 0, over = 0;
+   std::vector<uint32_t> seen(groups, UINT32_MAX);
+   unsigned maxPerVec = 0;
+   for (size_t v = 0; v < s.vecs(); ++v) {
+      unsigned d = 0;
+      for (size_t i = s.off[v]; i < s.off[v + 1]; ++i)
+         if (seen[s.key[i]] != v) seen[s.key[i]] = uint32_t(v), ++d;
+      touchedSum += d, over += d > kBucketCap, maxPerVec = std::max(maxPerVec, d);
+   }
+   const double perVec = double(touchedSum) / double(s.vecs());
+
+   // expected per-entry sums
+   std::vector<int64_t> expected(size_t(groups) * kAggs, 0);
+   size_t totalRows = 0;
+   for (size_t v = 0; v < reps; ++v) {
+      const size_t sv = v % s.vecs();
+      const size_t colBase = (v % xover::kColVecs) * vecSize;
+      for (size_t i = s.off[sv], j = 0; i < s.off[sv + 1]; ++i, ++j) {
+         int64_t* x = &expected[size_t(s.key[i]) * kAggs];
+         x[0] += dense[0][j], x[1] += dense[1][j];
+         x[2] += selColData[0][colBase + s.sel[i]];
+         x[3] += selColData[1][colBase + s.sel[i]];
+         x[4] += 1;
+      }
+      totalRows += s.off[sv + 1] - s.off[sv];
+   }
+
+   auto* pool = static_cast<uint8_t*>(std::aligned_alloc(64, size_t(groups) * kEntrySize));
+   if (!pool) throw std::bad_alloc();
+   std::vector<Entry*> slot(groups);
+   for (unsigned g = 0; g < groups; ++g)
+      slot[g] = reinterpret_cast<Entry*>(pool + size_t(g) * kEntrySize);
+   // entries in allocation order of a shuffled key sequence, as the table
+   // creates them in first-seen order
+   std::shuffle(slot.begin(), slot.end(), rng);
+   std::vector<Entry*> matches(vecSize);
+   State st(std::min<size_t>(groups, vecSize));
+
+   std::vector<std::pair<Impl, UpdateFn>> impls = {
+       {Impl::LookupOnly, nullptr},
+       {Impl::Fused, &updateFused},
+       {Impl::Kinds, &updateKinds},
+       {Impl::Bucket, &updateBucket}};
+   if (maxPerVec <= aggr_direct::kMaxGroups) {
+      impls.push_back({Impl::Direct, &updateDirect<false>});
+      impls.push_back({Impl::DirectMulti, &updateDirect<true>});
+   }
+   for (auto [impl, fn] : impls) {
+      auto trial = [&] {
+         for (unsigned g = 0; g < groups; ++g) std::memset(slot[g], 0, kEntrySize);
+         for (size_t v = 0; v < reps; ++v) {
+            const size_t sv = v % s.vecs();
+            const pos_t n = pos_t(s.off[sv + 1] - s.off[sv]);
+            const pos_t* sel = s.sel.data() + s.off[sv];
+            const uint32_t* keys = s.key.data() + s.off[sv];
+            const size_t colBase = (v % xover::kColVecs) * vecSize;
+            const int64_t* selCols[2] = {selColData[0].data() + colBase,
+                                         selColData[1].data() + colBase};
+            for (pos_t i = 0; i < n; ++i) {
+               Entry* e = slot[keys[i]];
+               e->hash = keys[i]; // touches the entry, like the key compare
+               matches[i] = e;
+            }
+            if (fn) fn(st, n, matches.data(), dense, sel, selCols);
+            asm volatile("" ::: "memory");
+         }
+      };
+      trial(); // warm-up
+      bool ok = true;
+      if (impl != Impl::LookupOnly)
+         for (unsigned g = 0; g < groups && ok; ++g)
+            for (size_t a = 0; a < kAggs; ++a)
+               ok &= at(slot[g], kAggOff + 8 * a) == expected[size_t(g) * kAggs + a];
+      const double ns = bestNs(trial, totalRows);
+      sink = at(slot[0], kAggOff);
+      std::printf("%s,%u,%s,%d,%zu,%.2f,%zu,%.4f,%s\n", implName(impl), groups, dist.c_str(),
+                  selPct, vecSize, perVec, over, ns, ok ? "ok" : "MISMATCH");
+      std::fflush(stdout);
+   }
+   std::free(pool);
+}
+
+} // namespace upd
+
 } // namespace
 
 int main(int argc, char** argv) {
    int opt;
-   bool crossover = false, partitioned = false, groupsSet = false;
-   while ((opt = getopt(argc, argv, "v:m:r:g:s:d:xa:f:z:Pp:G:")) != -1) {
+   bool crossover = false, partitioned = false, update = false, groupsSet = false;
+   while ((opt = getopt(argc, argv, "v:m:r:g:s:d:xa:f:z:Pp:G:U")) != -1) {
       switch (opt) {
       case 'v': vecSize = std::strtoull(optarg, nullptr, 10); break;
       case 'm': mode = optarg; break;
@@ -1132,6 +1486,7 @@ int main(int argc, char** argv) {
       case 'f': xover::maxFill = std::strtoull(optarg, nullptr, 10); break;
       case 'z': xover::zipfS = std::strtod(optarg, nullptr); break;
       case 'P': partitioned = true; break;
+      case 'U': update = true; break;
       case 'p': part::nrPartitions = std::strtoull(optarg, nullptr, 10); break;
       case 'G': part::globalDirect = optarg; break;
       default:
@@ -1141,10 +1496,30 @@ int main(int argc, char** argv) {
                       "       %s -x [-g groups,..] [-a aggs,..] [-s selPct,..] "
                       "[-f maxFill] [-d q1|uniform|zipf|runs] [-z skew] [-r vecs] [-v vec]\n"
                       "       %s -P [-g groups,..] [-a aggs,..] [-s selPct,..] [-p partitions] "
-                      "[-G on|off|both] [-d q1|uniform|zipf|runs] [-z skew] [-r vecs] [-v vec]\n",
-                      argv[0], argv[0], argv[0]);
+                      "[-G on|off|both] [-d q1|uniform|zipf|runs] [-z skew] [-r vecs] [-v vec]\n"
+                      "       %s -U [-g groups,..] [-s selPct,..] [-d q1|uniform|zipf|runs] "
+                      "[-z skew] [-r vecs] [-v vec]\n",
+                      argv[0], argv[0], argv[0], argv[0]);
          return 1;
       }
+   }
+   if (update) {
+      if (vecSize == 0 || vecSize > 1024) {
+         std::fprintf(stderr, "-U: vec must be 1..1024\n");
+         return 1;
+      }
+      if (!groupsSet)
+         groupList = {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 4096, 65536, 1048576};
+      for (unsigned g : groupList)
+         if (g == 0) {
+            std::fprintf(stderr, "groups must be >= 1\n");
+            return 1;
+         }
+      std::printf("impl,groups,dist,sel_pct,vec,groups_per_vec,vecs_over_256,"
+                  "ns_per_selected_row,ok\n");
+      for (int s : selList)
+         for (unsigned g : groupList) upd::benchConfig(g, s);
+      return 0;
    }
    if (partitioned) {
       const size_t p = part::nrPartitions;
