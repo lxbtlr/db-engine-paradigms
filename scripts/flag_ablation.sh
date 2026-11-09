@@ -22,8 +22,8 @@
 #   hash_crc32_vpclmul   VW_USE_CRC32 + VW_CRC32_FAST + VW_CRC32_VPCLMUL
 #                        (needs VPCLMULQDQ: Ice Lake+, Sapphire Rapids, Zen 4)
 #
-# Join configs: the hash join probe on top of HASH_BASE + VW_USE_CRC32 +
-# VW_CRC32_FAST (the recommended hash):
+# Join configs: the hash join probe on top of HASH_BASE (MurmurHash, the
+# Tectorwise default; before 2026-11-09 VW_USE_CRC32 + VW_CRC32_FAST):
 #   join_base            joinAllParallel / joinSelParallel (today)
 #   join_twophase        VW_JOIN_TWOPHASE (group prefetch, run_joinbench J2) for
 #                        directories >= L1 (>= L2 from 1316560 to 3c649f9;
@@ -61,7 +61,8 @@
 #   join_all_valid
 #   grp_base grp_dispatch proj_compound pc_having grp_having jd_all_pc
 #
-# Group-by configs (study/VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
+# Group-by configs (study/VW_OPPORTUNITY_STUDY.md), on HASH_BASE (MurmurHash;
+# before 2026-11-09 CRC32 + FAST):
 #   grp_base             today's HashGroup
 #   grp_batch            VW_GROUP_BATCH_CREATE
 #   grp_global           VW_GROUP_GLOBAL_DIRECT (untagged directory; before
@@ -506,9 +507,14 @@ config_flags() {
     # (all OFF: MurMur hash, no SIMD selection); AUTOVEC still applies (build_flags)
     cmake_defaults)      ;;
     # parity ladder: cmake_defaults plus only the options that give VW what
-    # Hyper's plans already have (PAPER_NARRATIVE.md, thrust 1), one per step
+    # Hyper's plans already have (PAPER_NARRATIVE.md, thrust 1), one per step.
+    # Since 2026-11-09 the ladder hashes with MurmurHash (user: Tectorwise
+    # hashes with Murmur, Typer keeps CRC32): par_semi builds on
+    # cmake_defaults, par_crc32 is kept on its own; par_* / fair_* results
+    # from before that are on CRC32. CRC32 on any config:
+    # VW_FLAGS="VW_USE_CRC32=ON VW_CRC32_FAST=ON"
     par_crc32)           echo "-DVW_USE_CRC32=ON" ;;
-    par_semi)            echo "$(config_flags par_crc32) -DVW_JOIN_SEMI=ON" ;;
+    par_semi)            echo "-DVW_JOIN_SEMI=ON" ;;
     par_having)          echo "$(config_flags par_semi) -DVW_GROUP_HAVING=ON" ;;
     # safe ladder: par_having plus jd_all_pc's engine options, one group per
     # step; safe_compound is the last step and has jd_all_pc's defines.
@@ -518,7 +524,8 @@ config_flags() {
     # fused aggregates: latency). (safe_runheads
     # was dropped with VW_GROUP_RUN_HEADS on the aggregation branch;
     # safe_kinds is VW_AGGR_KINDS, the renamed VW_AGGR_FUSED_KINDS.)
-    safe_fast)           echo "$(config_flags par_having) -DVW_CRC32_FAST=ON" ;;
+    # Kept on CRC32 (flags spelled out) so it keeps its meaning.
+    safe_fast)           echo "-DVW_USE_CRC32=ON -DVW_JOIN_SEMI=ON -DVW_GROUP_HAVING=ON -DVW_CRC32_FAST=ON" ;;
     safe_sel)            echo "$(config_flags safe_fast) $SEL" ;;
     safe_gdisp)          echo "$(config_flags safe_sel) $GDISP" ;;
     safe_kinds)          echo "$(config_flags safe_gdisp) -DVW_AGGR_KINDS=ON" ;;
@@ -535,8 +542,10 @@ config_flags() {
     # (Bloom filter, fused probe; both since removed).
     # (fair_jdisp, join dispatch alone, was removed with VW_JOIN_DISPATCH: it
     # always took the plain hash probe, a no-op step.)
-    # fair_compound ends the fair pool.
-    fair_fast)           echo "$(config_flags par_having) -DVW_CRC32_FAST=ON" ;;
+    # fair_compound ends the fair pool. fair_fast: the SIMD MurmurHash
+    # kernels in the target's widest tier (AVX-512, AVX2 on dubliner and
+    # AVX2-only machines, NEON); before 2026-11-09, VW_CRC32_FAST on CRC32.
+    fair_fast)           echo "$(config_flags par_having) -DVW_SIMD_HASH=ON" ;;
     fair_sel)            echo "$(config_flags fair_fast) $SEL" ;;
     fair_gdisp)          echo "$(config_flags fair_sel) $GDISP" ;;
     fair_kinds)          echo "$(config_flags fair_gdisp) -DVW_AGGR_KINDS=ON" ;;
@@ -618,8 +627,9 @@ config_flags() {
     q1s_simdhash256)     echo "$Q1S -DVW_SIMD_HASH=ON -DVW_SIMD_HASH_WIDTH=256" ;;
     q1s_crc)             echo "$Q1S -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     q1s_vpclmul)         echo "$Q1S -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON -DVW_CRC32_VPCLMUL=ON" ;;
-    # join configs: HASH_BASE + CRC32 + FAST, then the probe option
-    join_base)           echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
+    # join configs: HASH_BASE (MurmurHash; CRC32 + FAST before 2026-11-09),
+    # then the probe option
+    join_base)           echo "$(config_flags "$HASH_BASE")" ;;
     join_twophase)       echo "$(config_flags join_base) -DVW_JOIN_TWOPHASE=ON" ;;
     join_twophase_l2)    echo "$(config_flags join_base) -DVW_JOIN_TWOPHASE=ON -DVW_JOIN_TWOPHASE_CACHE=L2" ;;
     join_simd)           echo "$(config_flags join_base) -DVW_JOIN_SIMD=ON" ;;
@@ -630,8 +640,9 @@ config_flags() {
     join_all_valid)      echo "$(config_flags join_base) $GDISP" ;;
     jd_all)              echo "$(config_flags join_semi) -DVW_GROUP_HAVING=ON $GDISP" ;;
     jd_all_pc)           echo "$(config_flags jd_all) -DVW_AGGR_KINDS=ON -DVW_PROJ_COMPOUND=ON" ;;
-    # group-by configs: HASH_BASE + CRC32 + FAST, then the HashGroup options
-    grp_base)            echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
+    # group-by configs: HASH_BASE (MurmurHash; CRC32 + FAST before
+    # 2026-11-09), then the HashGroup options
+    grp_base)            echo "$(config_flags "$HASH_BASE")" ;;
     grp_batch)           echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON" ;;
     grp_global)          echo "$(config_flags grp_base) -DVW_GROUP_GLOBAL_DIRECT=ON" ;;
     grp_q18)             echo "$(config_flags grp_base) -DVW_GROUP_BATCH_CREATE=ON -DVW_GROUP_GLOBAL_DIRECT=ON" ;;
@@ -813,11 +824,11 @@ if [ "$(wc -l < "$OUT/hash.csv")" -gt 1 ]; then
   column -t -s, "$OUT/hash.csv" | tee -a "$OUT/driver.log"
 fi
 if [ "$(wc -l < "$OUT/group.csv")" -gt 1 ]; then
-  log "group-by configs (base: $HASH_BASE + CRC32 + FAST), speedup vs grp_base:"
+  log "group-by configs (base: $HASH_BASE), speedup vs grp_base:"
   column -t -s, "$OUT/group.csv" | tee -a "$OUT/driver.log"
 fi
 if [ "$(wc -l < "$OUT/join.csv")" -gt 1 ]; then
-  log "join configs (base: $HASH_BASE + CRC32 + FAST), speedup vs join_base:"
+  log "join configs (base: $HASH_BASE), speedup vs join_base:"
   column -t -s, "$OUT/join.csv" | tee -a "$OUT/driver.log"
 fi
 log "results: $OUT"
