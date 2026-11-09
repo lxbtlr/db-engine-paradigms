@@ -26,8 +26,9 @@
 # VW_CRC32_FAST (the recommended hash):
 #   join_base            joinAllParallel / joinSelParallel (today)
 #   join_twophase        VW_JOIN_TWOPHASE (group prefetch, run_joinbench J2) for
-#                        directories >= L2 (before 2026-11-09: >= 4096 slots)
-#   join_twophase_l1     the same for directories >= L1
+#                        directories >= L1 (>= L2 from 1316560 to 3c649f9;
+#                        >= 4096 slots before)
+#   join_twophase_l2     the same for directories >= L2
 #   join_simd            VW_JOIN_SIMD (AVX-512 probes, run_joinbench J4;
 #                        x86 AVX-512F)
 #   nj_tag               VW_NEW_JOIN, full = tag hit (andrew_pseudocode.md)
@@ -195,7 +196,7 @@ COMPILERS=${COMPILERS:-"gcc clang"}
 FLAG_CONFIGS="cmake_defaults default add_pos16 add_crc32 add_huge2mb
              tuned drop_pos16 drop_crc32 drop_huge2mb"
 HASH_CONFIGS="hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul"
-JOIN_CONFIGS="join_base join_twophase join_twophase_l1 join_simd nj_tag nj_occ join_semi join_all jd_all jd_all_pc join_all_valid"
+JOIN_CONFIGS="join_base join_twophase join_twophase_l2 join_simd nj_tag nj_occ join_semi join_all jd_all jd_all_pc join_all_valid"
 GROUP_CONFIGS="grp_base grp_batch grp_global grp_q18 grp_all grp_disp_only grp_dispatch grp_bucket grp_kinds grp_direct grp_direct_only grp_direct_bucket direct_pc grp_direct_kinds direct_kinds_pc proj_compound pc_having grp_having"
 CONFIGS=${CONFIGS:-"$FLAG_CONFIGS $HASH_CONFIGS $JOIN_CONFIGS $GROUP_CONFIGS"}
 # config group: the TPC-valid join and group-by configs (see header)
@@ -294,7 +295,7 @@ esac
 PERF=${PERF:-}
 case "$PERF" in ''|stat|record) ;; *) echo "PERF must be stat or record" >&2; exit 2 ;; esac
 # VW_FLAGS: extra CMake options applied on top of every config, last -D wins
-# ("VW_JOIN_TWOPHASE=ON VW_JOIN_TWOPHASE_CACHE=L1"). Configs are then named
+# ("VW_JOIN_TWOPHASE=ON VW_JOIN_TWOPHASE_CACHE=L2"). Configs are then named
 # <config>_x<hash> after the sorted option list (vw_flags.txt maps it back).
 VW_FLAGS=${VW_FLAGS:-}
 VW_FLAGS_D= VW_FLAGS_HASH=
@@ -411,7 +412,7 @@ summarize() {
       family(out "/hash.csv", "compiler,query,hash_config,median_ms,speedup_vs_murmur",
              "hash_murmur hash_simd hash_crc32 hash_crc32_fast hash_crc32_vpclmul", "hash_murmur")
       family(out "/join.csv", "compiler,query,join_config,median_ms,speedup_vs_base",
-             "join_base join_twophase join_twophase_l1 join_simd nj_tag nj_occ join_semi join_all jd_all jd_all_pc join_all_valid", "join_base")
+             "join_base join_twophase join_twophase_l2 join_simd nj_tag nj_occ join_semi join_all jd_all jd_all_pc join_all_valid", "join_base")
       family(out "/group.csv", "compiler,query,group_config,median_ms,speedup_vs_base",
              "grp_base grp_batch grp_global grp_q18 grp_all grp_disp_only grp_dispatch grp_bucket grp_kinds grp_direct grp_direct_only grp_direct_bucket direct_pc grp_direct_kinds direct_kinds_pc proj_compound pc_having grp_having", "grp_base")
     }' $([ -f "$OUT/counters.csv" ] && echo "$OUT/counters.csv") "$OUT/timing.csv"
@@ -479,7 +480,7 @@ flags() {
   echo "-DVW_POS_16=$1 -DVW_USE_CRC32=$2 -DHUGE_2MB_MALLOC_HUGE=$3" \
        "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg -DVW_SIMD_SEL_UNROLL=1" \
        "-DVW_SIMD_SEL_GATHER=scalar -DVW_SIMD_SEL_CHAR=OFF -DVW_SIMD_HASH=OFF -DVW_JOIN_PREFETCH=OFF" \
-       "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF -DVW_JOIN_TWOPHASE=OFF -DVW_JOIN_TWOPHASE_CACHE=L2 -DVW_JOIN_SIMD=OFF" \
+       "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF -DVW_JOIN_TWOPHASE=OFF -DVW_JOIN_TWOPHASE_CACHE=L1 -DVW_JOIN_SIMD=OFF" \
        "-DVW_NEW_JOIN=OFF -DVW_NEW_JOIN_FULL=tag -DVW_SIMD_HASH_GATHER=insert" \
        "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_GROUP_GLOBAL_TAGS=OFF -DVW_GROUP_AGGR=OFF -DVW_GROUP_AGGR_SEL=OFF" \
        "-DVW_AGGR_FUSED=OFF -DVW_AGGR_FUSED_BUCKET=OFF -DVW_AGGR_DIRECT=OFF -DVW_AGGR_DIRECT_ISA=auto -DVW_AGGR_KINDS=OFF -DVW_PROJ_COMPOUND=OFF" \
@@ -567,7 +568,7 @@ config_flags() {
     # profiling baseline)
     base_simdhash)       echo "$(config_flags cmake_defaults) -DVW_SIMD_HASH=ON" ;;
     # VW_JOIN_TWOPHASE on cmake_defaults: the two-phase probe for directories
-    # of at least L2 (the default) or L1 of the machine it runs on
+    # of at least L1 (the default) or L2 of the machine it runs on
     base_tp_l2)          echo "$(config_flags cmake_defaults) -DVW_JOIN_TWOPHASE=ON -DVW_JOIN_TWOPHASE_CACHE=L2" ;;
     base_tp_l1)          echo "$(config_flags cmake_defaults) -DVW_JOIN_TWOPHASE=ON -DVW_JOIN_TWOPHASE_CACHE=L1" ;;
     # the default concatenation with fixed-size wide columns, and with padding
@@ -608,7 +609,7 @@ config_flags() {
     # join configs: HASH_BASE + CRC32 + FAST, then the probe option
     join_base)           echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     join_twophase)       echo "$(config_flags join_base) -DVW_JOIN_TWOPHASE=ON" ;;
-    join_twophase_l1)    echo "$(config_flags join_base) -DVW_JOIN_TWOPHASE=ON -DVW_JOIN_TWOPHASE_CACHE=L1" ;;
+    join_twophase_l2)    echo "$(config_flags join_base) -DVW_JOIN_TWOPHASE=ON -DVW_JOIN_TWOPHASE_CACHE=L2" ;;
     join_simd)           echo "$(config_flags join_base) -DVW_JOIN_SIMD=ON" ;;
     nj_tag)              echo "$(config_flags join_base) -DVW_NEW_JOIN=ON -DVW_NEW_JOIN_FULL=tag" ;;
     nj_occ)              echo "$(config_flags join_base) -DVW_NEW_JOIN=ON -DVW_NEW_JOIN_FULL=occupied" ;;

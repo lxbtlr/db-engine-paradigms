@@ -208,18 +208,20 @@ inline void joinPrefetchStep(runtime::Hashmap& ht,
 //      candidates go to the followup buffers
 //   C  compare hashes, emit matches, queue chain successors; compacts the
 //      followup buffers in place (write index <= read index)
-// A directory that stays cache-resident gains nothing from the prefetches and
-// pays for the extra loops (TPC-H Q18's 57-order build: 0.9x in run_joinbench
-// on every machine), so a join uses the two-phase probe only when its
-// directory (8 B per slot) is at least the cache level
-// VW_JOIN_TWOPHASE_CACHE_LEVEL (runtime::cacheBytes, a hardware fact; L2 by
-// default); VW_JOIN_TWOPHASE_MIN_SLOTS only when that size is unknown.
+// A directory that stays in L1 gains nothing from the prefetches and pays for
+// the extra loops (TPC-H Q18's 57-order build: 0.9x in run_joinbench on every
+// machine), so a join uses the two-phase probe only when its directory (8 B
+// per slot) is at least the cache level VW_JOIN_TWOPHASE_CACHE_LEVEL
+// (runtime::cacheBytes, a hardware fact); VW_JOIN_TWOPHASE_MIN_SLOTS only
+// when that size is unknown. L1 by default: directories between L1 and L2
+// still gain (SF1 Q9 +3-5% over the L2 rule on three machines), and at SF10
+// both rules pick the same joins (bridge runs 2026-11-09-twophase-sf1/-sf10).
 #ifdef VW_JOIN_TWOPHASE
 #ifndef VW_JOIN_TWOPHASE_MIN_SLOTS
 #define VW_JOIN_TWOPHASE_MIN_SLOTS 4096
 #endif
 #ifndef VW_JOIN_TWOPHASE_CACHE_LEVEL
-#define VW_JOIN_TWOPHASE_CACHE_LEVEL 2
+#define VW_JOIN_TWOPHASE_CACHE_LEVEL 1
 #endif
 namespace {
 constexpr size_t kTwoPhaseMinSlots = VW_JOIN_TWOPHASE_MIN_SLOTS;

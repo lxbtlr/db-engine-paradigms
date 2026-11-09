@@ -505,11 +505,11 @@ endif(VW_JOIN_PREFETCH)
 # VW_JOIN_TWOPHASE: group prefetching in the hash join probe (first pass of
 # joinAllParallel / joinSelParallel in three loops, see Operators.cpp);
 # a join uses it when its directory is at least the VW_JOIN_TWOPHASE_CACHE
-# level (L1 or L2, default L2; size from sysfs, runtime::cacheBytes), others
+# level (L1 or L2, default L1; size from sysfs, runtime::cacheBytes), others
 # keep the one-loop path; VW_JOIN_TWOPHASE_MIN_SLOTS only when the cache size
 # cannot be read. run_joinbench variant J2.
 OPTION(VW_JOIN_TWOPHASE "Two-phase (group prefetch) hash join probe" OFF)
-set(VW_JOIN_TWOPHASE_CACHE L2 CACHE STRING
+set(VW_JOIN_TWOPHASE_CACHE L1 CACHE STRING
     "VW_JOIN_TWOPHASE: smallest directory that uses the two-phase probe, as a cache level (L1, L2)")
 set_property(CACHE VW_JOIN_TWOPHASE_CACHE PROPERTY STRINGS L1 L2)
 set(VW_JOIN_TWOPHASE_MIN_SLOTS 4096 CACHE STRING
