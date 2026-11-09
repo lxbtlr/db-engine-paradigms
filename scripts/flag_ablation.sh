@@ -585,6 +585,17 @@ config_flags() {
     # the default concatenation with fixed-size wide columns, and with padding
     hash_simd_concat_wide) echo "$(config_flags hash_simd_concat) -DVW_GROUP_CONCAT_WIDE=ON" ;;
     hash_simd_concat_wide_pad) echo "$(config_flags hash_simd_concat_wide) -DVW_GROUP_KEY_PAD=ON" ;;
+    # compound key study on base_simdhash (the SIMD hash compiles away
+    # without AVX-512, so these also run on roquefort and burrata): the key
+    # operators (concat kernels + wide + pad, then the fused hash) on the
+    # Concat/Hash/Lookup loop, against VW_GROUP_DISPATCH's key loop alone and
+    # with the same operators (it never calls the fused hash: ck_disp_fused
+    # should match ck_disp_concat)
+    ck_concat)           echo "$(config_flags base_simdhash) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_WIDE=ON -DVW_GROUP_KEY_PAD=ON" ;;
+    ck_fused)            echo "$(config_flags ck_concat) -DVW_GROUP_CONCAT_HASH=ON" ;;
+    ck_disp)             echo "$(config_flags base_simdhash) -DVW_GROUP_DISPATCH=ON" ;;
+    ck_disp_concat)      echo "$(config_flags ck_disp) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_WIDE=ON -DVW_GROUP_KEY_PAD=ON" ;;
+    ck_disp_fused)       echo "$(config_flags ck_disp_concat) -DVW_GROUP_CONCAT_HASH=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)
