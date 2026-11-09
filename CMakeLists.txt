@@ -166,6 +166,8 @@ endif()
 #   VW_AGGR_KINDS           phase 1: aggregate update by kind, in the fused
 #                           and direct paths (needs one of them)
 #   VW_GROUP_GLOBAL_DIRECT  phase 2: global find-or-create
+#   VW_GROUP_GLOBAL_TAGS    phase 2: tagged global directory (needs
+#                           VW_GROUP_GLOBAL_DIRECT)
 #   VW_GROUP_DISPATCH       phase 1: plan-resolved key loop (implies nothing)
 #   VW_GROUP_AGGR           phase 1: lookup + aggregate update, group-wise
 #                           (alone: excludes every option above)
@@ -213,12 +215,25 @@ endif()
 # VW_GROUP_GLOBAL_DIRECT: HashGroup's global phase finds or creates each
 # spilled row's group in one pass (memcmp on packed keys, batched init)
 # instead of findGroups + createMissingGroups with partition_by_key_row
-# dedup. Only for group-bys whose keys are all fixed-width scalars; others
-# keep the existing path.
+# dedup, with the vector's directory slots prefetched first. Only for
+# group-bys whose keys are all fixed-width scalars; others keep the existing
+# path.
+# VW_GROUP_GLOBAL_TAGS (needs VW_GROUP_GLOBAL_DIRECT): that pass uses a
+# tagged directory (the hash rotated right by 16, so tag and slot bits clear
+# the spill partition bits), rejecting new groups at the slot. Typer's
+# group-by table is untagged: outside the like-for-like comparison.
 OPTION(VW_GROUP_GLOBAL_DIRECT "One-pass find-or-create in VectorWise HashGroup global phase" OFF)
+OPTION(VW_GROUP_GLOBAL_TAGS "VW_GROUP_GLOBAL_DIRECT: tagged global directory" OFF)
 if(VW_GROUP_GLOBAL_DIRECT)
   ADD_DEFINITIONS(-DVW_GROUP_GLOBAL_DIRECT=1)
   message(STATUS "Building with VW_GROUP_GLOBAL_DIRECT")
+endif()
+if(VW_GROUP_GLOBAL_TAGS)
+  if(NOT VW_GROUP_GLOBAL_DIRECT)
+    message(FATAL_ERROR "VW_GROUP_GLOBAL_TAGS tags VW_GROUP_GLOBAL_DIRECT's directory; enable VW_GROUP_GLOBAL_DIRECT")
+  endif()
+  ADD_DEFINITIONS(-DVW_GROUP_GLOBAL_TAGS=1)
+  message(STATUS "Building with VW_GROUP_GLOBAL_TAGS")
 endif()
 
 # VW_GROUP_DISPATCH: HashGroup resolves its phase 1 path once per operator
@@ -351,7 +366,9 @@ if(VW_AGGR_FUSED_BUCKET)
   message(STATUS "Building with VW_AGGR_FUSED_BUCKET (fallback above ${VW_AGGR_FUSED_BUCKET_MAX_GROUPS} groups per vector)")
 endif()
 
-# VW_AGGR_DIRECT: for group-bys whose aggregates are all int64 SUM / COUNT(*),
+# VW_AGGR_DIRECT (experimental: its use is decided by the data, the first
+# vector touching more than 8 groups turns it off; not on the fair ladder):
+# for group-bys whose aggregates are all int64 SUM / COUNT(*),
 # a vector that touches at most 8 groups sums each aggregate in one pass with
 # one register accumulator per group (include/vectorwise/AggrDirect.hpp);
 # columns read through a selection are summed over the row positions, so

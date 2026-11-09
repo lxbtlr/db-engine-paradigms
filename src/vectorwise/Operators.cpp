@@ -2602,19 +2602,42 @@ void HashGroup::updateGroupsFused(pos_t n) {
 // spilled row's packed keys with memcmp (row = entry without `next`), create
 // a miss at once so later rows of the vector find it, and initialize all new
 // entries with one buildScatter call. updateGroupsFromPartition then adds
-// every row, as before. The directory is tagged (as the join's): a new group,
+// every row, as before. The vector's directory slots are prefetched first.
+// This is the work of Typer's merge (GroupBy::forallGroups: findOrCreate on
+// an untagged Hashmapx), done per vector.
+// VW_GROUP_GLOBAL_TAGS: the directory is tagged (as the join's): a new group,
 // the common case, is rejected from the directory slot without walking its
 // chain through entries spread over the table (TPC-H Q18: ~190k groups per
-// partition, 4 MB directory + 6 MB entries), and the vector's slots are
-// prefetched first. Hashmap takes the tag from the hash's top 4 bits, which
-// the spill partitioning (hash >> shift) makes (nearly) constant inside a
-// partition, so the table gets the hash rotated right by 16: tag from bits
-// 12..15, slot from bits 16.., both clear of the partition bits. Entries keep
-// the original hash.
+// partition, 4 MB directory + 6 MB entries). Hashmap takes the tag from the
+// hash's top 4 bits, which the spill partitioning (hash >> shift) makes
+// (nearly) constant inside a partition, so the table gets the hash rotated
+// right by 16: tag from bits 12..15, slot from bits 16.., both clear of the
+// partition bits. Entries keep the original hash. Typer's group-by table is
+// untagged, so this is outside the like-for-like comparison.
 namespace {
+#ifdef VW_GROUP_GLOBAL_TAGS
 inline HashGroup::hash_t globalKey(HashGroup::hash_t h) {
    return (h >> 16) | (h << (sizeof(h) * 8 - 16));
 }
+inline HashGroup::EntryHeader* globalFind(runtime::Hashmap& ht,
+                                          HashGroup::hash_t h) {
+   return ht.find_chain_tagged(globalKey(h));
+}
+inline void globalInsert(runtime::Hashmap& ht, HashGroup::EntryHeader* e,
+                         HashGroup::hash_t h) {
+   ht.insert_tagged<false>(e, globalKey(h));
+}
+#else
+inline HashGroup::hash_t globalKey(HashGroup::hash_t h) { return h; }
+inline HashGroup::EntryHeader* globalFind(runtime::Hashmap& ht,
+                                          HashGroup::hash_t h) {
+   return ht.find_chain(h);
+}
+inline void globalInsert(runtime::Hashmap& ht, HashGroup::EntryHeader* e,
+                         HashGroup::hash_t h) {
+   ht.insert<false>(e, h);
+}
+#endif
 } // namespace
 void HashGroup::globalFindOrCreate(void* data, size_t n) {
    auto& g = globalAggregation;
@@ -2635,7 +2658,7 @@ void HashGroup::globalFindOrCreate(void* data, size_t n) {
       const char* row = static_cast<const char*>(data) + i * rowSize;
       hash_t hash;
       std::memcpy(&hash, row, sizeof(hash));
-      EntryHeader* entry = ht.find_chain_tagged(globalKey(hash));
+      EntryHeader* entry = globalFind(ht, hash);
       for (; entry != nullptr; entry = entry->next)
          if (entry->hash == hash &&
              std::memcmp(reinterpret_cast<char*>(entry + 1), row + rowKeyOffset,
@@ -2651,7 +2674,7 @@ void HashGroup::globalFindOrCreate(void* data, size_t n) {
          entry->hash = hash;
          std::memcpy(reinterpret_cast<char*>(entry + 1), row + rowKeyOffset,
                      keySize);
-         ht.insert_tagged<false>(entry, globalKey(hash));
+         globalInsert(ht, entry, hash);
          g.groupRepresentatives[created++] = i;
       }
       g.htMatches[i] = entry;
@@ -2668,7 +2691,7 @@ void HashGroup::globalFindOrCreate(void* data, size_t n) {
          for (size_t k = 0; k < b.second; ++k) {
             auto e = addBytes(reinterpret_cast<EntryHeader*>(b.first),
                               k * entrySize);
-            ht.insert_tagged<false>(e, globalKey(e->hash));
+            globalInsert(ht, e, e->hash);
          }
    }
 }

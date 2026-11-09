@@ -72,7 +72,8 @@
 # Group-by configs (study/VW_OPPORTUNITY_STUDY.md), on HASH_BASE + CRC32 + FAST:
 #   grp_base             today's HashGroup
 #   grp_batch            VW_GROUP_BATCH_CREATE
-#   grp_global           VW_GROUP_GLOBAL_DIRECT
+#   grp_global           VW_GROUP_GLOBAL_DIRECT (untagged directory; before
+#                        VW_GROUP_GLOBAL_TAGS was split out it was tagged)
 #   grp_q18              batch + global
 #   grp_all              grp_q18 + VW_AGGR_FUSED
 #   grp_disp_only        VW_GROUP_DISPATCH alone (its key loop: hash in the
@@ -82,7 +83,8 @@
 #                        fused aggregates
 #   grp_bucket           grp_dispatch + VW_AGGR_FUSED_BUCKET (fused update by
 #                        group, sticky fallback to the fused pass)
-#   grp_direct           grp_dispatch + VW_AGGR_DIRECT (register accumulators
+#   grp_direct           grp_dispatch + VW_AGGR_DIRECT (experimental, not on
+#                        the fair ladder; register accumulators
 #                        per group for vectors with <= 8 groups; falls back
 #                        to the fused pass; VW_FLAGS="VW_AGGR_DIRECT_ISA=avx2"
 #                        etc. forces the kernel ISA)
@@ -489,7 +491,7 @@ flags() {
        "-DVW_SIMD_SEL_GATHER=scalar -DVW_SIMD_SEL_CHAR=OFF -DVW_SIMD_HASH=OFF -DVW_JOIN_PREFETCH=OFF" \
        "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF -DVW_JOIN_TWOPHASE=OFF -DVW_JOIN_SIMD=OFF" \
        "-DVW_NEW_JOIN=OFF -DVW_NEW_JOIN_FULL=tag -DVW_JOIN_BLOOM=OFF -DVW_JOIN_BLOOM_GATHER=scalar -DVW_SIMD_HASH_GATHER=insert" \
-       "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_GROUP_AGGR=OFF -DVW_GROUP_AGGR_SEL=OFF" \
+       "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_GROUP_GLOBAL_TAGS=OFF -DVW_GROUP_AGGR=OFF -DVW_GROUP_AGGR_SEL=OFF" \
        "-DVW_AGGR_FUSED=OFF -DVW_AGGR_FUSED_BUCKET=OFF -DVW_AGGR_DIRECT=OFF -DVW_AGGR_DIRECT_ISA=auto -DVW_AGGR_KINDS=OFF -DVW_PROJ_COMPOUND=OFF" \
        "-DVW_GROUP_DISPATCH=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
        "-DVW_JOIN_DISPATCH=OFF -DVW_GROUP_HAVING=OFF -DVW_JOIN_SEMI_BITMAP=OFF" \
@@ -498,6 +500,9 @@ flags() {
 # group dispatch with the parts it implied until the aggregation branch
 # (batch create, global direct, fused update); VW_GROUP_DISPATCH alone now
 # turns on nothing else. The word-copy spill it also implied was removed.
+# Global direct is untagged since VW_GROUP_GLOBAL_TAGS was split out: every
+# config with GDISP or VW_GROUP_GLOBAL_DIRECT measured before that commit had
+# the tagged directory.
 GDISP="-DVW_GROUP_DISPATCH=ON -DVW_GROUP_BATCH_CREATE=ON -DVW_GROUP_GLOBAL_DIRECT=ON -DVW_AGGR_FUSED=ON"
 config_flags() {
   case "$1" in
@@ -565,6 +570,7 @@ config_flags() {
     # keys) on the AVX-512 MurmurHash base, and both with group dispatch
     hash_simd_concat)    echo "$(config_flags hash_simd) -DVW_GROUP_CONCAT_SIMD=ON" ;;
     hash_simd_gdisp)     echo "$(config_flags hash_simd) $GDISP" ;;
+    hash_simd_gdisp_tags) echo "$(config_flags hash_simd_gdisp) -DVW_GROUP_GLOBAL_TAGS=ON" ;;
     hash_simd_gdisp_concat) echo "$(config_flags hash_simd_gdisp) -DVW_GROUP_CONCAT_SIMD=ON" ;;
     # the default concatenation with the AVX-512 hash pass run per block of
     # 128 row-kernel keys, in L1 (VW_GROUP_CONCAT_HASH_MODE=blocked)
