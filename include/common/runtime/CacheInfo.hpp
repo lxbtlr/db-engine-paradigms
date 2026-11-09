@@ -1,7 +1,7 @@
 #pragma once
 //===----------------------------------------------------------------------===//
 // Cache sizes of the machine the engine runs on, for decisions that depend on
-// what fits in cache (VW_JOIN_DISPATCH's Bloom filter rule). Read once from
+// what fits in cache (VW_JOIN_BLOOM's filter rule). Read once from
 // Linux sysfs (cpu0, data or unified caches), else sysconf; an environment
 // variable VW_CACHE_L<level>_BYTES overrides (for experiments). 0 = unknown.
 //===----------------------------------------------------------------------===//

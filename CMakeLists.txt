@@ -504,17 +504,30 @@ endif(VW_JOIN_PREFETCH)
 
 # VW_JOIN_TWOPHASE: group prefetching in the hash join probe (first pass of
 # joinAllParallel / joinSelParallel in three loops, see Operators.cpp);
-# joins whose directory has fewer than VW_JOIN_TWOPHASE_MIN_SLOTS slots keep
-# the one-loop path. run_joinbench variant J2.
+# a join uses it when its directory is at least the VW_JOIN_TWOPHASE_CACHE
+# level (L1 or L2, default L2; size from sysfs, runtime::cacheBytes), others
+# keep the one-loop path; VW_JOIN_TWOPHASE_MIN_SLOTS only when the cache size
+# cannot be read. run_joinbench variant J2.
 OPTION(VW_JOIN_TWOPHASE "Two-phase (group prefetch) hash join probe" OFF)
+set(VW_JOIN_TWOPHASE_CACHE L2 CACHE STRING
+    "VW_JOIN_TWOPHASE: smallest directory that uses the two-phase probe, as a cache level (L1, L2)")
+set_property(CACHE VW_JOIN_TWOPHASE_CACHE PROPERTY STRINGS L1 L2)
 set(VW_JOIN_TWOPHASE_MIN_SLOTS 4096 CACHE STRING
-    "VW_JOIN_TWOPHASE: smallest directory (slots) that uses the two-phase probe")
+    "VW_JOIN_TWOPHASE: smallest directory (slots) when the cache size is unknown")
 if(VW_JOIN_TWOPHASE)
   if(VW_JOIN_PREFETCH)
     message(FATAL_ERROR "VW_JOIN_TWOPHASE and VW_JOIN_PREFETCH both prefetch the same probe loop; enable one")
   endif()
-  ADD_DEFINITIONS(-DVW_JOIN_TWOPHASE=1 -DVW_JOIN_TWOPHASE_MIN_SLOTS=${VW_JOIN_TWOPHASE_MIN_SLOTS})
-  message(STATUS "Building with VW_JOIN_TWOPHASE (min slots ${VW_JOIN_TWOPHASE_MIN_SLOTS})")
+  if(VW_JOIN_TWOPHASE_CACHE STREQUAL "L1")
+    set(VW_JOIN_TWOPHASE_CACHE_LEVEL 1)
+  elseif(VW_JOIN_TWOPHASE_CACHE STREQUAL "L2")
+    set(VW_JOIN_TWOPHASE_CACHE_LEVEL 2)
+  else()
+    message(FATAL_ERROR "VW_JOIN_TWOPHASE_CACHE must be L1 or L2 (got '${VW_JOIN_TWOPHASE_CACHE}')")
+  endif()
+  ADD_DEFINITIONS(-DVW_JOIN_TWOPHASE=1 -DVW_JOIN_TWOPHASE_MIN_SLOTS=${VW_JOIN_TWOPHASE_MIN_SLOTS}
+                  -DVW_JOIN_TWOPHASE_CACHE_LEVEL=${VW_JOIN_TWOPHASE_CACHE_LEVEL})
+  message(STATUS "Building with VW_JOIN_TWOPHASE (directory >= ${VW_JOIN_TWOPHASE_CACHE}; ${VW_JOIN_TWOPHASE_MIN_SLOTS} slots if unknown)")
 endif()
 
 # VW_JOIN_SIMD: the existing AVX-512 hash join probes (joinAllSIMD /
@@ -564,9 +577,9 @@ endif()
 # word) next to the shared hash table, and filters every probe vector with it
 # (AVX-512, 8 hashes at a time) before the directory is touched; the join's
 # first pass visits only the survivors. Whether a join gets a filter is fixed
-# once per operator from a plan fact and a hardware fact (the same rule as
-# VW_JOIN_DISPATCH): the build keys are read through a selection (a filtered
-# build side) and the hash directory is at least the L1 data cache
+# once per operator from a plan fact and a hardware fact: the build keys
+# are read through a selection (a filtered build side) and the hash directory
+# is at least the L1 data cache
 # (runtime::cacheBytes). No per-vector switch. VW_JOIN_BLOOM_MIN_KEYS is used
 # only when the cache size cannot be read.
 # Works with the default join and VW_NEW_JOIN; 64-bit hashes only.
@@ -638,49 +651,23 @@ endif()
 # plans have no such structure, so it is an engine option outside the
 # like-for-like comparison. L2 is the level below every machine's measured
 # crossover (run_joindispatchbench semi sweep: the bitmap still wins at L2 on
-# all four and loses from 2x L2 to L3/2). Needs VW_JOIN_DISPATCH, which owns
-# the decision. Replaces VW_JOIN_SEMI_MAX_BYTES (removed).
-OPTION(VW_JOIN_SEMI_BITMAP "Semi joins through a build-key bitmap when it fits in L2 (needs VW_JOIN_DISPATCH)" OFF)
+# all four and loses from 2x L2 to L3/2). Needs VW_JOIN_SEMI. Replaces
+# VW_JOIN_SEMI_MAX_BYTES (removed).
+OPTION(VW_JOIN_SEMI_BITMAP "Semi joins through a build-key bitmap when it fits in L2 (needs VW_JOIN_SEMI)" OFF)
 if(DEFINED VW_JOIN_SEMI_MAX_BYTES AND NOT "${VW_JOIN_SEMI_MAX_BYTES}" STREQUAL "0")
   message(FATAL_ERROR "VW_JOIN_SEMI_MAX_BYTES was removed: use VW_JOIN_SEMI_BITMAP=ON (bitmap <= L2)")
 endif()
 
-# VW_JOIN_DISPATCH: Hashjoin resolves its probe path once per operator, at the
-# end of the build, from plan facts (semi marker, key count and types, build
-# keys read through a selection, single int32 probe key) and the build
-# summary (row count, key range), then runs one member-function pointer per
-# probe vector instead of today's per-vector checks. It compiles in
-# VW_JOIN_SEMI and chooses between the paths VW_JOIN_SEMI, VW_JOIN_BLOOM and
-# VW_JOIN_FUSED_PROBE add (see study/JOIN_DISPATCH_STUDY.md). The filter and
-# the fused probe are opt-in: Typer's plans have no such structure, so they
-# are outside the like-for-like (fair) ladder. Without them dispatch always
-# takes the plain hash probe; old configs pass -DVW_JOIN_BLOOM=ON
-# -DVW_JOIN_FUSED_PROBE=ON to keep what dispatch used to imply:
-#   semi         derived semi join, one int32 key per side: the existence
-#                probe on the hash path (VW_JOIN_SEMI), after the filter if
-#                one is chosen; with VW_JOIN_SEMI_BITMAP the bitmap instead
-#                when it fits in L2
-#   Bloom filter the directory is at least the L1 size (runtime::cacheBytes;
-#                VW_JOIN_BLOOM_MIN_KEYS rows if L1 is unknown) and the build
-#                keys are read through a selection (a filtered build side);
-#                fixed for the operator (no per-vector adaptive switch)
-#   fused hash   one int32 probe key, with the filter or VW_NEW_JOIN
-OPTION(VW_JOIN_DISPATCH "Plan-resolved probe path per VectorWise Hashjoin (compiles in VW_JOIN_SEMI; VW_JOIN_BLOOM and VW_JOIN_FUSED_PROBE opt-in)" OFF)
+# VW_JOIN_DISPATCH was removed: without the Bloom filter and the fused probe
+# (outside the like-for-like comparison) it only ever took the plain hash
+# probe. Its paths are the options themselves: VW_JOIN_SEMI, VW_JOIN_BLOOM,
+# VW_JOIN_FUSED_PROBE, VW_JOIN_SEMI_BITMAP, each deciding once per join.
 if(VW_JOIN_DISPATCH)
-  if(HASH_SIZE_32)
-    message(FATAL_ERROR "VW_JOIN_DISPATCH needs 64-bit hashes (HASH_SIZE_32 is ON)")
-  endif()
-  if(VW_JOIN_TWOPHASE OR VW_JOIN_SIMD OR VW_JOIN_PREFETCH)
-    message(FATAL_ERROR "VW_JOIN_DISPATCH supports the default join and VW_NEW_JOIN; disable VW_JOIN_TWOPHASE, VW_JOIN_SIMD and VW_JOIN_PREFETCH")
-  endif()
-  ADD_DEFINITIONS(-DVW_JOIN_DISPATCH=1 -DVW_JOIN_SEMI=1)
-  message(STATUS "Building with VW_JOIN_DISPATCH")
+  message(FATAL_ERROR "VW_JOIN_DISPATCH was removed: pass VW_JOIN_SEMI (and VW_JOIN_BLOOM / VW_JOIN_FUSED_PROBE / VW_JOIN_SEMI_BITMAP) explicitly")
 endif()
-# VW_JOIN_SEMI_BITMAP (above): its own block, so the dispatch block's
-# defines stay what dispatch implies (scripts/attribution.py reads them)
 if(VW_JOIN_SEMI_BITMAP)
-  if(NOT VW_JOIN_DISPATCH)
-    message(FATAL_ERROR "VW_JOIN_SEMI_BITMAP needs VW_JOIN_DISPATCH")
+  if(NOT VW_JOIN_SEMI)
+    message(FATAL_ERROR "VW_JOIN_SEMI_BITMAP replaces VW_JOIN_SEMI's probe for semi joins whose key range fits in L2; enable VW_JOIN_SEMI")
   endif()
   ADD_DEFINITIONS(-DVW_JOIN_SEMI_BITMAP=1)
   message(STATUS "Building with VW_JOIN_SEMI_BITMAP (semi bitmap when it fits in L2)")

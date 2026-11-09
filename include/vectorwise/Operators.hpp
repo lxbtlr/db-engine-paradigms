@@ -375,26 +375,6 @@ class Hashjoin : public BinaryOperator {
  public:
 #endif
 
-#ifdef VW_JOIN_DISPATCH
- private:
-   /// VW_JOIN_DISPATCH: the probe path, resolved once at the end of the
-   /// build from plan facts and the build summary (resolvePaths); next()
-   /// then runs probeStep and join per probe vector without re-deciding
-   void (Hashjoin::*probeStep)(size_t n) = nullptr;
-   void resolvePaths();
-   void stepHash(size_t n);
-#ifdef VW_JOIN_BLOOM
-   void stepHashBloom(size_t n);
-#endif
-#if defined(VW_JOIN_BLOOM) && defined(VW_JOIN_FUSED_PROBE)
-   void stepFusedBloom(size_t n);
-#endif
-#ifdef VW_JOIN_FUSED_PROBE
-   void stepFusedNew(size_t n);
-#endif
-
- public:
-#endif
    virtual size_t next() override;
    ~Hashjoin();
 };

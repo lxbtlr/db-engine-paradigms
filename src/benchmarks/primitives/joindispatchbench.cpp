@@ -1,5 +1,6 @@
-// run_joindispatchbench: the cost questions behind a plan-resolved
-// Hashjoin::resolvePaths (study/JOIN_DISPATCH_STUDY.md). Every variant of a family
+// run_joindispatchbench: the cost questions behind the per-join rules of
+// VW_JOIN_BLOOM and VW_JOIN_SEMI_BITMAP (study/JOIN_DISPATCH_STUDY.md; the
+// VW_JOIN_DISPATCH option that first used them was removed). Every variant of a family
 // must produce the same output as the family's first variant (count +
 // checksum); exit status 1 on any MISMATCH.
 //

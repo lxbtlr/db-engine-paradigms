@@ -211,18 +211,26 @@ inline void joinPrefetchStep(runtime::Hashmap& ht,
 //      candidates go to the followup buffers
 //   C  compare hashes, emit matches, queue chain successors; compacts the
 //      followup buffers in place (write index <= read index)
-// Directories below VW_JOIN_TWOPHASE_MIN_SLOTS slots stay cache-resident, and
-// there the extra loops only cost (TPC-H Q18's 57-order build: 0.9x in
-// run_joinbench on every machine), so those joins keep the one-loop path.
+// A directory that stays cache-resident gains nothing from the prefetches and
+// pays for the extra loops (TPC-H Q18's 57-order build: 0.9x in run_joinbench
+// on every machine), so a join uses the two-phase probe only when its
+// directory (8 B per slot) is at least the cache level
+// VW_JOIN_TWOPHASE_CACHE_LEVEL (runtime::cacheBytes, a hardware fact; L2 by
+// default); VW_JOIN_TWOPHASE_MIN_SLOTS only when that size is unknown.
 #ifdef VW_JOIN_TWOPHASE
 #ifndef VW_JOIN_TWOPHASE_MIN_SLOTS
 #define VW_JOIN_TWOPHASE_MIN_SLOTS 4096
+#endif
+#ifndef VW_JOIN_TWOPHASE_CACHE_LEVEL
+#define VW_JOIN_TWOPHASE_CACHE_LEVEL 2
 #endif
 namespace {
 constexpr size_t kTwoPhaseMinSlots = VW_JOIN_TWOPHASE_MIN_SLOTS;
 
 inline bool useTwoPhase(const runtime::Hashmap& ht) {
-   return ht.mask + 1 >= kTwoPhaseMinSlots;
+   const size_t cache = runtime::cacheBytes(VW_JOIN_TWOPHASE_CACHE_LEVEL);
+   const size_t slots = size_t(ht.mask) + 1;
+   return cache ? slots * sizeof(void*) >= cache : slots >= kTwoPhaseMinSlots;
 }
 
 /// Matches of probes 0..n-1 into buildMatches / probeMatches (probe id(i)),
@@ -1602,102 +1610,6 @@ pos_t Hashjoin::joinBoncz() {
    return 0;
 }
 
-#ifdef VW_JOIN_DISPATCH
-// VW_JOIN_DISPATCH: without it, next() re-decides per probe vector whether
-// the probe hash is fused (fusedReady), whether the Bloom filter runs (its
-// adaptive skip counter) and whether the join is VW_NEW_JOIN (pointer
-// compares). Everything those depend on is fixed once the build is done:
-//   plan facts       semi marker, key count/types (semiKeysOk,
-//                    fusedReady), build keys through a selection
-//                    (buildKeysSelected), the join function
-//   build summary    directory size (filter allocated iff >= the L1 data
-//                    cache on a filtered build side), key range (semi
-//                    bitmap size)
-// so resolvePaths() picks the per-vector probe step once:
-//   fused + filter   stepFusedBloom  hash in registers, filter, survivors
-//   fused + new join stepFusedNew    joinNewFirstPass hashes (mode B)
-//   filter           stepHashBloom   probe hash expression, then filter
-//   neither          stepHash        probe hash expression
-// The filter stays on for the whole operator: no data-dependent switch.
-// semiActive (VW_JOIN_SEMI_BITMAP: the bitmap path) and semiHash (the
-// existence probe) are decided by the build, as without dispatch.
-// The filter and the fused probe are opt-in (VW_JOIN_BLOOM,
-// VW_JOIN_FUSED_PROBE): Typer's plans have neither, so dispatch alone
-// (the fair ladder) always takes stepHash.
-void Hashjoin::resolvePaths() {
-#ifdef VW_JOIN_BLOOM
-   bloomOn = false;
-   const bool bloom = shared.bloom != nullptr;
-   const bool keysSelected = buildKeysSelected;
-#else
-   const bool bloom = false, keysSelected = false;
-#endif
-#ifdef VW_JOIN_FUSED_PROBE
-   // fused hashing only where it hashes 8 keys in registers (kFusedWide)
-   const bool fused = kFusedWide && fusedReady();
-#else
-   const bool fused = false;
-#endif
-#ifdef VW_NEW_JOIN
-   const bool newJoin = join == &Hashjoin::joinAllNew || join == &Hashjoin::joinSelNew;
-#else
-   const bool newJoin = false;
-#endif
-   // lowest priority first; a later match overrides
-   probeStep = &Hashjoin::stepHash;
-   const char* stepName = "hash";
-#ifdef VW_JOIN_BLOOM
-   if (bloom) {
-      probeStep = &Hashjoin::stepHashBloom;
-      stepName = "hash+bloom";
-   }
-#endif
-#ifdef VW_JOIN_FUSED_PROBE
-   if (fused && newJoin && !semiHash) { // joinSemi reads probeHashes
-      probeStep = &Hashjoin::stepFusedNew;
-      stepName = "fused+newjoin";
-   }
-#endif
-#if defined(VW_JOIN_BLOOM) && defined(VW_JOIN_FUSED_PROBE)
-   if (fused && bloom) {
-      probeStep = &Hashjoin::stepFusedBloom;
-      stepName = "fused+bloom";
-   }
-#endif
-#ifdef VW_JOIN_FUSED_PROBE
-   fusedCompute = probeStep == &Hashjoin::stepFusedNew;
-#endif
-   // VW_DISPATCH_TRACE=1: one line per join (worker 0) with what was chosen
-   static const bool trace = std::getenv("VW_DISPATCH_TRACE") != nullptr;
-   if (trace && runtime::this_worker->worker_id == 0)
-      std::fprintf(stderr,
-                   "vw join %p: build=%zu dirKiB=%zu L1KiB=%zu keysSelected=%d "
-                   "semi=%d semiHash=%d semiBitmap=%d bloom=%d fused=%d newJoin=%d step=%s\n",
-                   static_cast<void*>(this), size_t(shared.found.load()),
-                   size_t(shared.ht.mask + 1) * sizeof(void*) / 1024,
-                   runtime::cacheBytes(1) / 1024,
-                   int(keysSelected), int(semiJoin), int(semiHash),
-#ifdef VW_JOIN_SEMI_BITMAP
-                   int(semiActive),
-#else
-                   0,
-#endif
-                   int(bloom), int(fused), int(newJoin), stepName);
-}
-void Hashjoin::stepHash(size_t n) { probeHash.evaluate(n); }
-#ifdef VW_JOIN_BLOOM
-void Hashjoin::stepHashBloom(size_t n) {
-   probeHash.evaluate(n);
-   bloomFilter(n);
-}
-#endif
-#if defined(VW_JOIN_BLOOM) && defined(VW_JOIN_FUSED_PROBE)
-void Hashjoin::stepFusedBloom(size_t n) { fusedHashFilter(n); }
-#endif
-#ifdef VW_JOIN_FUSED_PROBE
-void Hashjoin::stepFusedNew(size_t) {}
-#endif
-#endif
 
 size_t Hashjoin::next() {
    using runtime::Hashmap;
@@ -1727,7 +1639,7 @@ size_t Hashjoin::next() {
          shared.bloom.reset(new uint64_t[words]());
          shared.bloomMask = words - 1;
       };
-      // The filter's rule (VW_JOIN_BLOOM alone or under VW_JOIN_DISPATCH),
+      // The filter's rule,
       // fixed for the operator, no per-vector switch.
       // plan fact: only a filtered build side (build keys read through a
       // selection) leaves probes that miss; an unfiltered build side's
@@ -1809,9 +1721,6 @@ size_t Hashjoin::next() {
       semiHash = semiHash && !semiActive;
 #endif
 #endif
-#ifdef VW_JOIN_DISPATCH
-      resolvePaths(); // once per operator; the build summary is known now
-#endif
    }
    // --- lookup
 #ifdef VW_JOIN_SEMI_BITMAP
@@ -1830,10 +1739,6 @@ size_t Hashjoin::next() {
          cont.numProbes = right->next();
          cont.nextProbe = 0;
          if (cont.numProbes == EndOfStream) return EndOfStream;
-#ifdef VW_JOIN_DISPATCH
-         (this->*probeStep)(cont.numProbes);
-      }
-#else
 #ifdef VW_JOIN_FUSED_PROBE
          fusedCompute = false;
          if (kFusedWide && fusedReady()) { // see kFusedWide
@@ -1863,7 +1768,6 @@ size_t Hashjoin::next() {
       probe:;
 #endif
       }
-#endif // VW_JOIN_DISPATCH
 #ifdef VW_JOIN_SEMI
       if (semiHash) {
          // existence probe, key compared in the chain walk: no key equality
