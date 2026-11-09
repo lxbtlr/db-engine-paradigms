@@ -7,9 +7,6 @@
 #include "common/runtime/SIMD.hpp"
 #include "vectorwise/SimdCrc.hpp"
 #include "vectorwise/SimdHash.hpp"
-#ifdef VW_JOIN_BLOOM
-#include "vectorwise/BloomKernels.hpp"
-#endif
 #ifdef VW_AGGR_DIRECT
 #include "vectorwise/AggrDirect.hpp"
 #endif
@@ -288,15 +285,7 @@ pos_t Hashjoin::joinAllParallel() {
                               [](pos_t i) { return i; });
       else
 #endif
-#ifdef VW_JOIN_BLOOM
-      // only the probes that passed the Bloom filter (all, when it is off)
-      const pos_t* cand = bloomSel.data();
-      const bool bf = bloomOn;
-      for (size_t k = 0, end = bf ? bloomCount : cont.numProbes; k < end; ++k) {
-         const size_t i = bf ? cand[k] : k;
-#else
       for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
-#endif
          VW_JOIN_PF_STEP(shared.ht, probeHashes, i, end);
          auto hash = probeHashes[i];
          auto entry = shared.ht.find_chain_tagged(hash);
@@ -603,15 +592,7 @@ pos_t Hashjoin::joinSelParallel() {
                               [sel = probeSel](pos_t i) { return sel[i]; });
       else
 #endif
-#ifdef VW_JOIN_BLOOM
-      // only the probes that passed the Bloom filter (all, when it is off)
-      const pos_t* cand = bloomSel.data();
-      const bool bf = bloomOn;
-      for (size_t k = 0, end = bf ? bloomCount : cont.numProbes; k < end; ++k) {
-         const size_t i = bf ? cand[k] : k;
-#else
       for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
-#endif
          VW_JOIN_PF_STEP(shared.ht, probeHashes, i, end);
          auto hash = probeHashes[i];
          auto entry = shared.ht.find_chain_tagged(hash);
@@ -862,7 +843,7 @@ pos_t Hashjoin::joinSelSIMD() {
 }
 #endif // !VW_POS_16
 
-#if (defined(VW_JOIN_BLOOM) || defined(VW_NEW_JOIN)) && defined(__AVX512F__)
+#if defined(VW_NEW_JOIN) && defined(__AVX512F__)
 // Compress-store via a register compress plus a masked store: the memory form
 // (vpcompressd/q to memory) is microcoded and very slow on Zen 4 (the reason
 // VW_SIMD_SEL_COMPRESS=reg exists). Writes exactly popcount(m) elements.
@@ -892,9 +873,9 @@ inline __attribute__((always_inline)) void compressStore64(void* dst, __mmask8 m
 // marked joins' build keys are unique, the assumption semi() documents.
 // For one int32 key per side, joinSemi is Hashset::contains per probe: walk
 // the chain of the probe hash, compare hash and key inline, stop at the
-// first match and emit the probe row once. The probe hashes (and a Bloom
-// filter's survivors) come from the probe step as for the inner join; key
-// equality and gather are not run (the key was compared, nothing to gather).
+// first match and emit the probe row once. The probe hashes come from the
+// probe step as for the inner join; key equality and gather are not run (the
+// key was compared, nothing to gather).
 // One output row per probe at most, so a probe vector always fits the
 // output (batchSize is the vector size) and needs no continuation.
 template <bool Sel> pos_t Hashjoin::joinSemiImpl() {
@@ -905,15 +886,7 @@ template <bool Sel> pos_t Hashjoin::joinSemiImpl() {
    const size_t keyOffset = semiKeyOffset;
    auto& ht = shared.ht;
    size_t found = 0;
-#ifdef VW_JOIN_BLOOM
-   // only the probes that passed the Bloom filter (all, when it is off)
-   const pos_t* cand = bloomSel.data();
-   const bool bf = bloomOn;
-   for (size_t k = 0, end = bf ? bloomCount : cont.numProbes; k < end; ++k) {
-      const size_t i = bf ? cand[k] : k;
-#else
    for (size_t i = 0, end = cont.numProbes; i < end; ++i) {
-#endif
       const auto hash = probeHashes[i];
       const pos_t p = Sel ? ksel[i] : pos_t(i);
       const int32_t key = keys[p];
@@ -939,210 +912,21 @@ pos_t Hashjoin::joinSemi() {
 }
 #endif // VW_JOIN_SEMI
 
-#ifdef VW_JOIN_SEMI_BITMAP
-// VW_JOIN_SEMI_BITMAP: for a semi join that qualifies for joinSemi, the
-// build keys' range [min, max] gets an exact bitmap when it fits in L2
-// (built after the hash table; Q3's customer keys ~19 KB, Q18's 57 orders
-// over ~6M order keys ~750 KB); a probe vector is then filtered with a range
-// check and one bit test per key (AVX-512: 16 keys per step) into
-// probeMatches. The probe hash pass, directory, chains, key equality and
-// gather are all skipped. Typer has no such structure: an engine option.
-void Hashjoin::semiRange() {
-   int64_t lo = INT64_MAX, hi = INT64_MIN;
-   for (auto& block : allocations) {
-      auto e = static_cast<char*>(block.first);
-      for (size_t i = 0; i < block.second; ++i, e += ht_entry_size) {
-         int32_t k;
-         std::memcpy(&k, e + semiKeyOffset, sizeof(k));
-         lo = std::min<int64_t>(lo, k);
-         hi = std::max<int64_t>(hi, k);
-      }
-   }
-   for (int64_t cur = shared.semiMin.load();
-        lo < cur && !shared.semiMin.compare_exchange_weak(cur, lo);) {}
-   for (int64_t cur = shared.semiMax.load();
-        hi > cur && !shared.semiMax.compare_exchange_weak(cur, hi);) {}
-}
-
-void Hashjoin::semiSetBits() {
-   uint32_t* bits = shared.semiBits.get();
-   const int64_t lo = shared.semiMin.load();
-   const bool concurrent = runtime::this_worker->group->size > 1;
-   for (auto& block : allocations) {
-      auto e = static_cast<char*>(block.first);
-      for (size_t i = 0; i < block.second; ++i, e += ht_entry_size) {
-         int32_t k;
-         std::memcpy(&k, e + semiKeyOffset, sizeof(k));
-         const uint64_t d = uint64_t(int64_t(k) - lo);
-         const uint32_t bit = uint32_t(1) << (d & 31);
-         if (concurrent)
-            __atomic_fetch_or(&bits[d >> 5], bit, __ATOMIC_RELAXED);
-         else
-            bits[d >> 5] |= bit;
-      }
-   }
-}
-
-pos_t Hashjoin::semiProbe(size_t n) {
-   const bool sel = semiProbeSel != nullptr;
-   const int32_t* keys = static_cast<const int32_t*>(
-       sel ? semiProbeSel->param2 : semiProbeDense->param1);
-   const pos_t* ksel =
-       sel ? static_cast<const pos_t*>(semiProbeSel->outputSelectionV) : nullptr;
-   const uint32_t* bits = shared.semiBits.get();
-   const int64_t lo = shared.semiMin.load();
-   const uint64_t span = uint64_t(shared.semiMax.load() - lo); // last offset
-   pos_t found = 0;
-   size_t i = 0;
-#if defined(__AVX512F__) && !defined(VW_POS_16)
-   if (lo >= INT32_MIN && lo <= INT32_MAX) {
-      const __m512i vlo = _mm512_set1_epi32(int32_t(lo));
-      const __m512i vspan = _mm512_set1_epi32(int32_t(span));
-      const __m512i b31 = _mm512_set1_epi32(31);
-      const __m512i one = _mm512_set1_epi32(1);
-      const __m512i lane =
-          _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-      for (; i + 16 <= n; i += 16) {
-         const __m512i pos =
-             sel ? _mm512_loadu_si512(ksel + i)
-                 : _mm512_add_epi32(_mm512_set1_epi32(int32_t(i)), lane);
-         const __m512i k = sel ? _mm512_i32gather_epi32(pos, keys, 4)
-                               : _mm512_loadu_si512(keys + i);
-         // key - min, as unsigned: out-of-range keys wrap above span
-         const __m512i d = _mm512_sub_epi32(k, vlo);
-         const __mmask16 in = _mm512_cmple_epu32_mask(d, vspan);
-         const __m512i w = _mm512_mask_i32gather_epi32(
-             _mm512_setzero_si512(), in, _mm512_srli_epi32(d, 5), bits, 4);
-         const __mmask16 hit = _mm512_mask_test_epi32_mask(
-             in, w, _mm512_sllv_epi32(one, _mm512_and_si512(d, b31)));
-         // output: probe position (join_sel: the selected position)
-         const __m512i c = _mm512_maskz_compress_epi32(hit, pos);
-         _mm512_mask_storeu_epi32(probeMatches + found,
-                                  (__mmask16)((1u << __builtin_popcount(hit)) - 1),
-                                  c);
-         found += __builtin_popcount(hit);
-      }
-   }
-#endif
-   for (; i < n; ++i) {
-      const pos_t p = sel ? ksel[i] : pos_t(i);
-      const uint64_t d = uint64_t(int64_t(keys[p]) - lo);
-      if (d <= span && (bits[d >> 5] >> (d & 31) & 1)) probeMatches[found++] = p;
-   }
-   return found;
-}
-#endif // VW_JOIN_SEMI_BITMAP
-
-#ifdef VW_JOIN_BLOOM
-// VW_JOIN_BLOOM: a Bloom filter owned by this VectorWise join, in front of
-// the shared runtime::Hashmap (unchanged, so Hyper is unaffected). Most
-// probes of TPC-H Q3/Q5/Q9-style joins miss (90-99%); the directory tag
-// still costs a random directory load per probe, and a false tag pass an
-// entry load. The filter is ~VW_JOIN_BLOOM_BITS bits per build key (16:
-// 300 KB for Q3's 150k orders, L2-resident) and answers most misses from
-// one word: register-blocked, a key's 4 bits all lie in one 64-bit word.
-//   word = hash bits 40.. & mask        bits = hash bits 0..23, 6 per bit
-// (independent bit groups). Once per probe vector the probe hashes are
-// tested 8 at a time (AVX-512: gather 8 words, 4 variable shifts, compare)
-// and the passing probes are compressed into bloomSel / bloomHashes; the
-// join's first pass then visits only those. A vector where more than half
-// the probes pass (mostly-hitting joins, e.g. Q9's) turns the filter off for
-// the next 31 vectors.
-namespace {
-inline uint64_t bloomBits(runtime::Hashmap::hash_t h) {
-   return (uint64_t(1) << (h & 63)) | (uint64_t(1) << ((h >> 6) & 63)) |
-          (uint64_t(1) << ((h >> 12) & 63)) | (uint64_t(1) << ((h >> 18) & 63));
-}
-} // namespace
-
-void Hashjoin::bloomInsert() {
-   using EH = runtime::Hashmap::EntryHeader;
-   uint64_t* bloom = shared.bloom.get();
-   const uint64_t mask = shared.bloomMask;
-   const bool concurrent = runtime::this_worker->group->size > 1;
-   for (auto& block : allocations) {
-      auto e = reinterpret_cast<EH*>(block.first);
-      for (size_t i = 0; i < block.second; ++i, e = addBytes(e, ht_entry_size)) {
-         const auto h = e->hash;
-         uint64_t* w = &bloom[(h >> 40) & mask];
-         if (concurrent)
-            __atomic_fetch_or(w, bloomBits(h), __ATOMIC_RELAXED);
-         else
-            *w |= bloomBits(h);
-      }
-   }
-}
-
-void Hashjoin::bloomFilter(size_t n) {
-   if (bloomSel.size() < n + 1) { // + 1: the AVX2 path stores before it counts
-      bloomSel.resize(n + 1);
-      bloomHashes.resize(n + 1);
-   }
-   const uint64_t* bloom = shared.bloom.get();
-   const uint64_t mask = shared.bloomMask;
-   pos_t* sel = bloomSel.data();
-   auto* hs = bloomHashes.data();
-   size_t m = 0, i = 0;
-#if defined(__AVX512F__) && !defined(VW_POS_16)
-   const __m512i vMask = _mm512_set1_epi64((long long)mask);
-   const __m512i b6 = _mm512_set1_epi64(63);
-   const __m512i one = _mm512_set1_epi64(1);
-   const __m512i lane = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 7, 6, 5, 4,
-                                         3, 2, 1, 0);
-   for (; i + 8 <= n; i += 8) {
-      const __m512i h = _mm512_loadu_si512(probeHashes + i);
-      const __m512i words = _mm512_i64gather_epi64(
-          _mm512_and_si512(_mm512_srli_epi64(h, 40), vMask),
-          (const long long*)bloom, 8);
-      __m512i bits = _mm512_sllv_epi64(one, _mm512_and_si512(h, b6));
-      bits = _mm512_or_si512(
-          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 6), b6)));
-      bits = _mm512_or_si512(
-          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 12), b6)));
-      bits = _mm512_or_si512(
-          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 18), b6)));
-      const __mmask8 pass =
-          _mm512_cmpeq_epi64_mask(_mm512_and_si512(words, bits), bits);
-      const __m512i idx = _mm512_add_epi32(_mm512_set1_epi32((int)i), lane);
-      compressStore32(sel + m, pass, idx);
-      compressStore64(hs + m, pass, h);
-      m += __builtin_popcount(pass);
-   }
-#elif defined(__AVX2__) && !defined(VW_POS_16) && !(defined(HASH_SIZE) && HASH_SIZE == 32)
-   // no AVX-512 (Zen 3): 4 hashes per test, survivors stored branch-free
-   m = vectorwise::bloom::filter4(bloom, mask, probeHashes, n, sel, hs);
-   i = n;
-#endif
-   for (; i < n; ++i) {
-      const auto h = probeHashes[i];
-      const uint64_t b = bloomBits(h);
-      if ((bloom[(h >> 40) & mask] & b) == b) sel[m] = pos_t(i), hs[m++] = h;
-   }
-   bloomCount = m;
-   bloomOn = true;
-}
-#endif // VW_JOIN_BLOOM
-
 #ifdef VW_JOIN_FUSED_PROBE
-// VW_JOIN_FUSED_PROBE: the join hashes its probe keys itself. Today the
-// probeHash expression writes all n hashes (8 B each), then the Bloom pass
-// reads them all back and copies the survivors, and the join reads those
-// again; with 90-99% of probes rejected (TPC-H Q3/Q5/Q9) most of that traffic
-// is for hashes nobody uses. Here, for a single int32 probe key:
-//   mode A (VW_JOIN_BLOOM filter active): hash 8 keys in registers, test the
-//     filter, compress only the survivors (index + hash); a survivor's hash
-//     is also written to its probeHashes slot for the chain-following loop;
-//   mode B (no filter): VW_NEW_JOIN's first pass hashes 8 keys in registers
-//     and runs the directory step on them, storing them for the followups.
+// VW_JOIN_FUSED_PROBE (with VW_NEW_JOIN): the join hashes its probe keys
+// itself instead of the probeHash expression writing all n hashes (8 B each)
+// for the join to read back. For a single int32 probe key, VW_NEW_JOIN's first
+// pass hashes 8 keys in registers and runs the directory step on them,
+// storing them for the followups.
 // The hashes are bit-identical to the plan's hash primitive (DEFAULT_HASH
 // with primitives::seed, through the same SIMD kernel when VW_CRC32_VPCLMUL /
 // VW_SIMD_HASH apply); join_sel's keys are gathered through the selection.
 namespace {
 // Fused hashing pays only where the probe hashes 8 keys in AVX-512 registers
 // (fusedHash8). Without AVX-512 it hashes them one at a time, which is slower
-// than the plan's hash pass followed by the filter (AVX2: roquefort, clang Q3
-// +12% vs join_base; N1: no difference). A fact about the instruction set,
-// fixed at build time; used by dispatch and by the standalone option.
+// than the plan's hash pass (measured with the former Bloom filter pass: AVX2
+// roquefort, clang Q3 +12% vs join_base; N1 no difference). A fact about the
+// instruction set, fixed at build time.
 #if defined(__AVX512F__) && !defined(VW_POS_16)
 constexpr bool kFusedWide = true;
 #else
@@ -1191,77 +975,6 @@ fusedHash8(const int32_t* keys, const pos_t* sel, size_t i) {
 #endif
 } // namespace
 
-#ifdef VW_JOIN_BLOOM
-void Hashjoin::fusedHashFilter(size_t n) {
-   if (bloomSel.size() < n + 1) { // + 1: the AVX2 path stores before it counts
-      bloomSel.resize(n + 1);
-      bloomHashes.resize(n + 1);
-   }
-   const bool sel = fusedSel != nullptr;
-   const int32_t* keys = static_cast<const int32_t*>(
-       sel ? fusedSel->param2 : fusedDense->param1);
-   const pos_t* ksel =
-       sel ? static_cast<const pos_t*>(fusedSel->outputSelectionV) : nullptr;
-   const uint64_t* bloom = shared.bloom.get();
-   const uint64_t mask = shared.bloomMask;
-   pos_t* out = bloomSel.data();
-   auto* hs = bloomHashes.data();
-   size_t m = 0, i = 0;
-#if defined(__AVX512F__) && !defined(VW_POS_16)
-   const __m512i vMask = _mm512_set1_epi64((long long)mask);
-   const __m512i b6 = _mm512_set1_epi64(63);
-   const __m512i one = _mm512_set1_epi64(1);
-   const __m512i lane = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, 7, 6, 5, 4,
-                                         3, 2, 1, 0);
-   for (; i + 8 <= n; i += 8) {
-      const __m512i h = sel ? fusedHash8<true>(keys, ksel, i)
-                            : fusedHash8<false>(keys, ksel, i);
-      const __m512i words = _mm512_i64gather_epi64(
-          _mm512_and_si512(_mm512_srli_epi64(h, 40), vMask),
-          (const long long*)bloom, 8);
-      __m512i bits = _mm512_sllv_epi64(one, _mm512_and_si512(h, b6));
-      bits = _mm512_or_si512(
-          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 6), b6)));
-      bits = _mm512_or_si512(
-          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 12), b6)));
-      bits = _mm512_or_si512(
-          bits, _mm512_sllv_epi64(one, _mm512_and_si512(_mm512_srli_epi64(h, 18), b6)));
-      const __mmask8 pass =
-          _mm512_cmpeq_epi64_mask(_mm512_and_si512(words, bits), bits);
-      if (!pass) continue;
-      compressStore32(out + m, pass,
-                      _mm512_add_epi32(_mm512_set1_epi32((int)i), lane));
-      compressStore64(hs + m, pass, h);
-      m += __builtin_popcount(pass);
-   }
-#elif defined(__AVX2__) && !defined(VW_POS_16) && !(defined(HASH_SIZE) && HASH_SIZE == 32)
-   // no AVX-512 (Zen 3): hash 4 keys, assemble them in a register (no store
-   // + reload), test, store the survivors branch-free
-   for (; i + 4 <= n; i += 4) {
-      uint64_t h4[4];
-      for (unsigned l = 0; l < 4; ++l)
-         h4[l] = fusedHash1(sel ? keys[ksel[i + l]] : keys[i + l]);
-      const unsigned pass = vectorwise::bloom::test4(
-          bloom, mask, _mm256_set_epi64x((long long)h4[3], (long long)h4[2],
-                                         (long long)h4[1], (long long)h4[0]));
-      for (unsigned l = 0; l < 4; ++l) {
-         out[m] = pos_t(i + l);
-         hs[m] = h4[l];
-         m += (pass >> l) & 1;
-      }
-   }
-#endif
-   for (; i < n; ++i) {
-      const auto h = fusedHash1(sel ? keys[ksel[i]] : keys[i]);
-      const uint64_t b = bloomBits(h);
-      if ((bloom[(h >> 40) & mask] & b) == b) out[m] = pos_t(i), hs[m++] = h;
-   }
-   // survivors' hashes where the chain-following loop reads them
-   for (size_t k = 0; k < m; ++k) probeHashes[out[k]] = hs[k];
-   bloomCount = m;
-   bloomOn = true;
-}
-#endif // VW_JOIN_BLOOM
 #endif // VW_JOIN_FUSED_PROBE
 
 #ifdef VW_NEW_JOIN
@@ -1331,18 +1044,9 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
    const pos_t* fks =
        fc && fsel ? static_cast<const pos_t*>(fusedSel->outputSelectionV) : nullptr;
 #endif
-#ifdef VW_JOIN_BLOOM
-   // the probe list: Bloom survivors (index + hash), or all probes
-   const bool bf = bloomOn;
-   const size_t n = bf ? bloomCount : cont.numProbes;
-   const auto* H = bf ? bloomHashes.data() : probeHashes;
-   const pos_t* I = bf ? bloomSel.data() : nullptr;
-#define VW_NJ_ID(k) (I ? I[k] : pos_t(k))
-#else
    const size_t n = cont.numProbes;
    const auto* H = probeHashes;
 #define VW_NJ_ID(k) pos_t(k)
-#endif
    if (newMaybeIds.size() < n) {
       newMaybeIds.resize(n);
       newMaybeEntries.resize(n);
@@ -1389,7 +1093,7 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
       const __mmask8 full = _mm512_cmpneq_epi64_mask(head, zero);
 #endif
       // No lane can be in its chain (most blocks of a mostly-missing probe
-      // stream without VW_JOIN_BLOOM): skip the two dependent gathers (head
+      // stream): skip the two dependent gathers (head
       // hash, next) and the compress stores. A masked gather with an empty
       // mask still issues.
       if (!full) continue;
@@ -1402,23 +1106,11 @@ template <bool Sel> size_t Hashjoin::joinNewFirstPass(pos_t& followupWrite) {
           _mm512_mask_i64gather_epi64(zero, full, head, nullptr, 1);
       const __mmask8 hasNext = _mm512_mask_cmpneq_epi64_mask(full, next, zero);
       // probe index (followups), probe id (output)
-#ifdef VW_JOIN_BLOOM
-      const __m512i idx =
-          I ? _mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*)(I + i)))
-            : _mm512_add_epi32(_mm512_set1_epi32((int)i), lane);
-      const __m512i out =
-          !Sel ? idx
-          : I  ? _mm512_castsi256_si512(_mm256_i32gather_epi32(
-                    (const int*)probeSel, _mm512_castsi512_si256(idx), 4))
-               : _mm512_castsi256_si512(
-                    _mm256_loadu_si256((const __m256i*)(probeSel + i)));
-#else
       const __m512i idx = _mm512_add_epi32(_mm512_set1_epi32((int)i), lane);
       const __m512i out =
           Sel ? _mm512_castsi256_si512(
                     _mm256_loadu_si256((const __m256i*)(probeSel + i)))
               : idx;
-#endif
       // real list: the matched heads
       compressStore64(buildMatches + found, real, head);
       compressStore32(probeMatches + found, real, out);
@@ -1632,45 +1324,9 @@ size_t Hashjoin::next() {
 
       // --- build phase 2: insert ht entries
       shared.found.fetch_add(found);
-#ifdef VW_JOIN_BLOOM
-      auto allocBloom = [&](size_t keys) {
-         size_t words = 1;
-         while (words * 64 < keys * VW_JOIN_BLOOM_BITS) words <<= 1;
-         shared.bloom.reset(new uint64_t[words]());
-         shared.bloomMask = words - 1;
-      };
-      // The filter's rule,
-      // fixed for the operator, no per-vector switch.
-      // plan fact: only a filtered build side (build keys read through a
-      // selection) leaves probes that miss; an unfiltered build side's
-      // foreign-key probes all hit, where the filter only costs. A semi
-      // candidate gets its filter only if the bitmap is ruled out (below).
-      const bool wantBloom = buildKeysSelected;
-      // hardware fact: the filter pays once the directory (8 B per slot) is
-      // larger than L1. A probe pipeline streams its other columns through
-      // L2, so only an L1-sized directory stays resident (run_joindispatchbench
-      // bloom_size: in isolation the crossover is at directory == L2; with a
-      // 32 B/row competing stream it moves to ~L2/4; end to end, Q9 J4's
-      // 512 KiB directory needs the filter). Unknown L1: VW_JOIN_BLOOM_MIN_KEYS.
-      auto bloomPays = [&]() {
-         const size_t l1 = runtime::cacheBytes(1);
-         const size_t dirBytes = size_t(shared.ht.mask + 1) * sizeof(void*);
-         return l1 ? dirBytes >= l1 : shared.found.load() >= VW_JOIN_BLOOM_MIN_KEYS;
-      };
-#ifdef VW_JOIN_SEMI_BITMAP
-      const bool bloomDeferred = semiCandidate();
-#else
-      const bool bloomDeferred = false;
-#endif
-#endif
       barrier([&]() {
          auto globalFound = shared.found.load();
          if (globalFound) shared.ht.setSize(globalFound);
-#ifdef VW_JOIN_BLOOM
-         shared.bloom.reset();
-         if (globalFound && wantBloom && !bloomDeferred && bloomPays())
-            allocBloom(globalFound);
-#endif
       });
       auto globalFound = shared.found.load();
       if (globalFound == 0) {
@@ -1678,62 +1334,14 @@ size_t Hashjoin::next() {
          return EndOfStream;
       }
       insertAllEntries(allocations, shared.ht, ht_entry_size);
-#ifdef VW_JOIN_BLOOM
-      if (shared.bloom) bloomInsert();
-#endif
-#ifdef VW_JOIN_SEMI_BITMAP
-      const bool semiCand = semiCandidate();
-      if (semiCand) semiRange();
-#endif
       consumed = true;
       barrier(); // wait for all threads to finish build phase
-#ifdef VW_JOIN_SEMI_BITMAP
-      if (semiCand) {
-         barrier([&]() {
-            shared.semiOn = false;
-            const int64_t lo = shared.semiMin.load(), hi = shared.semiMax.load();
-            // hardware fact: the bitmap fits in L2 (run_joindispatchbench semi
-            // sweep: on all four machines the bitmap still wins at the L2
-            // size and loses from 2x L2 to L3/2). Unknown L2: no bitmap.
-            const size_t l2 = runtime::cacheBytes(2);
-            if (l2 && hi >= lo &&
-                ((uint64_t(hi - lo) >> 5) + 1) * sizeof(uint32_t) <= l2) {
-               shared.semiBits.reset(new uint32_t[((hi - lo) >> 5) + 1]());
-               shared.semiOn = true;
-            }
-#ifdef VW_JOIN_BLOOM
-            const size_t keys = shared.found.load();
-            if (!shared.semiOn && wantBloom && bloomPays()) allocBloom(keys);
-#endif
-         });
-         if (shared.semiOn) semiSetBits();
-#ifdef VW_JOIN_BLOOM
-         else if (shared.bloom) bloomInsert();
-#endif
-         barrier();
-         semiActive = shared.semiOn;
-      }
-#endif
 #ifdef VW_JOIN_SEMI
       // existence probe on the hash path unless the bitmap took the join
       semiHash = semiKeysOk();
-#ifdef VW_JOIN_SEMI_BITMAP
-      semiHash = semiHash && !semiActive;
-#endif
 #endif
    }
    // --- lookup
-#ifdef VW_JOIN_SEMI_BITMAP
-   if (semiActive) {
-      // existence only: probe positions whose key is in the build bitmap
-      while (true) {
-         const auto n = right->next();
-         if (n == EndOfStream) return EndOfStream;
-         const pos_t found = semiProbe(n);
-         if (found) return found;
-      }
-   }
-#endif
    while (true) {
       if (cont.nextProbe >= cont.numProbes) {
          cont.numProbes = right->next();
@@ -1742,13 +1350,6 @@ size_t Hashjoin::next() {
 #ifdef VW_JOIN_FUSED_PROBE
          fusedCompute = false;
          if (kFusedWide && fusedReady()) { // see kFusedWide
-#ifdef VW_JOIN_BLOOM
-            bloomOn = false;
-            if (shared.bloom) {
-               fusedHashFilter(cont.numProbes); // mode A
-               goto probe;
-            }
-#endif
 #ifdef VW_NEW_JOIN
             // not for joinSemi, which reads probeHashes
             if (!semiHash &&
@@ -1760,10 +1361,6 @@ size_t Hashjoin::next() {
          }
 #endif
          probeHash.evaluate(cont.numProbes);
-#ifdef VW_JOIN_BLOOM
-         bloomOn = false;
-         if (shared.bloom) bloomFilter(cont.numProbes);
-#endif
 #ifdef VW_JOIN_FUSED_PROBE
       probe:;
 #endif

@@ -572,54 +572,14 @@ if(VW_NEW_JOIN)
   message(STATUS "Building with VW_NEW_JOIN (full = ${VW_NEW_JOIN_FULL})")
 endif()
 
-# VW_JOIN_BLOOM: each VectorWise Hashjoin builds a register-blocked Bloom
-# filter (VW_JOIN_BLOOM_BITS bits per build key, 4 bits per key in one 64-bit
-# word) next to the shared hash table, and filters every probe vector with it
-# (AVX-512, 8 hashes at a time) before the directory is touched; the join's
-# first pass visits only the survivors. Whether a join gets a filter is fixed
-# once per operator from a plan fact and a hardware fact: the build keys
-# are read through a selection (a filtered build side) and the hash directory
-# is at least the L1 data cache
-# (runtime::cacheBytes). No per-vector switch. VW_JOIN_BLOOM_MIN_KEYS is used
-# only when the cache size cannot be read.
-# Works with the default join and VW_NEW_JOIN; 64-bit hashes only.
-OPTION(VW_JOIN_BLOOM "VectorWise-owned Bloom filter in front of hash join probes" OFF)
-# VW_JOIN_BLOOM_GATHER: how the AVX2 filter test (machines without AVX-512,
-# include/vectorwise/BloomKernels.hpp) fetches its 4 filter words: scalar
-# loads assembled in a register, or hw (vpgatherqq). AVX-512 and scalar
-# builds are unaffected.
-set(VW_JOIN_BLOOM_GATHER "scalar" CACHE STRING "VW_JOIN_BLOOM AVX2 word fetch: scalar, hw")
-set_property(CACHE VW_JOIN_BLOOM_GATHER PROPERTY STRINGS scalar hw)
-if(VW_JOIN_BLOOM_GATHER STREQUAL "hw")
-  ADD_DEFINITIONS(-DVW_JOIN_BLOOM_GATHER_HW=1)
-elseif(NOT VW_JOIN_BLOOM_GATHER STREQUAL "scalar")
-  message(FATAL_ERROR "VW_JOIN_BLOOM_GATHER must be scalar or hw (got '${VW_JOIN_BLOOM_GATHER}')")
-endif()
-set(VW_JOIN_BLOOM_BITS 16 CACHE STRING "VW_JOIN_BLOOM: filter bits per build key")
-set(VW_JOIN_BLOOM_MIN_KEYS 4096 CACHE STRING "VW_JOIN_BLOOM: smallest filtered build when the L1 size is unknown")
-if(VW_JOIN_BLOOM)
-  if(HASH_SIZE_32)
-    message(FATAL_ERROR "VW_JOIN_BLOOM needs 64-bit hashes (HASH_SIZE_32 is ON)")
-  endif()
-  if(VW_JOIN_TWOPHASE OR VW_JOIN_SIMD OR VW_JOIN_PREFETCH)
-    message(FATAL_ERROR "VW_JOIN_BLOOM supports the default join and VW_NEW_JOIN; disable VW_JOIN_TWOPHASE, VW_JOIN_SIMD and VW_JOIN_PREFETCH")
-  endif()
-  ADD_DEFINITIONS(-DVW_JOIN_BLOOM=1 -DVW_JOIN_BLOOM_BITS=${VW_JOIN_BLOOM_BITS}
-                  -DVW_JOIN_BLOOM_MIN_KEYS=${VW_JOIN_BLOOM_MIN_KEYS})
-  message(STATUS "Building with VW_JOIN_BLOOM (${VW_JOIN_BLOOM_BITS} bits/key, min ${VW_JOIN_BLOOM_MIN_KEYS} keys)")
-endif()
-
-# VW_JOIN_FUSED_PROBE: a join with one int32 probe key hashes the keys
-# itself instead of evaluating its probe hash expression: with VW_JOIN_BLOOM
-# active, hashing and the filter test are one pass and only survivors are
-# written; otherwise VW_NEW_JOIN's first pass hashes 8 keys in registers.
-# Bit-identical hashes; other probe sides keep the separate hash pass.
-# Needs VW_JOIN_BLOOM (hash + filter, any join) or VW_NEW_JOIN (hash +
-# first pass), and 64-bit hashes.
-OPTION(VW_JOIN_FUSED_PROBE "Fuse probe hashing into the VectorWise join (needs VW_JOIN_BLOOM or VW_NEW_JOIN)" OFF)
+# VW_JOIN_FUSED_PROBE (needs VW_NEW_JOIN): a join with one int32 probe key
+# hashes the keys itself instead of evaluating its probe hash expression:
+# VW_NEW_JOIN's first pass hashes 8 keys in registers. Bit-identical hashes;
+# other probe sides keep the separate hash pass. 64-bit hashes only.
+OPTION(VW_JOIN_FUSED_PROBE "Fuse probe hashing into VW_NEW_JOIN's first pass" OFF)
 if(VW_JOIN_FUSED_PROBE)
-  if(NOT VW_NEW_JOIN AND NOT VW_JOIN_BLOOM)
-    message(FATAL_ERROR "VW_JOIN_FUSED_PROBE fuses into VW_JOIN_BLOOM's filter pass or VW_NEW_JOIN's first pass; enable one")
+  if(NOT VW_NEW_JOIN)
+    message(FATAL_ERROR "VW_JOIN_FUSED_PROBE fuses into VW_NEW_JOIN's first pass; enable VW_NEW_JOIN")
   endif()
   if(HASH_SIZE_32)
     message(FATAL_ERROR "VW_JOIN_FUSED_PROBE needs 64-bit hashes (HASH_SIZE_32 is ON)")
@@ -643,34 +603,17 @@ if(VW_JOIN_SEMI)
   ADD_DEFINITIONS(-DVW_JOIN_SEMI=1)
 endif()
 
-# VW_JOIN_SEMI_BITMAP: a semi join (above) whose build key range fits in the
-# L2 cache as a bitmap (one bit per key in [min, max]; L2 of cpu0 from sysfs,
-# runtime::cacheBytes(2); unknown L2: no bitmap) is probed through that
-# bitmap instead of the hash table (AVX-512: range check and bit test, 16
-# keys per step): no probe hashing, directory, chain or key check. Typer's
-# plans have no such structure, so it is an engine option outside the
-# like-for-like comparison. L2 is the level below every machine's measured
-# crossover (run_joindispatchbench semi sweep: the bitmap still wins at L2 on
-# all four and loses from 2x L2 to L3/2). Needs VW_JOIN_SEMI. Replaces
-# VW_JOIN_SEMI_MAX_BYTES (removed).
-OPTION(VW_JOIN_SEMI_BITMAP "Semi joins through a build-key bitmap when it fits in L2 (needs VW_JOIN_SEMI)" OFF)
-if(DEFINED VW_JOIN_SEMI_MAX_BYTES AND NOT "${VW_JOIN_SEMI_MAX_BYTES}" STREQUAL "0")
-  message(FATAL_ERROR "VW_JOIN_SEMI_MAX_BYTES was removed: use VW_JOIN_SEMI_BITMAP=ON (bitmap <= L2)")
-endif()
-
-# VW_JOIN_DISPATCH was removed: without the Bloom filter and the fused probe
-# (outside the like-for-like comparison) it only ever took the plain hash
-# probe. Its paths are the options themselves: VW_JOIN_SEMI, VW_JOIN_BLOOM,
-# VW_JOIN_FUSED_PROBE, VW_JOIN_SEMI_BITMAP, each deciding once per join.
-if(VW_JOIN_DISPATCH)
-  message(FATAL_ERROR "VW_JOIN_DISPATCH was removed: pass VW_JOIN_SEMI (and VW_JOIN_BLOOM / VW_JOIN_FUSED_PROBE / VW_JOIN_SEMI_BITMAP) explicitly")
-endif()
-if(VW_JOIN_SEMI_BITMAP)
-  if(NOT VW_JOIN_SEMI)
-    message(FATAL_ERROR "VW_JOIN_SEMI_BITMAP replaces VW_JOIN_SEMI's probe for semi joins whose key range fits in L2; enable VW_JOIN_SEMI")
+# Removed join options: VW_JOIN_DISPATCH (without the next two it only took
+# the plain hash probe), VW_JOIN_BLOOM (Bloom filter in front of the probe)
+# and VW_JOIN_SEMI_BITMAP (semi joins through a build-key bitmap); the last
+# two are structures Typer's plans lack. VW_JOIN_SEMI_MAX_BYTES went earlier.
+foreach(opt VW_JOIN_DISPATCH VW_JOIN_BLOOM VW_JOIN_SEMI_BITMAP)
+  if(${opt})
+    message(FATAL_ERROR "${opt} was removed (see the comment above this check)")
   endif()
-  ADD_DEFINITIONS(-DVW_JOIN_SEMI_BITMAP=1)
-  message(STATUS "Building with VW_JOIN_SEMI_BITMAP (semi bitmap when it fits in L2)")
+endforeach()
+if(DEFINED VW_JOIN_SEMI_MAX_BYTES AND NOT "${VW_JOIN_SEMI_MAX_BYTES}" STREQUAL "0")
+  message(FATAL_ERROR "VW_JOIN_SEMI_MAX_BYTES was removed")
 endif()
 
 # VW_GROUP_HAVING: HashGroupBuilder::having(input, condition, selection)
@@ -1228,7 +1171,7 @@ target_include_directories(run_joinbench PUBLIC
     PRIVATE src)
 target_link_libraries(run_joinbench common ${TBB_LIBRARIES})
 
-# run_joindispatchbench: cost questions behind Hashjoin::resolvePaths
+# run_joindispatchbench: cost questions behind the former join dispatch
 # (Q18 Select elision, semi bitmap vs hash, per-vector dispatch)
 add_executable(run_joindispatchbench
   src/benchmarks/primitives/joindispatchbench.cpp
@@ -1297,7 +1240,6 @@ add_executable(test_all
   src/test/vectorwise/aggr_direct.cpp
   src/test/vectorwise/compound.cpp
   src/test/vectorwise/group_concat.cpp
-  src/test/vectorwise/bloom_avx2.cpp
   src/test/vectorwise/crc32_fast.cpp
   src/test/vectorwise/Operators.cpp
   src/test/common/Hashmap.cpp

@@ -501,9 +501,6 @@ QueryBuilder::HashJoinBuilder::addBuildKey(DS col, DS sel, primitives::F3 hash,
    if (!(col.dataSize == 4 && scatter == primitives::scatter_sel_int32_t_col))
       join->semiOk = false;
 #endif
-#ifdef VW_JOIN_BLOOM
-   join->buildKeysSelected = true; // the build side is a filtered subset
-#endif
 
    // create hash primitive for build side
    auto hash_build = make_unique<F3_Op>(sel, buildHashBuffer, col, hash);

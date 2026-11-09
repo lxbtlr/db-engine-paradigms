@@ -682,8 +682,8 @@ TEST_F(HashGroupSmallBuf, groupWithSel) {
 
 // A join the plan derives as semi (unique build key by declared primary key,
 // no build column): each probe row whose key is in the build side is emitted
-// once. With VW_JOIN_SEMI it runs joinSemi (or the bitmap under
-// VW_JOIN_SEMI_BITMAP), without it the inner join path; same rows.
+// once. With VW_JOIN_SEMI it runs joinSemi, without it the inner join path;
+// same rows.
 struct SemiJoinBuilder : public Query, public vectorwise::QueryBuilder {
    enum { probe_matches };
    runtime::GlobalPool pool;
@@ -740,11 +740,7 @@ void semiJoinCheck(bool collide) {
    std::sort(got.begin(), got.end());
    EXPECT_EQ((std::vector<pos_t>{1, 2, 4, 5, 6, 7}), got);
 #ifdef VW_JOIN_SEMI
-#ifdef VW_JOIN_SEMI_BITMAP
-   EXPECT_NE(join->semiHash, join->semiActive);
-#else
    EXPECT_TRUE(join->semiHash);
-#endif
 #endif
 }
 } // namespace

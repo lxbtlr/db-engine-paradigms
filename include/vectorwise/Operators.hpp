@@ -206,19 +206,6 @@ class Hashjoin : public BinaryOperator {
       std::atomic<size_t> found;
       std::atomic<bool> sizeIsSet;
       runtime::Hashmap ht;
-#ifdef VW_JOIN_BLOOM
-      /// VW_JOIN_BLOOM: register-blocked Bloom filter over the build side
-      /// (one 64-bit word per key's block, 4 bits per key), owned by this
-      /// join; nullptr for builds under VW_JOIN_BLOOM_MIN_KEYS
-      std::unique_ptr<uint64_t[]> bloom;
-      uint64_t bloomMask = 0; // words - 1
-#endif
-#ifdef VW_JOIN_SEMI_BITMAP
-      /// VW_JOIN_SEMI_BITMAP: build key range and the exact key bitmap over it
-      std::atomic<int64_t> semiMin{INT64_MAX}, semiMax{INT64_MIN};
-      std::unique_ptr<uint32_t[]> semiBits;
-      bool semiOn = false;
-#endif
       Shared() : found(0), sizeIsSet(false){};
    };
 
@@ -319,29 +306,6 @@ class Hashjoin : public BinaryOperator {
    template <bool Sel> pos_t joinSemiImpl();
 
  public:
-#endif
-#ifdef VW_JOIN_SEMI_BITMAP
-   /// VW_JOIN_SEMI_BITMAP: after the build, a bitmap over the build keys'
-   /// range replaces hash, probe, key equality and gather when it fits in L2
-   bool semiActive = false;
-   bool semiCandidate() const { return semiKeysOk(); }
-   pos_t semiProbe(size_t n);
-   void semiRange();
-   void semiSetBits();
-#endif
-#ifdef VW_JOIN_BLOOM
-   /// probes that passed the Bloom filter for the current probe vector:
-   /// index into probeHashes and hash, in probe order (bloomOn only)
-   std::vector<pos_t> bloomSel;
-   std::vector<runtime::Hashmap::hash_t> bloomHashes;
-   size_t bloomCount = 0;
-   bool bloomOn = false;
-   /// plan fact recorded by QueryBuilder::addBuildKey: the build keys are
-   /// read through a selection vector, i.e. the build side is a filtered
-   /// subset of its input (the filter's precondition)
-   bool buildKeysSelected = false;
-   void bloomInsert();
-   void bloomFilter(size_t n);
 #endif
 #ifdef VW_JOIN_FUSED_PROBE
    /// VW_JOIN_FUSED_PROBE: the probe side's single int32 hash op (set by
