@@ -14,10 +14,17 @@
 #ifdef VW_CONCAT_HAVE_NEON
 #include <arm_neon.h>
 #endif
-// fused concat + hash on AVX-512 (simd_hash::murmur), except where the
+// fused concat + hash in registers on AVX-512 (simd_hash::murmur), when
+// that is the SIMD hash tier (VW_SIMD_HASH_TIER_AVX512) and except where the
 // target downclocks under AVX-512 (VW_CONCAT_NO_AVX512_HASH, dubliner)
-#if defined(VW_HAVE_SIMD_HASH) && !defined(VW_CONCAT_NO_AVX512_HASH)
+#if defined(VW_SIMD_HASH_TIER_AVX512) && !defined(VW_CONCAT_NO_AVX512_HASH)
 #define VW_CONCAT_FUSED_SIMD 1
+#endif
+// the blocked kernel's hash pass in the SIMD hash tier (simd_hash::hash_keys:
+// AVX-512 as above, else AVX2 or NEON)
+#if defined(VW_CONCAT_FUSED_SIMD) ||                                          \
+    (defined(VW_HAVE_SIMD_HASH_ANY) && !defined(VW_SIMD_HASH_TIER_AVX512))
+#define VW_CONCAT_BLOCKED_SIMD 1
 #endif
 
 namespace vectorwise {
@@ -528,7 +535,7 @@ void rowHashKernel(pos_t n, const char* const* data, const pos_t* sel,
 /// the hash pass of the blocked kernel over m packed keys: Hash_T's
 template <size_t K>
 void hashBlock(pos_t m, const char* keys, uint64_t* hashes) {
-#ifdef VW_CONCAT_FUSED_SIMD
+#ifdef VW_CONCAT_BLOCKED_SIMD
    using hash_t = primitives::simd_hash::hash_t;
    auto* out = reinterpret_cast<hash_t*>(hashes);
    if constexpr (K == 1) return primitives::simd_hash::hash_keys<uint8_t>(m, keys, out);
@@ -577,6 +584,9 @@ template <bool Sel, size_t... W> constexpr RowHashFn rowHashScalar() {
 template <bool Sel, size_t... W> constexpr RowHashFn rowHashSimd() {
 #ifdef VW_CONCAT_FUSED_SIMD
    return kHash64 ? rowHashKernel<Sel, true, W...> : nullptr;
+#elif defined(VW_CONCAT_BLOCKED_SIMD)
+   // no in-register AVX-512 hash: the blocked kernel, hashing in the tier
+   return rowHashBlocked<Sel, W...>();
 #else
    return nullptr;
 #endif
@@ -792,7 +802,7 @@ bool runHash(const Plan& p, HashMode mode, pos_t n, const char* const* data,
 }
 
 bool simdHashAvailable() {
-#ifdef VW_CONCAT_FUSED_SIMD
+#ifdef VW_CONCAT_BLOCKED_SIMD
    return kHash64;
 #else
    return false;

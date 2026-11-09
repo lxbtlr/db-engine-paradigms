@@ -952,7 +952,7 @@ fusedHash8(const int32_t* keys, const pos_t* sel, size_t i) {
    const __m512i k = Sel ? primitives::simd_hash::gather8<int32_t>(keys, sel + i)
                          : primitives::simd_hash::widen8<int32_t>(keys + i);
    return primitives::simd_crc::crc_hash8(k, s);
-#elif !defined(VW_USE_CRC32) && defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH)
+#elif !defined(VW_USE_CRC32) && defined(VW_SIMD_HASH) && defined(VW_SIMD_HASH_TIER_AVX512)
    const __m512i k = Sel ? primitives::simd_hash::gather8<int32_t>(keys, sel + i)
                          : primitives::simd_hash::widen8<int32_t>(keys + i);
    return primitives::simd_hash::murmur(
@@ -2653,8 +2653,8 @@ void HashGroup::Hash(pos_t n) {
 }
 
 template <typename T> void HashGroup::Hash_T(pos_t n) {
-#if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH) && !defined(VW_USE_CRC32)
-   // packed 1/2/4/8-byte keys: AVX-512 MurmurHash64A, bit-identical to
+#if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH_ANY) && !defined(VW_USE_CRC32)
+   // packed 1/2/4/8-byte keys: SIMD MurmurHash64A, bit-identical to
    // hashFn.hashKey(key) below
    if constexpr (!kByteKey<T>) {
       primitives::simd_hash::hash_keys<T>(n, VW_GROUP_KEY_DATA,

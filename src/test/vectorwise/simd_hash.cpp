@@ -1,5 +1,6 @@
-// Bit-exactness tests for the AVX-512 MurmurHash64A kernels (SimdHash.hpp)
-// against the scalar templates with runtime::MurMurHash. Build and probe
+// Bit-exactness tests for the SIMD MurmurHash64A kernels (SimdHash.hpp), every
+// tier compiled in (avx512, avx2, neon) and the public names (the selected
+// tier), against the scalar templates with runtime::MurMurHash. Build and probe
 // sides may hash through different paths, so any difference is a bug.
 #include "common/runtime/Hash.hpp"
 #include "common/runtime/Types.hpp"
@@ -31,7 +32,7 @@ using runtime::MurMurHash;
 using hash_t = defs::hash_t;
 
 namespace {
-#ifdef VW_HAVE_SIMD_HASH
+#ifdef VW_HAVE_SIMD_HASH_ANY
 
 const std::vector<size_t> kSizes = {0, 1, 7, 8, 9, 15, 16, 17, 31, 1000, 1024};
 constexpr size_t kSlack = 8;
@@ -69,7 +70,40 @@ void expectSame(const std::vector<hash_t>& ref, const std::vector<hash_t>& got,
       ASSERT_EQ(kCanary, got[i]) << where << " overwrite at " << i;
 }
 
-template <typename T> void checkType(const char* name) {
+/// one tier's kernels: Tier::hash<T>(...) etc. call simd_hash::<tier>::
+#define VW_HASH_TIER(Name, NS)                                                 \
+   struct Name {                                                               \
+      template <typename T> static void hash(size_t n, hash_t* r, T* in) {     \
+         NS::hash<T, MurMurHash>(n, r, in);                                    \
+      }                                                                        \
+      template <typename T>                                                    \
+      static void hash_sel(size_t n, pos_t* s, hash_t* r, T* in) {             \
+         NS::hash_sel<T, MurMurHash>(n, s, r, in);                             \
+      }                                                                        \
+      template <typename T> static void rehash(size_t n, hash_t* r, T* in) {   \
+         NS::rehash<T, MurMurHash>(n, r, in);                                  \
+      }                                                                        \
+      template <typename T>                                                    \
+      static void rehash_sel(size_t n, pos_t* s, hash_t* r, T* in) {           \
+         NS::rehash_sel<T, MurMurHash>(n, s, r, in);                           \
+      }                                                                        \
+      template <typename T>                                                    \
+      static void hash_keys(size_t n, const char* k, hash_t* o) {              \
+         NS::hash_keys<T>(n, k, o);                                            \
+      }                                                                        \
+   };
+VW_HASH_TIER(Public, simd_hash)
+#ifdef VW_HAVE_SIMD_HASH
+VW_HASH_TIER(Avx512, simd_hash::avx512)
+#endif
+#ifdef VW_HAVE_SIMD_HASH_AVX2
+VW_HASH_TIER(Avx2, simd_hash::avx2)
+#endif
+#ifdef VW_HAVE_SIMD_HASH_NEON
+VW_HASH_TIER(Neon, simd_hash::neon)
+#endif
+
+template <typename T, typename Tier> void checkType(const char* name) {
    std::mt19937_64 rng(7);
    for (size_t n : kSizes) {
       auto in = values<T>(n, rng);
@@ -79,13 +113,13 @@ template <typename T> void checkType(const char* name) {
       {  // hash
          std::vector<hash_t> ref(n + kSlack, kCanary), got(n + kSlack, kCanary);
          primitives::hash<T, MurMurHash>(n, ref.data(), in.data());
-         simd_hash::hash<T, MurMurHash>(n, got.data(), in.data());
+         Tier::template hash<T>(n, got.data(), in.data());
          expectSame(ref, got, n, "hash " + ctx);
       }
       {  // hash_sel
          std::vector<hash_t> ref(k + kSlack, kCanary), got(k + kSlack, kCanary);
          primitives::hash_sel<T, MurMurHash>(k, sel.data(), ref.data(), in.data());
-         simd_hash::hash_sel<T, MurMurHash>(k, sel.data(), got.data(), in.data());
+         Tier::template hash_sel<T>(k, sel.data(), got.data(), in.data());
          expectSame(ref, got, k, "hash_sel " + ctx);
       }
       {  // rehash: random seeds in result
@@ -93,7 +127,7 @@ template <typename T> void checkType(const char* name) {
          for (size_t i = 0; i < n; ++i) ref[i] = rng();
          auto got = ref;
          primitives::rehash<T, MurMurHash>(n, ref.data(), in.data());
-         simd_hash::rehash<T, MurMurHash>(n, got.data(), in.data());
+         Tier::template rehash<T>(n, got.data(), in.data());
          expectSame(ref, got, n, "rehash " + ctx);
       }
       {  // rehash_sel
@@ -101,14 +135,14 @@ template <typename T> void checkType(const char* name) {
          for (size_t i = 0; i < k; ++i) ref[i] = rng();
          auto got = ref;
          primitives::rehash_sel<T, MurMurHash>(k, sel.data(), ref.data(), in.data());
-         simd_hash::rehash_sel<T, MurMurHash>(k, sel.data(), got.data(), in.data());
+         Tier::template rehash_sel<T>(k, sel.data(), got.data(), in.data());
          expectSame(ref, got, k, "rehash_sel " + ctx);
       }
    }
 }
 
 /// HashGroup packed keys: hashFn.hashKey(key) with key zero-extended.
-template <typename T> void checkPackedKeys(const char* name) {
+template <typename T, typename Tier> void checkPackedKeys(const char* name) {
    std::mt19937_64 rng(9);
    MurMurHash h;
    for (size_t n : kSizes) {
@@ -117,35 +151,48 @@ template <typename T> void checkPackedKeys(const char* name) {
       if (n > 1) keys[0] = std::numeric_limits<T>::max();
       std::vector<hash_t> ref(n + kSlack, kCanary), got(n + kSlack, kCanary);
       for (size_t i = 0; i < n; ++i) ref[i] = h.hashKey(keys[i]);
-      simd_hash::hash_keys<T>(n, reinterpret_cast<const char*>(keys.data()),
-                              got.data());
+      Tier::template hash_keys<T>(n, reinterpret_cast<const char*>(keys.data()),
+                                  got.data());
       expectSame(ref, got, n, std::string("hash_keys ") + name + " n=" + std::to_string(n));
    }
 }
 
-#endif // VW_HAVE_SIMD_HASH
+#endif // VW_HAVE_SIMD_HASH_ANY
 } // namespace
 
-#ifdef VW_HAVE_SIMD_HASH
-TEST(SimdHash, Int8) { checkType<int8_t>("int8"); }
-TEST(SimdHash, Int16) { checkType<int16_t>("int16"); }
-TEST(SimdHash, Int32) { checkType<int32_t>("int32"); }
-TEST(SimdHash, Int64) { checkType<int64_t>("int64"); }
-TEST(SimdHash, HashT) { checkType<uint64_t>("hash_t"); }
-TEST(SimdHash, Date) { checkType<Date>("Date"); }
-TEST(SimdHash, PackedKeys) {
-   checkPackedKeys<uint8_t>("u8");
-   checkPackedKeys<uint16_t>("u16");
-   checkPackedKeys<uint32_t>("u32");
-   checkPackedKeys<uint64_t>("u64");
-}
+// every key type and form, and the packed keys, for one tier
+#define VW_HASH_TIER_TESTS(Suite, Tier)                                        \
+   TEST(Suite, Int8) { checkType<int8_t, Tier>("int8"); }                      \
+   TEST(Suite, Int16) { checkType<int16_t, Tier>("int16"); }                   \
+   TEST(Suite, Int32) { checkType<int32_t, Tier>("int32"); }                   \
+   TEST(Suite, Int64) { checkType<int64_t, Tier>("int64"); }                   \
+   TEST(Suite, HashT) { checkType<uint64_t, Tier>("hash_t"); }                 \
+   TEST(Suite, Date) { checkType<Date, Tier>("Date"); }                        \
+   TEST(Suite, PackedKeys) {                                                   \
+      checkPackedKeys<uint8_t, Tier>("u8");                                    \
+      checkPackedKeys<uint16_t, Tier>("u16");                                  \
+      checkPackedKeys<uint32_t, Tier>("u32");                                  \
+      checkPackedKeys<uint64_t, Tier>("u64");                                  \
+   }
+
+#ifdef VW_HAVE_SIMD_HASH_ANY
+VW_HASH_TIER_TESTS(SimdHash, Public)
 #else
-TEST(SimdHash, Skipped) { VW_TEST_SKIP("no AVX-512F/DQ or 32-bit hashes"); }
+TEST(SimdHash, Skipped) { VW_TEST_SKIP("no SIMD hash tier or 32-bit hashes"); }
+#endif
+#ifdef VW_HAVE_SIMD_HASH
+VW_HASH_TIER_TESTS(SimdHashAvx512, Avx512)
+#endif
+#ifdef VW_HAVE_SIMD_HASH_AVX2
+VW_HASH_TIER_TESTS(SimdHashAvx2, Avx2)
+#endif
+#ifdef VW_HAVE_SIMD_HASH_NEON
+VW_HASH_TIER_TESTS(SimdHashNeon, Neon)
 #endif
 
 // The public primitive names must follow VW_SIMD_HASH.
 TEST(SimdHashRedirect, Names) {
-#if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH) && !defined(VW_USE_CRC32)
+#if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH_ANY) && !defined(VW_USE_CRC32)
    EXPECT_EQ((void*)hash_int32_t_col, (void*)(&simd_hash::hash<int32_t, MurMurHash>));
    EXPECT_EQ((void*)hash_sel_int32_t_col,
              (void*)(&simd_hash::hash_sel<int32_t, MurMurHash>));

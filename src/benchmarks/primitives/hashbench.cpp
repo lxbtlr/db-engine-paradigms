@@ -3,7 +3,13 @@
 // times
 //   murmur_scalar : the scalar template with runtime::MurMurHash (default)
 //   crc32_scalar  : the scalar template with runtime::CRC32Hash (VW_USE_CRC32)
-//   murmur_simd   : the AVX-512 MurmurHash64A kernels (VW_SIMD_HASH)
+//   murmur_avx512 : the SIMD MurmurHash64A tiers (VW_SIMD_HASH), every one
+//   murmur_avx2     the target has (avx512 and avx2 on AVX-512 x86, avx2 on
+//   murmur_neon     AVX2 x86, neon on aarch64)
+//   crc32_vpclmul : VW_CRC32_VPCLMUL's kernels (hash, hash_sel, packed keys;
+//                   AVX-512 + VPCLMULQDQ targets)
+// crc32_scalar is named crc32_fast when built with VW_CRC32_FAST (one crc32
+// per key with a fixed seed).
 //   hash4_old     : the pre-existing hash4 / hash4_sel(ASM) kernels (int32
 //                   only; SIMDhash=1 path; zero-extends keys)
 // All impls are compiled into one binary regardless of the CMake options.
@@ -15,6 +21,7 @@
 #include "common/runtime/Hash.hpp"
 #include "common/runtime/Types.hpp"
 #include "vectorwise/Primitives.hpp"
+#include "vectorwise/SimdCrc.hpp"
 #include "vectorwise/SimdHash.hpp"
 #include <algorithm>
 #include <chrono>
@@ -143,28 +150,62 @@ void benchSel(const char* form, const std::vector<ImplF3>& impls) {
    }
 }
 
-#ifdef VW_HAVE_SIMD_HASH
-#define SIMD(expr) (expr)
+#ifdef VW_CRC32_FAST
+constexpr const char* kCrcName = "crc32_fast";
 #else
-#define SIMD(expr) nullptr
+constexpr const char* kCrcName = "crc32_scalar";
 #endif
 
+/// the four primitive forms of one hash implementation
+struct Forms {
+   const char* name;
+   F2 hash, rehash;
+   F3 hash_sel, rehash_sel;
+};
+#define VW_MURMUR_FORMS(Name, NS)                                              \
+   Forms {                                                                     \
+      Name, (F2)&NS::hash<T, MurMurHash>, (F2)&NS::rehash<T, MurMurHash>,      \
+          (F3)&NS::hash_sel<T, MurMurHash>, (F3)&NS::rehash_sel<T, MurMurHash> \
+   }
+
+template <typename T> std::vector<Forms> implsOf() {
+   std::vector<Forms> f = {
+       VW_MURMUR_FORMS("murmur_scalar", primitives),
+       {kCrcName, (F2)&primitives::hash<T, CRC32Hash>,
+        (F2)&primitives::rehash<T, CRC32Hash>,
+        (F3)&primitives::hash_sel<T, CRC32Hash>,
+        (F3)&primitives::rehash_sel<T, CRC32Hash>}};
+#ifdef VW_HAVE_SIMD_HASH
+   f.push_back(VW_MURMUR_FORMS("murmur_avx512", simd_hash::avx512));
+#endif
+#ifdef VW_HAVE_SIMD_HASH_AVX2
+   f.push_back(VW_MURMUR_FORMS("murmur_avx2", simd_hash::avx2));
+#endif
+#ifdef VW_HAVE_SIMD_HASH_NEON
+   f.push_back(VW_MURMUR_FORMS("murmur_neon", simd_hash::neon));
+#endif
+#ifdef VW_HAVE_SIMD_CRC
+   // no rehash kernel (a per-row seed needs two reductions per key)
+   f.push_back({"crc32_vpclmul", (F2)&simd_crc::hash<T>, nullptr,
+                (F3)&simd_crc::hash_sel<T>, nullptr});
+#endif
+   return f;
+}
+
 template <typename T> void allForms() {
-   benchDense<T>("hash", {{"murmur_scalar", (F2)&primitives::hash<T, MurMurHash>},
-                          {"crc32_scalar", (F2)&primitives::hash<T, CRC32Hash>},
-                          {"murmur_simd", SIMD(((F2)&simd_hash::hash<T, MurMurHash>))}});
-   benchDense<T>("rehash",
-                 {{"murmur_scalar", (F2)&primitives::rehash<T, MurMurHash>},
-                  {"crc32_scalar", (F2)&primitives::rehash<T, CRC32Hash>},
-                  {"murmur_simd", SIMD(((F2)&simd_hash::rehash<T, MurMurHash>))}});
-   benchSel<T>("hash_sel",
-               {{"murmur_scalar", (F3)&primitives::hash_sel<T, MurMurHash>},
-                {"crc32_scalar", (F3)&primitives::hash_sel<T, CRC32Hash>},
-                {"murmur_simd", SIMD(((F3)&simd_hash::hash_sel<T, MurMurHash>))}});
-   benchSel<T>("rehash_sel",
-               {{"murmur_scalar", (F3)&primitives::rehash_sel<T, MurMurHash>},
-                {"crc32_scalar", (F3)&primitives::rehash_sel<T, CRC32Hash>},
-                {"murmur_simd", SIMD(((F3)&simd_hash::rehash_sel<T, MurMurHash>))}});
+   const auto impls = implsOf<T>();
+   std::vector<ImplF2> h, rh;
+   std::vector<ImplF3> hs, rhs;
+   for (auto& f : impls) {
+      h.push_back({f.name, f.hash});
+      rh.push_back({f.name, f.rehash});
+      hs.push_back({f.name, f.hash_sel});
+      rhs.push_back({f.name, f.rehash_sel});
+   }
+   benchDense<T>("hash", h);
+   benchDense<T>("rehash", rh);
+   benchSel<T>("hash_sel", hs);
+   benchSel<T>("rehash_sel", rhs);
 }
 
 /// HashGroup packed keys: hashes[i] = hashFn.hashKey(key_i)
@@ -184,14 +225,25 @@ template <typename T> void packedKeys() {
    double ns = bestNs([&] { for (size_t r = 0; r < reps; ++r) scalarMM(); }, reps * vecSize);
    row("packed_keys", "murmur_scalar", tname<T>(), "l1", 100, ns);
    ns = bestNs([&] { for (size_t r = 0; r < reps; ++r) scalarCRC(); }, reps * vecSize);
-   row("packed_keys", "crc32_scalar", tname<T>(), "l1", 100, ns);
+   row("packed_keys", kCrcName, tname<T>(), "l1", 100, ns);
+   const char* k = reinterpret_cast<const char*>(keys.data());
+   auto simd = [&](const char* name, void (*fn)(size_t, const char*, hash_t*)) {
+      const double t = bestNs([&] {
+         for (size_t r = 0; r < reps; ++r) fn(vecSize, k, out.data());
+      }, reps * vecSize);
+      row("packed_keys", name, tname<T>(), "l1", 100, t);
+   };
 #ifdef VW_HAVE_SIMD_HASH
-   ns = bestNs([&] {
-      for (size_t r = 0; r < reps; ++r)
-         simd_hash::hash_keys<T>(vecSize, reinterpret_cast<const char*>(keys.data()),
-                                 out.data());
-   }, reps * vecSize);
-   row("packed_keys", "murmur_simd", tname<T>(), "l1", 100, ns);
+   simd("murmur_avx512", &simd_hash::avx512::hash_keys<T>);
+#endif
+#ifdef VW_HAVE_SIMD_HASH_AVX2
+   simd("murmur_avx2", &simd_hash::avx2::hash_keys<T>);
+#endif
+#ifdef VW_HAVE_SIMD_HASH_NEON
+   simd("murmur_neon", &simd_hash::neon::hash_keys<T>);
+#endif
+#ifdef VW_HAVE_SIMD_CRC
+   simd("crc32_vpclmul", &simd_crc::hash_keys<T>);
 #endif
    sink = out[0];
 }
@@ -213,9 +265,8 @@ int main(int argc, char** argv) {
          return 1;
       }
    }
-#ifndef VW_HAVE_SIMD_HASH
-   std::fprintf(stderr, "run_hashbench: no AVX-512F/DQ, murmur_simd rows skipped\n");
-#endif
+   std::fprintf(stderr, "run_hashbench: SIMD MurmurHash tier in the engine: %s\n",
+                simd_hash::kTier);
    std::printf("form,impl,type,mode,vec,in_density_pct,ns_per_tuple\n");
 
    allForms<int32_t>();

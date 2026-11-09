@@ -115,22 +115,26 @@ void run(const Plan& p, pos_t n, const char* const* data,
 enum class HashMode : uint8_t {
    Scalar,  ///< scalar MurmurHash64A per row, in the row loop
    Simd,    ///< 8 keys per zmm from their registers, in the row loop
-   Blocked  ///< the row kernel over kHashBlock rows, then the AVX-512 hash
-            ///< pass (simd_hash::hash_keys) over that block, in L1
+            ///< (AVX-512 tier only; otherwise as Blocked)
+   Blocked  ///< the row kernel over kHashBlock rows, then the SIMD hash
+            ///< pass (simd_hash::hash_keys, AVX-512 / AVX2 / NEON) over
+            ///< that block, in L1
 };
 constexpr pos_t kHashBlock = 128;
 
 /// Row plans: run() plus hashes[i] = the hash HashGroup::Hash_T gives key
 /// i (MurmurHash64A, seed 0: of the zero-extended key for 1/2/4/8-byte
 /// keys, of its bytes otherwise; bit-identical to Hash_T and
-/// simd_hash::hash_keys), in one pass over the rows. Simd and Blocked fall
-/// back to Scalar where there is no AVX-512 hash: not compiled in, or
-/// dubliner (VW_CONCAT_NO_AVX512_HASH: AVX-512 downclocks Cascade Lake).
+/// simd_hash::hash_keys), in one pass over the rows. Simd runs the Blocked
+/// kernel where the SIMD hash tier is not AVX-512 (AVX2, NEON,
+/// VW_SIMD_HASH_WIDTH=256); both fall back to Scalar where there is no SIMD
+/// hash, or where the tier is AVX-512 on dubliner (VW_CONCAT_NO_AVX512_HASH:
+/// AVX-512 downclocks Cascade Lake).
 /// false (nothing written) for other plans and for selection-vector
 /// columns that do not share one selection vector.
 bool runHash(const Plan& p, HashMode mode, pos_t n, const char* const* data,
              const pos_t* const* sel, char* out, uint64_t* hashes);
-/// whether runHash has an AVX-512 hash (Simd, Blocked) in this build
+/// whether runHash has a SIMD hash (Simd, Blocked) in this build
 bool simdHashAvailable();
 
 /// one key column of a width other than 1/2/4/8 bytes (Concat_T<char*>,

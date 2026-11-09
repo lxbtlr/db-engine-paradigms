@@ -668,11 +668,14 @@ if(VW_Q9_FIELD_ORDER)
   message(STATUS "Building with VW_Q9_FIELD_ORDER")
 endif()
 
-# AVX-512 MurmurHash64A kernels (include/vectorwise/SimdHash.hpp) for the
-# hash/hash_sel/rehash/rehash_sel primitives and HashGroup's packed-key hash.
-# Bit-identical to the scalar hash. Only applies to the default MurMurHash
-# (not with VW_USE_CRC32 or HASH_SIZE_32); needs AVX512F + AVX512DQ.
-OPTION(VW_SIMD_HASH "AVX-512 MurmurHash64A kernels for VectorWise hashing" OFF)
+# SIMD MurmurHash64A kernels (include/vectorwise/SimdHash.hpp) for the
+# hash/hash_sel/rehash/rehash_sel primitives and HashGroup's packed-key hash,
+# in the widest tier the target has: AVX-512 (AVX512F + AVX512DQ), else AVX2,
+# else NEON. Bit-identical to the scalar hash. Only applies to the default
+# MurMurHash (not with VW_USE_CRC32 or HASH_SIZE_32).
+# VW_SIMD_HASH_WIDTH=256 makes an AVX-512 target use the AVX2 tier, here and
+# in the packed-key hash of VW_GROUP_CONCAT_HASH (no effect elsewhere).
+OPTION(VW_SIMD_HASH "SIMD MurmurHash64A kernels (AVX-512 / AVX2 / NEON) for VectorWise hashing" OFF)
 if(VW_SIMD_HASH)
   if(VW_USE_CRC32 OR HASH_SIZE_32)
     message(WARNING "VW_SIMD_HASH only affects MurMurHash; it is a no-op with VW_USE_CRC32 / HASH_SIZE_32")
@@ -680,6 +683,14 @@ if(VW_SIMD_HASH)
   ADD_DEFINITIONS(-DVW_SIMD_HASH=1)
   message(STATUS "Building with VW_SIMD_HASH")
 endif(VW_SIMD_HASH)
+set(VW_SIMD_HASH_WIDTH "512" CACHE STRING "SIMD MurmurHash vector width: 512 (widest tier), 256 (AVX2 tier)")
+set_property(CACHE VW_SIMD_HASH_WIDTH PROPERTY STRINGS 512 256)
+if(VW_SIMD_HASH_WIDTH STREQUAL "256")
+  ADD_DEFINITIONS(-DVW_SIMD_HASH_WIDTH_256=1)
+  message(STATUS "Building with VW_SIMD_HASH_WIDTH=256 (AVX2 MurmurHash tier)")
+elseif(NOT VW_SIMD_HASH_WIDTH STREQUAL "512")
+  message(FATAL_ERROR "VW_SIMD_HASH_WIDTH must be 512 or 256 (got '${VW_SIMD_HASH_WIDTH}')")
+endif()
 
 # VW_SIMD_HASH_GATHER: how the AVX-512 hash kernels (VW_SIMD_HASH,
 # VW_CRC32_VPCLMUL) collect keys through a selection vector (hash_sel,

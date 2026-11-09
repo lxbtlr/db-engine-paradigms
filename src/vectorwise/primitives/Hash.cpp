@@ -22,12 +22,12 @@ namespace primitives {
 #endif
 
 
-#if defined(VW_SIMD_HASH) && !defined(VW_HAVE_SIMD_HASH)
-#pragma message("VW_SIMD_HASH: needs AVX-512F+DQ and 64-bit hashes, using scalar hashing")
+#if defined(VW_SIMD_HASH) && !defined(VW_HAVE_SIMD_HASH_ANY)
+#pragma message("VW_SIMD_HASH: needs AVX2, AVX-512F+DQ or NEON and 64-bit hashes, using scalar hashing")
 #endif
 
 #ifdef VW_SIMD_HASH
-// VW_SIMD_HASH: the public names point at the AVX-512 MurmurHash64A kernels
+// VW_SIMD_HASH: the public names point at the SIMD MurmurHash64A kernels
 // (SimdHash.hpp) for supported key types when DEFAULT_HASH is MurMurHash;
 // otherwise at the scalar templates. Results are bit-identical.
 #define MK_HASH(type)                                                          \

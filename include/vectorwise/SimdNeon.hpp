@@ -35,6 +35,7 @@
 // almost 1:1; Neoverse N1 (burrata) and Cortex-A76 (rpi5) have no SVE.
 //===----------------------------------------------------------------------===//
 #include "common/runtime/Types.hpp"
+#include "vectorwise/SimdHash.hpp"
 #include "vectorwise/defs.hpp"
 #include <cstddef>
 #include <cstdint>
@@ -141,32 +142,11 @@ VW_NEON_INLINE size_t emit4(pos_t* out, uint32x4_t ids, unsigned m) {
    return kPop4[m];
 }
 
-/// low 64 bits of a * b per lane: a*b mod 2^64 = al*bl + ((ah*bl + al*bh) << 32)
-VW_NEON_INLINE uint64x2_t mullo64(uint64x2_t a, uint32x2_t bl, uint32x2_t bh) {
-   const uint32x2_t al = vmovn_u64(a), ah = vshrn_n_u64(a, 32);
-   const uint64x2_t cross = vmlal_u32(vmull_u32(ah, bl), al, bh);
-   return vaddq_u64(vmull_u32(al, bl), vshlq_n_u64(cross, 32));
-}
-VW_NEON_INLINE uint64x2_t mullo64(uint64x2_t a, uint64x2_t b) {
-   return mullo64(a, vmovn_u64(b), vshrn_n_u64(b, 32));
-}
-
-/// MurmurHash64A of 2 keys; bit-identical to runtime::MurMurHash::hashKey
-/// (engine: SimdHash.hpp murmur(), the zmm version)
-VW_NEON_INLINE uint64x2_t murmur2(uint64x2_t k, uint64x2_t seed) {
-   constexpr uint64_t m = 0xc6a4a7935bd1e995ull;
-   const uint32x2_t ml = vdup_n_u32(uint32_t(m)), mh = vdup_n_u32(uint32_t(m >> 32));
-   uint64x2_t h = veorq_u64(seed, vdupq_n_u64(0x8445d61a4e774912ull ^ (8 * m)));
-   k = mullo64(k, ml, mh);
-   k = veorq_u64(k, vshrq_n_u64(k, 47));
-   k = mullo64(k, ml, mh);
-   h = veorq_u64(h, k);
-   h = mullo64(h, ml, mh);
-   h = veorq_u64(h, vshrq_n_u64(h, 47));
-   h = mullo64(h, ml, mh);
-   h = veorq_u64(h, vshrq_n_u64(h, 47));
-   return h;
-}
+/// mullo64 (a * b mod 2^64 per lane) and murmur2 (MurmurHash64A of 2 keys,
+/// bit-identical to runtime::MurMurHash::hashKey) are the engine's NEON tier
+/// of VW_SIMD_HASH
+using simd_hash::neon::mullo64;
+using simd_hash::neon::murmur2;
 
 //--- comparators -------------------------------------------------------------
 
@@ -315,7 +295,7 @@ pos_t selsel_col_val(pos_t n, pos_t* RES inSel, pos_t* RES result,
 
 /// hash<int32_t, MurMurHash>: keys sign-extended to 64 bits, seed `seed`,
 /// 4 keys per step (two independent 2-lane chains).
-/// engine site: SimdHash.hpp hash() (VW_HAVE_SIMD_HASH needs AVX512F+DQ)
+/// engine: SimdHash.hpp simd_hash::neon::hash (VW_SIMD_HASH's neon tier)
 inline void murmur_hash_i32(size_t n, uint64_t* RES out, const int32_t* RES in,
                             uint64_t seed) {
    const uint64x2_t s = vdupq_n_u64(seed);
@@ -643,7 +623,9 @@ inline pos_t sve_proj_dense_multiplies(pos_t n, pos_t* RES inSel,
 // SimdSelection.hpp pick_selsel_*            VW_SIMD_SEL_GATHER   SCALAR on N1, SVE on V1
 // SimdSelection.hpp sel_char_eq (AVX512BW)   VW_SIMD_SEL_CHAR     not measured (byte compare
 //                                                                 + vmaxvq: likely PORT)
-// SimdHash.hpp:31 (AVX512F+DQ)               VW_SIMD_HASH         SCALAR (use VW_USE_CRC32)
+// SimdHash.hpp neon tier                     VW_SIMD_HASH         WIRED (this study: SCALAR,
+//                                                                 use VW_USE_CRC32; run_hashbench
+//                                                                 measures it in the engine)
 // SimdCrc.hpp:31 (VPCLMULQDQ)                VW_CRC32_VPCLMUL     SCALAR (PMULL 2.6x slower
 //                                                                 than crc32cx on burrata)
 // (removed) dense projections               VW_PROJ_DENSE        REMOVED: choosing dense needs
