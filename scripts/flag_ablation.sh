@@ -606,6 +606,9 @@ config_flags() {
     simd_between)        echo "$(config_flags cmake_defaults) $SEL -DVW_SEL_BETWEEN=ON" ;;
     fair_between)        echo "$(config_flags fair_compound) -DVW_SEL_BETWEEN=ON" ;;
     sel_between)         echo "$(config_flags fair_sel) -DVW_SEL_BETWEEN=ON" ;;
+    # the full fair pool: compound key construction and compound range
+    # selection together
+    fair_best)           echo "$(config_flags fair_concat) -DVW_SEL_BETWEEN=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)
