@@ -183,6 +183,10 @@ QueryBuilder::DataStorage::operator pos_t*() const {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F1 op, DS a) {
+#ifdef VW_SEL_BETWEEN
+   checkUnwritten({}, &a);
+   flushHeldSel();
+#endif
 #ifdef VW_PROJ_COMPOUND
    flushHeld();
 #endif
@@ -194,6 +198,10 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F1 op, DS a) {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F2 op, DS a, DS b) {
+#ifdef VW_SEL_BETWEEN
+   checkUnwritten({&b}, &a);
+   flushHeldSel();
+#endif
 #ifdef VW_PROJ_COMPOUND
    flushHeld();
 #endif
@@ -206,6 +214,19 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F2 op, DS a, DS b) {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F3 op, DS a, DS b, DS c) {
+#ifdef VW_SEL_BETWEEN
+   checkUnwritten({&b, &c}, &a);
+   primitives::between::Desc sdesc;
+   if (primitives::between::describe((const void*)op, sdesc)) {
+      assert(!sdesc.selInput);
+#ifdef VW_PROJ_COMPOUND
+      flushHeld();
+#endif
+      holdOrFuseSel({sdesc, (const void*)op, DS(), a, b, c});
+      return *this;
+   }
+   flushHeldSel();
+#endif
 #ifdef VW_PROJ_COMPOUND
    primitives::compound::Desc desc;
    if (primitives::compound::describe((const void*)op, desc)) {
@@ -224,6 +245,19 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F3 op, DS a, DS b, DS c) {
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
                                        DS d) {
+#ifdef VW_SEL_BETWEEN
+   checkUnwritten({&a, &c, &d}, &b);
+   primitives::between::Desc sdesc;
+   if (primitives::between::describe((const void*)op, sdesc)) {
+      assert(sdesc.selInput);
+#ifdef VW_PROJ_COMPOUND
+      flushHeld();
+#endif
+      holdOrFuseSel({sdesc, (const void*)op, a, b, c, d});
+      return *this;
+   }
+   flushHeldSel();
+#endif
 #ifdef VW_PROJ_COMPOUND
    primitives::compound::Desc desc;
    if (primitives::compound::describe((const void*)op, desc)) {
@@ -242,6 +276,9 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
 }
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Expression>() {
+#ifdef VW_SEL_BETWEEN
+   flushHeldSel();
+#endif
 #ifdef VW_PROJ_COMPOUND
    flushHeld();
 #endif
@@ -250,6 +287,9 @@ operator std::unique_ptr<vectorwise::Expression>() {
 
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Aggregates>() {
+#ifdef VW_SEL_BETWEEN
+   flushHeldSel();
+#endif
 #ifdef VW_PROJ_COMPOUND
    flushHeld();
 #endif
@@ -342,6 +382,96 @@ bool QueryBuilder::ExpressionBuilder::fuse(const HeldProjection& first,
    pb.registerDS(&op->b);
    c.registerDS(&op->c);
    expression->ops.push_back(move(op));
+   return true;
+}
+#endif
+
+#ifdef VW_SEL_BETWEEN
+void QueryBuilder::ExpressionBuilder::flushHeldSel() {
+   if (!heldSel) return;
+   auto& h = *heldSel;
+   if (h.desc.selInput) {
+      auto f4 = make_unique<F4_Op>(h.sel, h.out, h.col, h.val,
+                                   (primitives::F4)h.prim);
+      h.sel.registerDS(&f4->inputSelectionV);
+      h.out.registerDS(&f4->outputSelectionV);
+      h.col.registerDS(&f4->param1);
+      h.val.registerDS(&f4->param2);
+      expression->ops.push_back(move(f4));
+   } else {
+      auto f3 = make_unique<F3_Op>(h.out, h.col, h.val, (primitives::F3)h.prim);
+      h.out.registerDS(&f3->outputSelectionV);
+      h.col.registerDS(&f3->param1);
+      h.val.registerDS(&f3->param2);
+      expression->ops.push_back(move(f3));
+   }
+   heldSel.reset();
+}
+
+void QueryBuilder::ExpressionBuilder::holdOrFuseSel(const HeldSelection& next) {
+   if (heldSel && fuseSel(*heldSel, next)) {
+      heldSel.reset(); // pairs: the range is not chained again
+      return;
+   }
+   flushHeldSel();
+   heldSel = next;
+}
+
+void QueryBuilder::ExpressionBuilder::checkUnwritten(
+    std::initializer_list<const DS*> reads, const DS* write) {
+   if (!unwrittenSel) return;
+   for (const DS* r : reads)
+      if (r->buf == DS::BufferSpec::Buffer && r->data == unwrittenSel)
+         throw std::runtime_error("VW_SEL_BETWEEN: an op reads the selection "
+                                  "between a fused range pair");
+   if (write && write->buf == DS::BufferSpec::Buffer &&
+       write->data == unwrittenSel)
+      unwrittenSel = nullptr;
+}
+
+/// first and second bound the same column from both sides and second reads
+/// first's output selection: build one BetweenOp for both; decided from the
+/// plan only. second's output may be first's input selection (the kernels
+/// write behind what they read); first's output is not written.
+bool QueryBuilder::ExpressionBuilder::fuseSel(const HeldSelection& first,
+                                              const HeldSelection& second) {
+   using namespace primitives::between;
+   auto same = [](const DS& x, const DS& y) {
+      return x.buf != DS::BufferSpec::None && x.buf == y.buf && x.data == y.data;
+   };
+   const DS& mid = first.out;
+   if (!second.desc.selInput || mid.buf != DS::BufferSpec::Buffer ||
+       second.out.buf != DS::BufferSpec::Buffer || !same(second.sel, mid))
+      return false;
+   if (first.desc.type != second.desc.type ||
+       first.desc.upper == second.desc.upper)
+      return false;
+   if (first.col.buf != DS::BufferSpec::Column &&
+       first.col.buf != DS::BufferSpec::Buffer)
+      return false;
+   if (!same(first.col, second.col) ||
+       first.col.attribute != second.col.attribute)
+      return false;
+   if (first.val.buf != DS::BufferSpec::Value ||
+       second.val.buf != DS::BufferSpec::Value)
+      return false;
+   if (first.desc.selInput && first.sel.buf != DS::BufferSpec::Buffer)
+      return false;
+   if (same(second.out, first.col)) return false;
+   const HeldSelection& l = first.desc.upper ? second : first;
+   const HeldSelection& h = first.desc.upper ? first : second;
+   auto op = make_unique<BetweenOp>();
+   op->kernel = kernel(first.desc.type, l.desc.strict, h.desc.strict,
+                       first.desc.selInput);
+   op->sel = first.desc.selInput ? first.sel.data : nullptr;
+   op->out = second.out.data;
+   DS col = first.col;
+   op->col = col.data;
+   op->lo = l.val.data;
+   op->hi = h.val.data;
+   col.registerDS(&op->col);
+   expression->ops.push_back(move(op));
+   unwrittenSel = same(mid, second.out) ? nullptr : mid.data;
    return true;
 }
 #endif

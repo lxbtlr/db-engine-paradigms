@@ -599,6 +599,13 @@ config_flags() {
     ck_disp)             echo "$(config_flags base_simdhash) -DVW_GROUP_DISPATCH=ON" ;;
     ck_disp_concat)      echo "$(config_flags ck_disp) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_WIDE=ON -DVW_GROUP_KEY_PAD=ON" ;;
     ck_disp_fused)       echo "$(config_flags ck_disp_concat) -DVW_GROUP_CONCAT_HASH=ON" ;;
+    # compound range selection: on top of the fair pool, and against fair_sel
+    # alone (one Select, the work Typer's && does; Q5, Q6, SSB Q1.x, Q3.x)
+    simd_sel)            echo "$(config_flags cmake_defaults) $SEL" ;;
+    base_between)        echo "$(config_flags cmake_defaults) -DVW_SEL_BETWEEN=ON" ;;
+    simd_between)        echo "$(config_flags cmake_defaults) $SEL -DVW_SEL_BETWEEN=ON" ;;
+    fair_between)        echo "$(config_flags fair_compound) -DVW_SEL_BETWEEN=ON" ;;
+    sel_between)         echo "$(config_flags fair_sel) -DVW_SEL_BETWEEN=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

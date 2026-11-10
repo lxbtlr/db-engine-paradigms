@@ -3,6 +3,9 @@
 #ifdef VW_PROJ_COMPOUND
 #include "CompoundPrimitives.hpp"
 #endif
+#ifdef VW_SEL_BETWEEN
+#include "BetweenPrimitives.hpp"
+#endif
 #include <experimental/tuple>
 #include <functional>
 #include <memory>
@@ -215,6 +218,20 @@ struct CompoundOp : public Op {
    void* b;
    void* c;
    primitives::compound::Fn kernel;
+   virtual pos_t run(pos_t n) override;
+};
+#endif
+
+#ifdef VW_SEL_BETWEEN
+/// VW_SEL_BETWEEN: a lower and an upper bound comparison of one column in
+/// one pass (BetweenPrimitives.hpp); col is registered like F3/F4_Op's
+struct BetweenOp : public Op {
+   void* sel = nullptr; // nullptr: dense input
+   void* out;
+   void* col;
+   void* lo;
+   void* hi;
+   primitives::between::Fn kernel;
    virtual pos_t run(pos_t n) override;
 };
 #endif

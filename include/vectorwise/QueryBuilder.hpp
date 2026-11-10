@@ -203,6 +203,24 @@ class QueryBuilder {
       bool fuse(const HeldProjection& first, const HeldProjection& second);
       void flushHeld();
 #endif
+#ifdef VW_SEL_BETWEEN
+      /// VW_SEL_BETWEEN: a column-constant comparison is held back until
+      /// the next op shows whether it closes a range with it
+      struct HeldSelection {
+         primitives::between::Desc desc;
+         const void* prim;
+         DS sel, out, col, val; // sel: buf None for F3 primitives
+      };
+      std::optional<HeldSelection> heldSel;
+      /// the selection buffer a fused pair did not write, until an op of
+      /// this expression writes it (reading it before then is a plan error)
+      void* unwrittenSel = nullptr;
+      void holdOrFuseSel(const HeldSelection& next);
+      bool fuseSel(const HeldSelection& first, const HeldSelection& second);
+      void flushHeldSel();
+      void checkUnwritten(std::initializer_list<const DS*> reads,
+                          const DS* write);
+#endif
    };
 
    QueryBuilder(runtime::Database& db_, SharedStateManager& s,
