@@ -125,7 +125,9 @@
 #                        drop_pos16); its crc32 setting is overridden
 #   SEL        by CPU: AVX-512VL "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg",
 #              AVX-512F only "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg",
-#              otherwise (Zen 3, ARM, ...) "-DVW_SIMD_SEL=OFF"
+#              otherwise (Zen 3, ARM, ...) "-DVW_SIMD_SEL=OFF"; with AVX-512
+#              and no GDS penalty (manchego) also "-DVW_SIMD_SEL_GATHER=hwgather"
+#              (fair_sel and up on manchego before 2026-11-10: scalar gather)
 #   MACHINE    $(hostname -s) if it is a preset (dubliner, roquefort, manchego, burrata, kafir, rpi5), else custom
 #   BENCH      tpch      tpch (run_tpch, TPCH.* tests) or ssb (run_ssb, SSB.*
 #                        tests); ssb adds _ssb to every config name
@@ -212,6 +214,13 @@ if [ -z "${SEL:-}" ]; then
   if grep -q -w avx512vl /proc/cpuinfo; then SEL="-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg"
   elif grep -q -w avx512f /proc/cpuinfo; then SEL="-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg"
   else SEL="-DVW_SIMD_SEL=OFF"; fi
+  # gathered selections with vpgather where the CPU has no Gather Data
+  # Sampling (Downfall) penalty (manchego); under the mitigation (dubliner)
+  # hwgather is 1.2-3.5x slower, so those keep the scalar gather
+  if [ "$SEL" != "-DVW_SIMD_SEL=OFF" ] &&
+     grep -qx "Not affected" /sys/devices/system/cpu/vulnerabilities/gather_data_sampling 2> /dev/null; then
+    SEL="$SEL -DVW_SIMD_SEL_GATHER=hwgather"
+  fi
 fi
 # MACHINE defaults to this host's short name when it is a TARGET_MACHINE
 # preset, else "custom" (-march=native, CMake topology defaults).
