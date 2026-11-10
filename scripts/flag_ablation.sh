@@ -495,6 +495,11 @@ flags() {
 # config with GDISP or VW_GROUP_GLOBAL_DIRECT measured before that commit had
 # the tagged directory.
 GDISP="-DVW_GROUP_DISPATCH=ON -DVW_GROUP_BATCH_CREATE=ON -DVW_GROUP_GLOBAL_DIRECT=ON -DVW_AGGR_FUSED=ON"
+# Q1 hash study (q1s_*): the best Q1 stack of 2026-11-09 (cmake_defaults plus
+# these, POS_16 on; run with AUTOVEC=ON), one hash option per config. Under
+# VW_GROUP_DISPATCH the group keys are hashed with the option's SIMD kernel
+# when it has one (VW_SIMD_HASH tiers, VW_CRC32_VPCLMUL), else scalar.
+Q1S="-DVW_AGGR_FUSED=ON -DVW_AGGR_KINDS=ON -DVW_PROJ_COMPOUND=ON -DVW_SIMD_SEL=ON -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_HASH=ON -DVW_GROUP_DISPATCH=ON -DVW_POS_16=ON"
 config_flags() {
   case "$1" in
     # no option flags at all: every VW option at its CMakeLists.txt default
@@ -606,6 +611,13 @@ config_flags() {
     hash_crc32)          echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON" ;;
     hash_crc32_fast)     echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     hash_crc32_vpclmul)  echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON -DVW_CRC32_VPCLMUL=ON" ;;
+    # Q1 hash study: scalar MurmurHash, its SIMD tier (dubliner: always AVX2),
+    # the AVX2 tier forced, CRC32 fast, CRC32 VPCLMUL
+    q1s_murmur)          echo "$Q1S" ;;
+    q1s_simdhash)        echo "$Q1S -DVW_SIMD_HASH=ON" ;;
+    q1s_simdhash256)     echo "$Q1S -DVW_SIMD_HASH=ON -DVW_SIMD_HASH_WIDTH=256" ;;
+    q1s_crc)             echo "$Q1S -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
+    q1s_vpclmul)         echo "$Q1S -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON -DVW_CRC32_VPCLMUL=ON" ;;
     # join configs: HASH_BASE + CRC32 + FAST, then the probe option
     join_base)           echo "$(config_flags "$HASH_BASE") -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
     join_twophase)       echo "$(config_flags join_base) -DVW_JOIN_TWOPHASE=ON" ;;
@@ -660,9 +672,11 @@ cpu_has() { grep -q -w "$1" /proc/cpuinfo; }
 kept=""
 for cfg in $CONFIGS; do
   case "$cfg" in
-    hash_simd|base_simdhash) cpu_has avx512f && cpu_has avx512dq || { log "skipping $cfg: no AVX-512F/DQ on this CPU"; continue; } ;;
-    hash_crc32_vpclmul) cpu_has vpclmulqdq && cpu_has avx512vl && cpu_has avx512bw && cpu_has avx512dq ||
-                        { log "skipping hash_crc32_vpclmul: no VPCLMULQDQ + AVX-512 on this CPU"; continue; } ;;
+    # VW_SIMD_HASH has AVX-512, AVX2 and NEON tiers
+    hash_simd|base_simdhash|q1s_simdhash|q1s_simdhash256)
+                        cpu_has avx2 || cpu_has asimd || { log "skipping $cfg: no AVX2 or NEON on this CPU"; continue; } ;;
+    hash_crc32_vpclmul|q1s_vpclmul) cpu_has vpclmulqdq && cpu_has avx512vl && cpu_has avx512bw && cpu_has avx512dq ||
+                        { log "skipping $cfg: no VPCLMULQDQ + AVX-512 on this CPU"; continue; } ;;
     join_simd) cpu_has avx512f || { log "skipping join_simd: no AVX-512F on this CPU"; continue; } ;;
   esac
   kept="$kept $cfg"

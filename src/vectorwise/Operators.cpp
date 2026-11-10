@@ -2335,6 +2335,33 @@ inline __mmask16 runHeadMask16(const char* cur, const char* prv) {
 #define VW_RUN_HEADS_SIMD 1
 #endif
 
+// The SIMD hash of packed 1/2/4/8-byte group keys that the build's hash
+// option selects, bit-identical to hashFn.hashKey(key): VW_SIMD_HASH's
+// MurmurHash64A tier, else VW_CRC32_VPCLMUL's CRC32Hash. Hash_T and
+// VW_GROUP_DISPATCH's key loop both use it, so a query hashes its group keys
+// with the same kernel with or without dispatch.
+#if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH_ANY) &&                \
+    !defined(VW_USE_CRC32)
+#define VW_GROUP_SIMD_KEY_HASH 1
+namespace {
+template <typename T>
+inline void simdGroupKeyHash(size_t n, const char* keys,
+                             runtime::Hashmap::hash_t* out) {
+   primitives::simd_hash::hash_keys<T>(n, keys, out);
+}
+} // namespace
+#elif defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32) &&                   \
+    defined(VW_HAVE_SIMD_CRC)
+#define VW_GROUP_SIMD_KEY_HASH 1
+namespace {
+template <typename T>
+inline void simdGroupKeyHash(size_t n, const char* keys,
+                             runtime::Hashmap::hash_t* out) {
+   primitives::simd_crc::hash_keys<T>(n, keys, out);
+}
+} // namespace
+#endif
+
 // VW_GROUP_RUN_HEADS (Runs): rows that repeat the previous row's key reuse
 // its entry, without a data-dependent branch or an adaptive switch (it
 // replaces VW_GROUP_LAST_MATCH, which branched per row and switched itself
@@ -2386,6 +2413,15 @@ void HashGroup::keyStepT(pos_t n) {
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
    EntryHeader** __restrict__ matches = preAggregation.htMatches;
    const size_t entrySize = preAggregation.ht_entry_size;
+#ifdef VW_GROUP_SIMD_KEY_HASH
+   // the vector's keys hashed in one SIMD pass, as Hash_T does, and read by
+   // the lookup below; not for keys read through a selection vector, nor
+   // with run heads (only the heads are hashed there)
+   constexpr bool prehash = !wide && Mode != kSingleSel && !Runs;
+   if constexpr (prehash) simdGroupKeyHash<T>(n, base, hashes);
+#else
+   constexpr bool prehash = false;
+#endif
 #ifdef VW_GROUP_BATCH_CREATE
    pos_t created = 0;
    EntryHeader* firstNew = nullptr;
@@ -2438,7 +2474,7 @@ void HashGroup::keyStepT(pos_t n) {
 #endif
       const char* kp = keyAt(i);
       EntryHeader* entry;
-      const hash_t hash = hashOf(kp);
+      const hash_t hash = prehash ? hashes[i] : hashOf(kp);
       for (entry = ht.find_chain(hash); entry; entry = entry->next)
          if (entry->hash == hash &&
              sameKey(reinterpret_cast<const char*>(entry + 1), kp))
@@ -2653,24 +2689,15 @@ void HashGroup::Hash(pos_t n) {
 }
 
 template <typename T> void HashGroup::Hash_T(pos_t n) {
-#if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH_ANY) && !defined(VW_USE_CRC32)
-   // packed 1/2/4/8-byte keys: SIMD MurmurHash64A, bit-identical to
-   // hashFn.hashKey(key) below
-   if constexpr (!kByteKey<T>) {
-      primitives::simd_hash::hash_keys<T>(n, VW_GROUP_KEY_DATA,
-                                          preAggregation.groupHashes);
-      return;
-   }
-#endif
    const uint32_t keySize = keySizeOf<T>(totalKeySize);
    char* __restrict__ keys = VW_GROUP_KEY_DATA;
    hash_t* __restrict__ hashes = preAggregation.groupHashes;
 
-#if defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32) && defined(VW_HAVE_SIMD_CRC)
-   // packed 1/2/4/8-byte keys: VPCLMULQDQ CRC32Hash, 8 keys per zmm,
-   // bit-identical to hashFn.hashKey(key) below
+#ifdef VW_GROUP_SIMD_KEY_HASH
+   // packed 1/2/4/8-byte keys: the hash option's SIMD kernel, bit-identical
+   // to hashFn.hashKey(key) below
    if constexpr (!kByteKey<T>) {
-      primitives::simd_crc::hash_keys<T>(n, keys, hashes);
+      simdGroupKeyHash<T>(n, keys, hashes);
       return;
    }
 #endif

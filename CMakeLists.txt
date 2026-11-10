@@ -674,7 +674,9 @@ endif()
 # else NEON. Bit-identical to the scalar hash. Only applies to the default
 # MurMurHash (not with VW_USE_CRC32 or HASH_SIZE_32).
 # VW_SIMD_HASH_WIDTH=256 makes an AVX-512 target use the AVX2 tier, here and
-# in the packed-key hash of VW_GROUP_CONCAT_HASH (no effect elsewhere).
+# in the packed-key hash of VW_GROUP_CONCAT_HASH (no effect elsewhere);
+# dubliner always uses it. HashGroup hashes its packed group keys with the
+# selected tier with or without VW_GROUP_DISPATCH.
 OPTION(VW_SIMD_HASH "SIMD MurmurHash64A kernels (AVX-512 / AVX2 / NEON) for VectorWise hashing" OFF)
 if(VW_SIMD_HASH)
   if(VW_USE_CRC32 OR HASH_SIZE_32)
@@ -690,6 +692,11 @@ if(VW_SIMD_HASH_WIDTH STREQUAL "256")
   message(STATUS "Building with VW_SIMD_HASH_WIDTH=256 (AVX2 MurmurHash tier)")
 elseif(NOT VW_SIMD_HASH_WIDTH STREQUAL "512")
   message(FATAL_ERROR "VW_SIMD_HASH_WIDTH must be 512 or 256 (got '${VW_SIMD_HASH_WIDTH}')")
+elseif(TARGET_MACHINE STREQUAL "dubliner")
+  # dubliner (Cascade Lake) downclocks under AVX-512 (VW_SIMD_HASH lost up to
+  # 17% there): its SIMD hash is always the AVX2 tier
+  ADD_DEFINITIONS(-DVW_SIMD_HASH_WIDTH_256=1)
+  message(STATUS "dubliner: VW_SIMD_HASH_WIDTH=256 (AVX2 MurmurHash tier; AVX-512 downclocks Cascade Lake)")
 endif()
 
 # VW_SIMD_HASH_GATHER: how the AVX-512 hash kernels (VW_SIMD_HASH,
