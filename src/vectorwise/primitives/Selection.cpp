@@ -16,8 +16,12 @@ using namespace std;
 namespace vectorwise {
 namespace primitives {
 
-#if defined(VW_SIMD_SEL) && !defined(VW_HAVE_SIMD_SEL)
-#pragma message("VW_SIMD_SEL: AVX-512F not available, using scalar selection")
+#if defined(VW_SIMD_SEL) && !defined(VW_HAVE_SIMD_SEL) &&                     \
+    !defined(VW_SIMD_SEL_USE_AVX2)
+#pragma message("VW_SIMD_SEL: neither AVX-512F nor AVX2 available, using scalar selection")
+#endif
+#if defined(VW_SIMD_SEL_ISA_AVX2) && !defined(VW_SIMD_SEL_USE_AVX2)
+#pragma message("VW_SIMD_SEL_ISA=avx2: AVX2 kernels not available (no AVX2, VW_POS_16 or VW_SIMD_SEL off)")
 #endif
 #if defined(VW_SIMD_SEL) && defined(VW_HAVE_SIMD_SEL) &&                     \
     defined(VW_SIMD_SEL_WIDTH_256) && !defined(VW_HAVE_SIMD_SEL_256)
@@ -29,7 +33,8 @@ namespace primitives {
 
 #if defined(VW_SIMD_SEL) || defined(VW_SIMD_SEL_CHAR)
 // VW_SIMD_SEL / VW_SIMD_SEL_CHAR: the existing primitive names point at the
-// AVX-512 kernels from SimdSelection.hpp where the (type, comparator) is
+// AVX-512 (or, without AVX-512F, AVX2) kernels from SimdSelection.hpp where
+// the (type, comparator) is
 // supported, and at the scalar templates otherwise. Branching and _bf names
 // share the SIMD kernel, which has no branches.
 #define MK_SEL_COLCOL(type, op)                                                \

@@ -446,14 +446,15 @@ endif(VW_POS_16)
 
 # SIMD selection kernels (include/vectorwise/SimdSelection.hpp, AVX-512). The
 # existing sel_*/selsel_* primitive names are redirected to the SIMD kernels
-# for supported types; without AVX-512F in ARCH_FLAGS they stay scalar. On
-# aarch64 VW_SIMD_SEL selects only the NEON kernel of VW_SEL_COMPOUND (the
-# other selection primitives have no NEON kernels).
+# for supported types; without AVX-512F in ARCH_FLAGS they use the AVX2
+# kernels (include/vectorwise/SimdSelAvx2.hpp) where the target has AVX2,
+# else they stay scalar. On aarch64 VW_SIMD_SEL selects only the NEON kernel
+# of VW_SEL_COMPOUND (the other selection primitives have no NEON kernels).
 # VW_SIMD_SEL is the one switch: width and gather are chosen for the target
 # (auto) and can be forced for ablations; the compress form is the register
 # compress (VW_SIMD_SEL_COMPRESS was removed 2026-11-10: the memory form is
 # microcoded on Zen 4 and never won).
-OPTION(VW_SIMD_SEL "SIMD selection kernels for int32/int64/Date (AVX-512; NEON for VW_SEL_COMPOUND)" OFF)
+OPTION(VW_SIMD_SEL "SIMD selection kernels for int32/int64/Date (AVX-512, AVX2 without AVX-512F; NEON for VW_SEL_COMPOUND)" OFF)
 if(VW_SIMD_SEL)
   ADD_DEFINITIONS(-DVW_SIMD_SEL=1)
   message(STATUS "Building with VW_SIMD_SEL")
@@ -469,7 +470,10 @@ endif()
 #   hwgather   : vpgatherdd/vpgatherdq -> compare -> compress
 #   auto       : hwgather on a native x86 AVX-512 build where the kernel
 #                reports no Gather Data Sampling (Downfall) penalty
-#                (manchego: TPC-H Q6 1.29x -> 1.57x, 2026-11-06), else scalar
+#                (manchego: TPC-H Q6 1.29x -> 1.57x, 2026-11-06); scalarload
+#                on a native AVX2 build without AVX-512F, which runs the AVX2
+#                kernels (roquefort: TPC-H Q6 2.03x with scalarload, 1.63x
+#                with hwgather, 2026-11-11); else scalar
 set(VW_SIMD_SEL_GATHER "auto" CACHE STRING "VW_SIMD_SEL gathered-input kernels: auto, scalar, scalarload, hwgather")
 set_property(CACHE VW_SIMD_SEL_GATHER PROPERTY STRINGS auto scalar scalarload hwgather)
 set(VW_SIMD_SEL_GATHER_EFFECTIVE "${VW_SIMD_SEL_GATHER}")
@@ -478,13 +482,17 @@ if(VW_SIMD_SEL_GATHER STREQUAL "auto")
   set(gds_file /sys/devices/system/cpu/vulnerabilities/gather_data_sampling)
   # (before project(): no CMAKE_CROSSCOMPILING yet; a toolchain file means
   # a cross build, and only x86 lists avx512f in /proc/cpuinfo)
-  if(VW_SIMD_SEL AND NOT CMAKE_TOOLCHAIN_FILE
-     AND EXISTS /proc/cpuinfo AND EXISTS ${gds_file})
+  if(VW_SIMD_SEL AND NOT CMAKE_TOOLCHAIN_FILE AND EXISTS /proc/cpuinfo)
     # file(STRINGS) reads procfs/sysfs line by line (file(READ) sees size 0)
     file(STRINGS /proc/cpuinfo cpu_avx512f REGEX "^flags.* avx512f( |$)" LIMIT_COUNT 1)
-    file(STRINGS ${gds_file} gds LIMIT_COUNT 1)
-    if(cpu_avx512f AND gds STREQUAL "Not affected")
-      set(VW_SIMD_SEL_GATHER_EFFECTIVE "hwgather")
+    file(STRINGS /proc/cpuinfo cpu_avx2 REGEX "^flags.* avx2( |$)" LIMIT_COUNT 1)
+    if(cpu_avx512f AND EXISTS ${gds_file})
+      file(STRINGS ${gds_file} gds LIMIT_COUNT 1)
+      if(gds STREQUAL "Not affected")
+        set(VW_SIMD_SEL_GATHER_EFFECTIVE "hwgather")
+      endif()
+    elseif(cpu_avx2 AND NOT cpu_avx512f)
+      set(VW_SIMD_SEL_GATHER_EFFECTIVE "scalarload")
     endif()
   endif()
 endif()
@@ -494,6 +502,19 @@ elseif(VW_SIMD_SEL_GATHER_EFFECTIVE STREQUAL "hwgather")
   ADD_DEFINITIONS(-DVW_SIMD_SEL_GATHER_HWGATHER=1)
 elseif(NOT VW_SIMD_SEL_GATHER_EFFECTIVE STREQUAL "scalar")
   message(FATAL_ERROR "VW_SIMD_SEL_GATHER must be auto, scalar, scalarload or hwgather (got '${VW_SIMD_SEL_GATHER}')")
+endif()
+# VW_SIMD_SEL_ISA: which kernels VW_SIMD_SEL picks for int32/int64/Date
+#   auto : AVX-512 where the target has AVX-512F, else AVX2 (default)
+#   avx2 : the AVX2 kernels (SimdSelAvx2.hpp) also on AVX-512 targets, to
+#          compare them across machines
+# The AVX2 kernels follow VW_SIMD_SEL_GATHER; WIDTH and UNROLL apply to the
+# AVX-512 kernels only. Not with VW_POS_16.
+set(VW_SIMD_SEL_ISA "auto" CACHE STRING "VW_SIMD_SEL kernels: auto, avx2")
+set_property(CACHE VW_SIMD_SEL_ISA PROPERTY STRINGS auto avx2)
+if(VW_SIMD_SEL_ISA STREQUAL "avx2")
+  ADD_DEFINITIONS(-DVW_SIMD_SEL_ISA_AVX2=1)
+elseif(NOT VW_SIMD_SEL_ISA STREQUAL "auto")
+  message(FATAL_ERROR "VW_SIMD_SEL_ISA must be auto or avx2 (got '${VW_SIMD_SEL_ISA}')")
 endif()
 # Contiguous selection kernels under VW_SIMD_SEL:
 #   VW_SIMD_SEL_UNROLL   1|2 : vectors of 16 per loop iteration
@@ -537,7 +558,7 @@ elseif(NOT VW_SIMD_SEL_WIDTH_EFFECTIVE STREQUAL "512")
   message(FATAL_ERROR "VW_SIMD_SEL_WIDTH must be auto, 512 or 256 (got '${VW_SIMD_SEL_WIDTH}')")
 endif()
 if(VW_SIMD_SEL)
-  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER_EFFECTIVE} UNROLL=${VW_SIMD_SEL_UNROLL} WIDTH=${VW_SIMD_SEL_WIDTH_EFFECTIVE}")
+  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER_EFFECTIVE} UNROLL=${VW_SIMD_SEL_UNROLL} WIDTH=${VW_SIMD_SEL_WIDTH_EFFECTIVE} ISA=${VW_SIMD_SEL_ISA}")
 endif()
 
 # Software prefetch in the hash join probe loops (joinAllParallel /
@@ -1339,6 +1360,7 @@ add_executable(test_all
   src/test/ssb.cpp
   src/test/vectorwise/primitives.cpp
   src/test/vectorwise/simd_selection.cpp
+  src/test/vectorwise/simd_sel_avx2.cpp
   src/test/vectorwise/simd_hash.cpp
   src/test/vectorwise/simd_aggr.cpp
   src/test/vectorwise/aggr_direct.cpp

@@ -319,7 +319,27 @@ TEST(SimdSel, CharEqSkipped) { VW_TEST_SKIP("no AVX-512BW in this build"); }
 // The CMake options must redirect the public primitive names (the ones query
 // plans use) to the SIMD kernels, and leave them scalar otherwise.
 TEST(SimdSelRedirect, Names) {
-#if defined(VW_SIMD_SEL) && defined(VW_HAVE_SIMD_SEL)
+#if defined(VW_SIMD_SEL_USE_AVX2)
+   // AVX2 kernels: no AVX-512F, or VW_SIMD_SEL_ISA=avx2
+   EXPECT_EQ((void*)sel_greater_Date_col_Date_val_bf,
+             (void*)(&simd::avx2::sel_col_val<Date, std::greater>));
+   EXPECT_EQ((void*)sel_less_Date_col_Date_val,
+             (void*)(&simd::avx2::sel_col_val<Date, std::less>));
+   EXPECT_EQ((void*)sel_greater_int64_t_col_int64_t_val_bf,
+             (void*)(&simd::avx2::sel_col_val<int64_t, std::greater>));
+#if defined(VW_SIMD_SEL_GATHER_SCALARLOAD) || defined(VW_SIMD_SEL_GATHER_HWGATHER)
+   EXPECT_EQ((void*)selsel_greater_equal_Date_col_Date_val_bf,
+             (void*)(&simd::avx2::selsel_col_val<Date, std::greater_equal>));
+#else
+   EXPECT_EQ((void*)selsel_greater_equal_Date_col_Date_val_bf,
+             (void*)(&selsel_col_val_bf<Date, std::greater_equal>));
+#endif
+   // col_col and unsupported types stay scalar
+   EXPECT_EQ((void*)sel_less_int32_t_col_int32_t_col_bf,
+             (void*)(&sel_col_col_bf<int32_t, std::less>));
+   EXPECT_EQ((void*)sel_less_int16_t_col_int16_t_val_bf,
+             (void*)(&sel_col_val_bf<int16_t, std::less>));
+#elif defined(VW_SIMD_SEL) && defined(VW_HAVE_SIMD_SEL)
    EXPECT_EQ((void*)sel_greater_Date_col_Date_val_bf,
              (void*)(&simd::sel_col_val<Date, std::greater>));
    EXPECT_EQ((void*)sel_less_Date_col_Date_val,

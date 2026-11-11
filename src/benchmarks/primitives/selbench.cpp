@@ -18,6 +18,7 @@
 #include "vectorwise/BetweenPrimitives.hpp"
 #include "vectorwise/Primitives.hpp"
 #include "vectorwise/SimdSelection.hpp"
+#include "vectorwise/SimdSelAvx2.hpp"
 #if defined(__aarch64__) && !defined(VW_POS_16)
 #include "vectorwise/SimdNeon.hpp"
 #endif
@@ -230,6 +231,14 @@ void benchF4(const std::string& family, bool colcol,
 #else
 #define SIMD256(expr) nullptr
 #endif
+// AVX2 kernels (SimdSelAvx2.hpp)
+#ifdef VW_HAVE_SIMD_SEL_AVX2
+#define AVX2_3(expr) (F3) & expr
+#define AVX2_4(expr) (F4) & expr
+#else
+#define AVX2_3(expr) nullptr
+#define AVX2_4(expr) nullptr
+#endif
 #ifdef __AVX512F__
 #define OLD(name) name
 #else
@@ -253,7 +262,8 @@ void selColVal(F3 old = nullptr) {
                    {"simd_mem_u1", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Mem, 1>))},
                    {"simd_mem_u2", SIMD3((simd::sel_col_val_v<T, Op, simd::Emit::Mem, 2>))},
                    {"simd256_reg", SIMD256((simd::sel_col_val_256<T, Op, simd::Emit::Reg>))},
-                   {"simd256_mem", SIMD256((simd::sel_col_val_256<T, Op, simd::Emit::Mem>))}});
+                   {"simd256_mem", SIMD256((simd::sel_col_val_256<T, Op, simd::Emit::Mem>))},
+                   {"avx2", AVX2_3((simd::avx2::sel_col_val<T, Op>))}});
 }
 template <typename T, template <typename> class Op> void selColCol() {
    benchF3<T, Op>("sel_col_col", true,
@@ -273,7 +283,11 @@ void selselColVal(F4 old = nullptr) {
                    {"simd_scalarload",
                     SIMD4((simd::selsel_col_val_scalarload<T, Op>))},
                    {"simd_hwgather",
-                    SIMD4((simd::selsel_col_val_hwgather<T, Op>))}});
+                    SIMD4((simd::selsel_col_val_hwgather<T, Op>))},
+                   {"avx2_scalarload",
+                    AVX2_4((simd::avx2::selsel_col_val_g<T, Op, false>))},
+                   {"avx2_hwgather",
+                    AVX2_4((simd::avx2::selsel_col_val_g<T, Op, true>))}});
 }
 template <typename T, template <typename> class Op> void selselColCol() {
    benchF4<T, Op>("selsel_col_col", true,
@@ -409,6 +423,20 @@ template <typename T, template <typename> class Hi> void benchBetween(bool gathe
         }},
 #endif
    };
+#ifdef VW_HAVE_SIMD_SEL_AVX2
+   if (!gathered) {
+      impls.push_back({"fused_avx2", +[](pos_t n, pos_t*, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return simd::avx2::sel_between<T, std::greater_equal, Hi>(n, res, a, lo, hi);
+                       }});
+   } else {
+      impls.push_back({"fused_avx2_sl", +[](pos_t n, pos_t* in, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return simd::avx2::between_g<T, std::greater_equal, Hi, true, false>(n, in, res, a, lo, hi);
+                       }});
+      impls.push_back({"fused_avx2_hw", +[](pos_t n, pos_t* in, pos_t* res, pos_t*, T* a, T* lo, T* hi) {
+                          return simd::avx2::between_g<T, std::greater_equal, Hi, true, true>(n, in, res, a, lo, hi);
+                       }});
+   }
+#endif
 #ifdef VW_HAVE_SIMD_SEL
    using simd::Emit;
    if (!gathered) {

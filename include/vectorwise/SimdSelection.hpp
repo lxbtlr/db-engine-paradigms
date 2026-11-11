@@ -16,6 +16,11 @@
 //   int32 / int64 / Date kernels : x86-64 + AVX512F
 //   Char<N> == constant kernel   : additionally AVX512BW (byte masks)
 // Without them nothing below is defined and pick_* return the scalar pointer.
+//
+// x86 targets without AVX-512F (and any target with VW_SIMD_SEL_ISA=avx2)
+// get the AVX2 kernels of SimdSelAvx2.hpp for the same (type, comparator)
+// pairs from the same pick_* helpers; with VW_SIMD_SEL_ISA=avx2 the
+// AVX-512 int32/int64/Date kernels are not picked.
 //===----------------------------------------------------------------------===//
 #include "common/runtime/Types.hpp"
 #include "vectorwise/defs.hpp"
@@ -24,6 +29,7 @@
 #include <cstring>
 #include <functional>
 #include <type_traits>
+#include "vectorwise/SimdSelAvx2.hpp"
 
 #if defined(__x86_64__) && defined(__AVX512F__)
 #include <immintrin.h>
@@ -36,6 +42,12 @@
 #if defined(__AVX512VL__)
 #define VW_HAVE_SIMD_SEL_256 1
 #endif
+#endif
+
+// VW_SIMD_SEL_USE_AVX2: the AVX2 kernels answer VW_SIMD_SEL
+#if defined(VW_SIMD_SEL) && defined(VW_HAVE_SIMD_SEL_AVX2) &&                  \
+    (defined(VW_SIMD_SEL_ISA_AVX2) || !defined(VW_HAVE_SIMD_SEL))
+#define VW_SIMD_SEL_USE_AVX2 1
 #endif
 
 namespace vectorwise {
@@ -920,7 +932,8 @@ pos_t sel_char_eq_col_val(pos_t n, pos_t* RES result,
 // The return type is the scalar pointer type, which the SIMD kernels share.
 
 template <typename T, template <typename> class Op> constexpr bool use_simd() {
-#if defined(VW_SIMD_SEL) && defined(VW_HAVE_SIMD_SEL)
+#if defined(VW_SIMD_SEL) && defined(VW_HAVE_SIMD_SEL) &&                       \
+    !defined(VW_SIMD_SEL_ISA_AVX2)
    return kernel_ok<T, Op>;
 #else
    return false;
@@ -937,6 +950,24 @@ constexpr bool use_simd_gather() {
 #endif
 }
 
+/// The AVX2 kernels: VW_SIMD_SEL_USE_AVX2 and a supported (type, comparator);
+/// gathered input additionally needs VW_SIMD_SEL_GATHER != scalar.
+template <typename T, template <typename> class Op> constexpr bool use_avx2() {
+#ifdef VW_SIMD_SEL_USE_AVX2
+   return avx2::kernel_ok<T, Op>;
+#else
+   return false;
+#endif
+}
+template <typename T, template <typename> class Op>
+constexpr bool use_avx2_gather() {
+#if defined(VW_SIMD_SEL_GATHER_SCALARLOAD) || defined(VW_SIMD_SEL_GATHER_HWGATHER)
+   return use_avx2<T, Op>();
+#else
+   return false;
+#endif
+}
+
 template <typename T, template <typename> class Op> constexpr bool use_char() {
 #if defined(VW_SIMD_SEL_CHAR) && defined(VW_HAVE_SIMD_SEL_CHAR)
    return char_kernel_ok<T, Op>;
@@ -947,6 +978,9 @@ template <typename T, template <typename> class Op> constexpr bool use_char() {
 
 template <typename T, template <typename> class Op, typename Fn>
 constexpr Fn pick_sel_col_val(Fn scalar) {
+#if defined(VW_SIMD_SEL_USE_AVX2)
+   if constexpr (use_avx2<T, Op>()) return &avx2::sel_col_val<T, Op>;
+#endif
 #if defined(VW_HAVE_SIMD_SEL)
    if constexpr (use_simd<T, Op>()) return &sel_col_val<T, Op>;
 #endif
@@ -967,6 +1001,9 @@ constexpr Fn pick_sel_col_col(Fn scalar) {
 
 template <typename T, template <typename> class Op, typename Fn>
 constexpr Fn pick_selsel_col_val(Fn scalar) {
+#if defined(VW_SIMD_SEL_USE_AVX2)
+   if constexpr (use_avx2_gather<T, Op>()) return &avx2::selsel_col_val<T, Op>;
+#endif
 #if defined(VW_HAVE_SIMD_SEL)
    if constexpr (use_simd_gather<T, Op>()) return &selsel_col_val<T, Op>;
 #endif

@@ -20,7 +20,8 @@ namespace between {
 namespace {
 
 /// the kernel the selection primitives' options would pick: AVX-512 under
-/// VW_SIMD_SEL (gathered input only with VW_SIMD_SEL_GATHER != scalar),
+/// VW_SIMD_SEL (gathered input only with VW_SIMD_SEL_GATHER != scalar), AVX2
+/// under VW_SIMD_SEL without AVX-512F or with VW_SIMD_SEL_ISA=avx2,
 /// the branch-free template otherwise. On aarch64 with NEON, VW_SIMD_SEL
 /// picks the NEON kernels (gathered: VW_SIMD_SEL_GATHER=scalarload) although
 /// the selection primitives themselves stay scalar there.
@@ -30,6 +31,13 @@ pos_t run(pos_t n, pos_t* inSel, pos_t* out, void* col, void* lo, void* hi) {
    T* c = static_cast<T*>(col);
    T* l = static_cast<T*>(lo);
    T* h = static_cast<T*>(hi);
+#ifdef VW_SIMD_SEL_USE_AVX2
+   if constexpr (!SelIn && simd::use_avx2<T, Lo>() && simd::use_avx2<T, Hi>())
+      return simd::avx2::sel_between<T, Lo, Hi>(n, out, c, l, h);
+   if constexpr (SelIn && simd::use_avx2_gather<T, Lo>() &&
+                 simd::use_avx2_gather<T, Hi>())
+      return simd::avx2::selsel_between<T, Lo, Hi>(n, inSel, out, c, l, h);
+#endif
 #ifdef VW_HAVE_SIMD_SEL
    if constexpr (!SelIn && simd::use_simd<T, Lo>() && simd::use_simd<T, Hi>())
       return simd::sel_between<T, Lo, Hi>(n, out, c, l, h);
