@@ -303,7 +303,7 @@ pos_t aggr_static_col(pos_t n, T* RES result, T* RES param1)
 {
    auto aggregator = *result;
    for (pos_t i = 0; i < n; i++) {
-      aggregator = Op<T>()(param1[i], aggregator);
+      aggregator = Op<T>()(aggregator, param1[i]);
    }
    *result = aggregator;
    return n > 0;
@@ -317,7 +317,7 @@ pos_t aggr_static_sel_col(pos_t n, pos_t* RES inSel, T* RES result,
    auto aggregator = *result;
    for (pos_t i = 0; i < n; i++) {
       const auto idx = inSel[i];
-      aggregator = Op<T>()(param1[idx], aggregator);
+      aggregator = Op<T>()(aggregator, param1[idx]);
    }
    *result = aggregator;
    return n;
@@ -341,7 +341,7 @@ pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
       T value = *aggregate;
 
       for (pos_t i = 0; i < size; i++) {
-         value = Op<T>()(param1[pos[i]], value);
+         value = Op<T>()(value, param1[pos[i]]);
       }
 
       *aggregate = value;
@@ -349,7 +349,7 @@ pos_t aggr_col(pos_t n, T** RES entries, T* RES param1, size_t offset)
 #else
    for (pos_t i = 0; i < n; i++) {
       T* aggregate = addBytes(entries[i], offset);
-      *aggregate = Op<T>()(param1[i], *aggregate);
+      *aggregate = Op<T>()(*aggregate, param1[i]);
    }
 #endif
    return n;
@@ -379,9 +379,9 @@ pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* RES selParam1,
 
       for (pos_t i = 0; i < size; i++) {
 #ifdef VW_GROUP_AGGR_SEL
-         value = Op<T>()(param1[sel[i]], value);
+         value = Op<T>()(value, param1[sel[i]]);
 #else
-         value = Op<T>()(param1[selParam1[pos[i]]], value);
+         value = Op<T>()(value, param1[selParam1[pos[i]]]);
 #endif
       }
 
@@ -390,7 +390,7 @@ pos_t aggr_sel_col(pos_t n, T** RES entries, pos_t* RES selParam1,
 #else
    for (pos_t i = 0; i < n; i++) {
       T* aggregate = addBytes(entries[i], offset);
-      *aggregate = Op<T>()(param1[selParam1[i]], *aggregate);
+      *aggregate = Op<T>()(*aggregate, param1[selParam1[i]]);
    }
 #endif
    return n;
@@ -406,7 +406,7 @@ pos_t aggr_row(pos_t n, T** RES entries, size_t offset, T** RES dataPtr,
    for (auto e = entries, end = e + n; e < end;
         ++e, data = addBytes(data, inSize)) {
       auto aggregate = addBytes(*e, offset);
-      *aggregate = Op<T>()(*data, *aggregate);
+      *aggregate = Op<T>()(*aggregate, *data);
    }
    return n;
 }
