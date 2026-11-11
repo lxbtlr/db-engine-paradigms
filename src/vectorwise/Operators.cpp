@@ -2226,6 +2226,35 @@ template <typename T> constexpr uint32_t keySizeOf(uint32_t totalKeySize) {
 #define VW_GROUP_KEY_DATA packedKeys.data()
 #endif
 
+// The SIMD hash of packed 1/2/4/8-byte group keys that the build's hash
+// option selects, bit-identical to hashFn.hashKey(key): VW_SIMD_HASH's
+// MurmurHash64A tier, else VW_CRC32_VPCLMUL's CRC32Hash. Hash_T and
+// VW_GROUP_DISPATCH's key loop both use it, so a query hashes its group keys
+// with the same kernel with or without dispatch (defined outside the
+// VW_GROUP_DISPATCH block below; inside it, 82f4bd4..d57e5f4, Hash_T lost the
+// SIMD kernel in builds without dispatch).
+#if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH_ANY) &&                \
+    !defined(VW_USE_CRC32)
+#define VW_GROUP_SIMD_KEY_HASH 1
+namespace {
+template <typename T>
+inline void simdGroupKeyHash(size_t n, const char* keys,
+                             runtime::Hashmap::hash_t* out) {
+   primitives::simd_hash::hash_keys<T>(n, keys, out);
+}
+} // namespace
+#elif defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32) &&                   \
+    defined(VW_HAVE_SIMD_CRC)
+#define VW_GROUP_SIMD_KEY_HASH 1
+namespace {
+template <typename T>
+inline void simdGroupKeyHash(size_t n, const char* keys,
+                             runtime::Hashmap::hash_t* out) {
+   primitives::simd_crc::hash_keys<T>(n, keys, out);
+}
+} // namespace
+#endif
+
 #ifdef VW_GROUP_DISPATCH
 // VW_GROUP_DISPATCH: HashGroup's per-vector pre-aggregation used to switch on
 // totalKeySize three times per vector (Concat, Hash, Lookup) and to pack
@@ -2333,33 +2362,6 @@ inline __mmask16 runHeadMask16(const char* cur, const char* prv) {
 }
 } // namespace
 #define VW_RUN_HEADS_SIMD 1
-#endif
-
-// The SIMD hash of packed 1/2/4/8-byte group keys that the build's hash
-// option selects, bit-identical to hashFn.hashKey(key): VW_SIMD_HASH's
-// MurmurHash64A tier, else VW_CRC32_VPCLMUL's CRC32Hash. Hash_T and
-// VW_GROUP_DISPATCH's key loop both use it, so a query hashes its group keys
-// with the same kernel with or without dispatch.
-#if defined(VW_SIMD_HASH) && defined(VW_HAVE_SIMD_HASH_ANY) &&                \
-    !defined(VW_USE_CRC32)
-#define VW_GROUP_SIMD_KEY_HASH 1
-namespace {
-template <typename T>
-inline void simdGroupKeyHash(size_t n, const char* keys,
-                             runtime::Hashmap::hash_t* out) {
-   primitives::simd_hash::hash_keys<T>(n, keys, out);
-}
-} // namespace
-#elif defined(VW_CRC32_VPCLMUL) && defined(VW_USE_CRC32) &&                   \
-    defined(VW_HAVE_SIMD_CRC)
-#define VW_GROUP_SIMD_KEY_HASH 1
-namespace {
-template <typename T>
-inline void simdGroupKeyHash(size_t n, const char* keys,
-                             runtime::Hashmap::hash_t* out) {
-   primitives::simd_crc::hash_keys<T>(n, keys, out);
-}
-} // namespace
 #endif
 
 // VW_GROUP_RUN_HEADS (Runs): rows that repeat the previous row's key reuse
