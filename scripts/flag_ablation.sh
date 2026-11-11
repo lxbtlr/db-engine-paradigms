@@ -574,6 +574,15 @@ config_flags() {
     # of at least L1 (the default) or L2 of the machine it runs on
     base_tp_l2)          echo "$(config_flags cmake_defaults) -DVW_JOIN_TWOPHASE=ON -DVW_JOIN_TWOPHASE_CACHE=L2" ;;
     base_tp_l1)          echo "$(config_flags cmake_defaults) -DVW_JOIN_TWOPHASE=ON -DVW_JOIN_TWOPHASE_CACHE=L1" ;;
+    # one option or bundle at a time on cmake_defaults (with base_simdhash,
+    # simd_sel, base_between, simd_between and par_having = VW_PARITY): the
+    # in-place changes against the baseline, and each bundle alone
+    base_crc32)          echo "$(config_flags cmake_defaults) -DVW_USE_CRC32=ON -DVW_CRC32_FAST=ON" ;;
+    base_proj_compound)  echo "$(config_flags cmake_defaults) -DVW_PROJ_COMPOUND=ON" ;;
+    base_concat_compound) echo "$(config_flags cmake_defaults) -DVW_CONCAT_COMPOUND=ON" ;;
+    base_concat_hash)    echo "$(config_flags base_concat_compound) -DVW_CONCAT_HASH_COMPOUND=ON" ;;
+    base_lookup)         echo "$(config_flags cmake_defaults) -DVW_GROUP_LOOKUP=ON" ;;
+    base_aggr_update)    echo "$(config_flags cmake_defaults) -DVW_AGGR_UPDATE=ON" ;;
     # compound key construction on the SIMD MurmurHash base
     hash_simd_concat_wide_pad) echo "$(config_flags hash_simd) -DVW_CONCAT_COMPOUND=ON" ;;
     # compound key study on base_simdhash: the key operators
