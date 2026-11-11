@@ -32,7 +32,10 @@ using runtime::MurMurHash;
 using hash_t = defs::hash_t;
 
 namespace {
-#ifdef VW_HAVE_SIMD_HASH_ANY
+// the kernels of every tier compiled in (the NEON tier stays testable when
+// VW_SIMD_HASH_NO_NEON keeps VW_SIMD_HASH from using it)
+#if defined(VW_HAVE_SIMD_HASH) || defined(VW_HAVE_SIMD_HASH_AVX2) ||          \
+    defined(VW_HAVE_SIMD_HASH_NEON)
 
 const std::vector<size_t> kSizes = {0, 1, 7, 8, 9, 15, 16, 17, 31, 1000, 1024};
 constexpr size_t kSlack = 8;
@@ -92,7 +95,9 @@ void expectSame(const std::vector<hash_t>& ref, const std::vector<hash_t>& got,
          NS::hash_keys<T>(n, k, o);                                            \
       }                                                                        \
    };
+#ifdef VW_HAVE_SIMD_HASH_ANY
 VW_HASH_TIER(Public, simd_hash)
+#endif
 #ifdef VW_HAVE_SIMD_HASH
 VW_HASH_TIER(Avx512, simd_hash::avx512)
 #endif
@@ -157,7 +162,7 @@ template <typename T, typename Tier> void checkPackedKeys(const char* name) {
    }
 }
 
-#endif // VW_HAVE_SIMD_HASH_ANY
+#endif // any tier compiled in
 } // namespace
 
 // every key type and form, and the packed keys, for one tier

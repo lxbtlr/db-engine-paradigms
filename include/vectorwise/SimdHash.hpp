@@ -63,7 +63,10 @@
 #define VW_SIMD_HASH_TIER_AVX512 1
 #elif defined(VW_HAVE_SIMD_HASH_AVX2)
 #define VW_SIMD_HASH_TIER_AVX2 1
-#elif defined(VW_HAVE_SIMD_HASH_NEON)
+#elif defined(VW_HAVE_SIMD_HASH_NEON) && !defined(VW_SIMD_HASH_NO_NEON)
+// VW_SIMD_HASH_NO_NEON (CMake VW_SIMD_HASH_NEON, off on ARMv8.2-A): the
+// neon:: kernels stay compiled for benchmarks and tests, but VW_SIMD_HASH
+// hashes with the scalar MurmurHash64A
 #define VW_SIMD_HASH_TIER_NEON 1
 #endif
 #if defined(VW_SIMD_HASH_TIER_AVX512) || defined(VW_SIMD_HASH_TIER_AVX2) ||   \

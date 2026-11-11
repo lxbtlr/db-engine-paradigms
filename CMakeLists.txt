@@ -723,7 +723,8 @@ endif()
 # MurMurHash (not with VW_USE_CRC32 or HASH_SIZE_32).
 # VW_SIMD_HASH_WIDTH=256 makes an AVX-512 target use the AVX2 tier, here and
 # in the packed-key hash of VW_CONCAT_HASH_COMPOUND (no effect elsewhere);
-# dubliner always uses it. HashGroup hashes its packed group keys with the
+# dubliner always uses it; VW_SIMD_HASH_NEON (below) turns the NEON tier
+# off on ARMv8.2-A. HashGroup hashes its packed group keys with the
 # selected tier with or without VW_GROUP_DISPATCH.
 OPTION(VW_SIMD_HASH "SIMD MurmurHash64A kernels (AVX-512 / AVX2 / NEON) for VectorWise hashing" OFF)
 if(VW_SIMD_HASH)
@@ -823,6 +824,43 @@ else()
 endif()
 
 message(STATUS "TARGET_ARCH=${TARGET_ARCH}  =>  ARCH_FLAGS=${ARCH_FLAGS}")
+
+# VW_SIMD_HASH_NEON: whether VW_SIMD_HASH uses its NEON tier on aarch64.
+# auto (default) turns it off for ARMv8.2-A targets (neoverse-n1, cortex-a76,
+# ampere-altra, armv8.2-generic, and a native build on a Neoverse N1 or
+# Cortex-A76 core); ARMv8.4 and ARMv9 targets (neoverse-v1, neoverse-v2,
+# armv9-generic, native elsewhere) keep it. On burrata (Neoverse N1) the NEON
+# MurmurHash64A, 2 keys per register with each 64-bit multiply built from
+# 32-bit ones, was 1-8% slower than the scalar hash on every hashing query
+# (2026-11-11-simdhash-fix-*), so VW_SIMD_HASH hashes with the scalar
+# MurmurHash64A there. ON / OFF force the tier on or off.
+set(VW_SIMD_HASH_NEON "auto" CACHE STRING "VW_SIMD_HASH NEON tier: auto (off on ARMv8.2-A), ON, OFF")
+set_property(CACHE VW_SIMD_HASH_NEON PROPERTY STRINGS auto ON OFF)
+if(VW_SIMD_HASH_NEON STREQUAL "auto")
+  set(vw_armv82 FALSE)
+  if(ARCH_FLAGS MATCHES "armv8\\.2-a")
+    set(vw_armv82 TRUE)
+  elseif(TARGET_ARCH STREQUAL "native" AND NOT CMAKE_TOOLCHAIN_FILE
+         AND EXISTS /proc/cpuinfo)
+    # native build (before project(): a toolchain file means cross). Arm CPU
+    # part numbers, which only aarch64 lists: 0xd0b Cortex-A76, 0xd0c
+    # Neoverse N1
+    file(STRINGS /proc/cpuinfo vw_v82_part REGEX "^CPU part.*0xd0[bc]" LIMIT_COUNT 1)
+    if(vw_v82_part)
+      set(vw_armv82 TRUE)
+    endif()
+  endif()
+  if(vw_armv82)
+    ADD_DEFINITIONS(-DVW_SIMD_HASH_NO_NEON=1)
+    if(VW_SIMD_HASH)
+      message(STATUS "VW_SIMD_HASH: NEON tier off on ARMv8.2-A (scalar MurmurHash64A)")
+    endif()
+  endif()
+elseif(VW_SIMD_HASH_NEON STREQUAL "OFF")
+  ADD_DEFINITIONS(-DVW_SIMD_HASH_NO_NEON=1)
+elseif(NOT VW_SIMD_HASH_NEON STREQUAL "ON")
+  message(FATAL_ERROR "VW_SIMD_HASH_NEON must be auto, ON or OFF (got '${VW_SIMD_HASH_NEON}')")
+endif()
 
 # Compiler-specific warning flags
 if(COMPILER STREQUAL "clang")
