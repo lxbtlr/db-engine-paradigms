@@ -434,6 +434,16 @@ if(VW_SEL_BETWEEN)
   message(STATUS "Building with VW_SEL_BETWEEN")
 endif()
 
+# VW_SEL_SPLIT: the branch-free selection templates (sel_col_val_bf,
+# selsel_col_val_bf, between_bf) as a vectorizable mask pass and a table-driven
+# compress pass (SelSplit.hpp), for arithmetic and Date columns. Affects only
+# the scalar fallback: the VW_SIMD_SEL kernels win where they are picked.
+OPTION(VW_SEL_SPLIT "Two-pass (mask + compress) scalar selection in VectorWise" OFF)
+if(VW_SEL_SPLIT)
+  ADD_DEFINITIONS(-DVW_SEL_SPLIT=1)
+  message(STATUS "Building with VW_SEL_SPLIT")
+endif()
+
 OPTION(VW_POS_16 "Use uint16_t for VectorWise pos_t" OFF)
 if(VW_POS_16)
   ADD_DEFINITIONS(-DVW_POS_16=1)

@@ -5,6 +5,7 @@
 #include "common/runtime/SIMD.hpp"
 #include "common/runtime/Types.hpp"
 #include "common/runtime/Util.hpp"
+#include "vectorwise/SelSplit.hpp"
 #include "vectorwise/VectorAllocator.hpp"
 #include "vectorwise/defs.hpp"
 #include <vector>
@@ -115,6 +116,10 @@ pos_t sel_col_val_bf(pos_t n, pos_t* RES result, T* RES param1, T* RES param2)
 /// select with column and constant
 {
    const auto con = *param2;
+   if constexpr (sel_split::kOn<T>)
+      return sel_split::select<false>(n, nullptr, result, [&](size_t i) {
+         return Op<T>()(param1[i], con);
+      });
    pos_t found = 0;
    for (pos_t i = 0; i < n; i++) {
       result[found] = i;
@@ -141,8 +146,12 @@ pos_t selsel_col_val_bf(pos_t n, pos_t* RES inSel, pos_t* RES result,
                         T* RES param1, T* RES param2)
 /// select with input selection vector and two columns
 {
-   auto rStart = result;
    const auto con = *param2;
+   if constexpr (sel_split::kOn<T>)
+      return sel_split::select<true>(n, inSel, result, [&](size_t idx) {
+         return Op<T>()(param1[idx], con);
+      });
+   auto rStart = result;
    for (uint64_t i = 0; i < n; ++i) {
       const auto idx = inSel[i];
       bool decision = Op<T>()(param1[idx], con);

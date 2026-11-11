@@ -495,7 +495,7 @@ flags() {
        "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_GROUP_GLOBAL_TAGS=OFF -DVW_GROUP_AGGR=OFF -DVW_GROUP_AGGR_SEL=OFF" \
        "-DVW_AGGR_FUSED=OFF -DVW_AGGR_FUSED_BUCKET=OFF -DVW_AGGR_DIRECT=OFF -DVW_AGGR_DIRECT_ISA=auto -DVW_AGGR_KINDS=OFF -DVW_PROJ_COMPOUND=OFF" \
        "-DVW_GROUP_DISPATCH=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
-       "-DVW_GROUP_HAVING=OFF" \
+       "-DVW_GROUP_HAVING=OFF -DVW_SEL_SPLIT=OFF -DVW_INLINE_EXTRACT_YEAR=OFF" \
        "-DAUTOVECTORIZE=$AUTOVEC" "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
 # group dispatch with the parts it implied until the aggregation branch
@@ -621,6 +621,12 @@ config_flags() {
     # fair_best with extractYear inlined into the header (VW apply_extract_year
     # and Hyper Q9); run in one job with fair_best
     fair_best_ey)        echo "$(config_flags fair_best) -DVW_INLINE_EXTRACT_YEAR=ON" ;;
+    # two-pass scalar selection (mask + compress); it replaces only the
+    # branch-free fallback, so on AVX-512 machines compare it with the SIMD
+    # kernels off (fair_nosel); on AVX2-only machines fair_nosel = fair_best
+    fair_best_split)     echo "$(config_flags fair_best) -DVW_SEL_SPLIT=ON" ;;
+    fair_nosel)          echo "$(config_flags fair_best) -DVW_SIMD_SEL=OFF" ;;
+    fair_nosel_split)    echo "$(config_flags fair_nosel) -DVW_SEL_SPLIT=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)

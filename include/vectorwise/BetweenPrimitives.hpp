@@ -10,6 +10,7 @@
 // kernels in SimdSelection.hpp under the same options as the selection
 // primitives the pair replaces (Between.cpp).
 #include <cstdint>
+#include "vectorwise/SelSplit.hpp"
 #include "vectorwise/defs.hpp"
 
 namespace vectorwise {
@@ -41,6 +42,11 @@ template <typename T, template <typename> class Lo, template <typename> class Hi
 pos_t between_bf(pos_t n, pos_t* inSel, pos_t* out, T* RES col, T* RES lo,
                  T* RES hi) {
    const T l = *lo, h = *hi;
+   if constexpr (sel_split::kOn<T>)
+      return sel_split::select<SelIn>(n, inSel, out, [&](size_t idx) {
+         const T v = col[idx];
+         return Lo<T>()(v, l) & Hi<T>()(v, h);
+      });
    pos_t found = 0;
    for (pos_t i = 0; i < n; i++) {
       const pos_t idx = SelIn ? inSel[i] : i;
