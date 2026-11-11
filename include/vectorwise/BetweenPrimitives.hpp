@@ -1,5 +1,5 @@
 #pragma once
-// Range selection primitives (VW_SEL_BETWEEN, X100-style compound selection).
+// Range selection primitives (VW_SEL_COMPOUND, X100-style compound selection).
 // Inside one Select expression, two comparisons of the same column with
 // constants, one a lower bound (>=, >) and one an upper bound (<=, <), where
 // the second reads the first's output selection, run as one pass:

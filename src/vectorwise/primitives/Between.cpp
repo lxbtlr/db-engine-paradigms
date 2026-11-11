@@ -1,6 +1,6 @@
 // Range selection kernels and descriptors (BetweenPrimitives.hpp). Built in
 // every configuration so tests and run_selbench reach the kernels; only the
-// plan rewrite in ExpressionBuilder is gated by VW_SEL_BETWEEN.
+// plan rewrite in ExpressionBuilder is gated by VW_SEL_COMPOUND.
 #include "vectorwise/BetweenPrimitives.hpp"
 #include "common/runtime/Types.hpp"
 #include "vectorwise/Primitives.hpp"

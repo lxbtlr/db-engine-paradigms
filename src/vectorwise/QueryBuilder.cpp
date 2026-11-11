@@ -183,7 +183,7 @@ QueryBuilder::DataStorage::operator pos_t*() const {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F1 op, DS a) {
-#ifdef VW_SEL_BETWEEN
+#ifdef VW_SEL_COMPOUND
    checkUnwritten({}, &a);
    flushHeldSel();
 #endif
@@ -198,7 +198,7 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F1 op, DS a) {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F2 op, DS a, DS b) {
-#ifdef VW_SEL_BETWEEN
+#ifdef VW_SEL_COMPOUND
    checkUnwritten({&b}, &a);
    flushHeldSel();
 #endif
@@ -214,7 +214,7 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F2 op, DS a, DS b) {
 
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F3 op, DS a, DS b, DS c) {
-#ifdef VW_SEL_BETWEEN
+#ifdef VW_SEL_COMPOUND
    checkUnwritten({&b, &c}, &a);
    primitives::between::Desc sdesc;
    if (primitives::between::describe((const void*)op, sdesc)) {
@@ -245,7 +245,7 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F3 op, DS a, DS b, DS c) {
 QueryBuilder::ExpressionBuilder&
 QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
                                        DS d) {
-#ifdef VW_SEL_BETWEEN
+#ifdef VW_SEL_COMPOUND
    checkUnwritten({&a, &c, &d}, &b);
    primitives::between::Desc sdesc;
    if (primitives::between::describe((const void*)op, sdesc)) {
@@ -276,7 +276,7 @@ QueryBuilder::ExpressionBuilder::addOp(primitives::F4 op, DS a, DS b, DS c,
 }
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Expression>() {
-#ifdef VW_SEL_BETWEEN
+#ifdef VW_SEL_COMPOUND
    flushHeldSel();
 #endif
 #ifdef VW_PROJ_COMPOUND
@@ -287,7 +287,7 @@ operator std::unique_ptr<vectorwise::Expression>() {
 
 QueryBuilder::ExpressionBuilder::
 operator std::unique_ptr<vectorwise::Aggregates>() {
-#ifdef VW_SEL_BETWEEN
+#ifdef VW_SEL_COMPOUND
    flushHeldSel();
 #endif
 #ifdef VW_PROJ_COMPOUND
@@ -386,7 +386,7 @@ bool QueryBuilder::ExpressionBuilder::fuse(const HeldProjection& first,
 }
 #endif
 
-#ifdef VW_SEL_BETWEEN
+#ifdef VW_SEL_COMPOUND
 void QueryBuilder::ExpressionBuilder::flushHeldSel() {
    if (!heldSel) return;
    auto& h = *heldSel;
@@ -422,7 +422,7 @@ void QueryBuilder::ExpressionBuilder::checkUnwritten(
    if (!unwrittenSel) return;
    for (const DS* r : reads)
       if (r->buf == DS::BufferSpec::Buffer && r->data == unwrittenSel)
-         throw std::runtime_error("VW_SEL_BETWEEN: an op reads the selection "
+         throw std::runtime_error("VW_SEL_COMPOUND: an op reads the selection "
                                   "between a fused range pair");
    if (write && write->buf == DS::BufferSpec::Buffer &&
        write->data == unwrittenSel)

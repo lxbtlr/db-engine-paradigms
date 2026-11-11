@@ -6,7 +6,7 @@
 // through SIMDe; see study/NEON_PORT_STUDY.md for the per-kernel decision.
 //
 // NOT WIRED INTO THE ENGINE YET, except the range selection kernels
-// (VW_SEL_BETWEEN + VW_SIMD_SEL, Between.cpp). Every AVX-512 kernel in the
+// (VW_SEL_COMPOUND + VW_SIMD_SEL, Between.cpp). Every AVX-512 kernel in the
 // engine is guarded by __AVX512F__ (and friends), so an aarch64 build runs
 // the scalar templates everywhere else. The "engine site" line above each kernel names the
 // guard that would get a VW_HAVE_NEON branch.
@@ -292,9 +292,9 @@ pos_t selsel_col_val(pos_t n, pos_t* RES inSel, pos_t* RES result,
    return pos_t(found);
 }
 
-//--- range selection (engine: Between.cpp, VW_SEL_BETWEEN) -------------------
+//--- range selection (engine: Between.cpp, VW_SEL_COMPOUND) -------------------
 // Lo(x, l) && Hi(x, h): two compares ANDed per lane, one mask and compress.
-// WIRED: Between.cpp picks these under VW_SEL_BETWEEN + VW_SIMD_SEL on
+// WIRED: Between.cpp picks these under VW_SEL_COMPOUND + VW_SIMD_SEL on
 // aarch64 (the gathered one only with VW_SIMD_SEL_GATHER=scalarload). The
 // ordinary selection primitives stay scalar there, so a fused-vs-chain
 // comparison is NEON vs scalar. inSel and result may be the same buffer:

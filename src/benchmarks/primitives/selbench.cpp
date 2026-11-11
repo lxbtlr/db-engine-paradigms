@@ -12,7 +12,7 @@
 //            [0, 100), so x >= lo passes 100-lo %, x < hi passes hi %
 //   -f     : run only the families whose name contains the substring
 // Output: CSV on stdout, one row per (kernel, impl, mode, selectivity). The
-// between families (VW_SEL_BETWEEN) put the bounds in op ("ge_lt:lo:hi") and
+// between families (VW_SEL_COMPOUND) put the bounds in op ("ge_lt:lo:hi") and
 // the overall pass rate in sel_pct.
 #include "common/runtime/Types.hpp"
 #include "vectorwise/BetweenPrimitives.hpp"
@@ -572,7 +572,7 @@ int main(int argc, char** argv) {
    charEq<10>();
    charEq<25>();
 
-   // ranges (VW_SEL_BETWEEN): Q6 l_shipdate int32 [lo, hi), Q5 o_orderdate
+   // ranges (VW_SEL_COMPOUND): Q6 l_shipdate int32 [lo, hi), Q5 o_orderdate
    // Date [lo, hi), Q6 / SSB Q1.x l_discount, lo_quantity int64 [lo, hi]
    for (bool gathered : {false, true}) {
       benchBetween<int32_t, std::less>(gathered);

@@ -90,20 +90,17 @@ inline __m512i lane_ids() {
                             15);
 }
 
-/// How matching positions are written (CMake VW_SIMD_SEL_COMPRESS):
+/// How matching positions are written:
 ///   Reg: register vpcompressd + masked store sized to the match count. Fast
 ///        everywhere, including AMD Zen 4, where the memory form is microcoded.
 ///   Mem: memory-form vpcompressd (_mm512_mask_compressstoreu_epi32), as in the
 ///        pre-existing *_avx512 kernels; fewer uops on Intel.
 /// Both write exactly popcount(m) positions and nothing past them. Under
 /// VW_POS_16 a 16-bit memory compress would need AVX512-VBMI2, so Mem falls
-/// back to Reg there.
+/// back to Reg there. The engine uses Reg (the VW_SIMD_SEL_COMPRESS option
+/// that chose Mem was removed 2026-11-10); Mem stays for comparisons.
 enum class Emit { Reg, Mem };
-#ifdef VW_SIMD_SEL_COMPRESS_MEM
-constexpr Emit kEmit = Emit::Mem;
-#else
 constexpr Emit kEmit = Emit::Reg;
-#endif
 /// Vectors of 16 per loop iteration in the contiguous kernels
 /// (CMake VW_SIMD_SEL_UNROLL).
 #ifdef VW_SIMD_SEL_UNROLL2
@@ -451,9 +448,9 @@ pos_t sel_col_col_256(pos_t n, pos_t* RES result, T* RES param1,
 }
 #endif // VW_HAVE_SIMD_SEL_256
 
-/// The variants selected by VW_SIMD_SEL_WIDTH / VW_SIMD_SEL_COMPRESS /
-/// VW_SIMD_SEL_UNROLL; these are what the redirected primitive names point
-/// to. VW_SIMD_SEL_WIDTH=256 without AVX512VL falls back to 512-bit.
+/// The variants selected by VW_SIMD_SEL_WIDTH / VW_SIMD_SEL_UNROLL; these
+/// are what the redirected primitive names point to. VW_SIMD_SEL_WIDTH=256
+/// without AVX512VL falls back to 512-bit.
 template <typename T, template <typename> class Op>
 pos_t sel_col_val(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
 #if defined(VW_SIMD_SEL_WIDTH_256) && defined(VW_HAVE_SIMD_SEL_256)
@@ -471,7 +468,7 @@ pos_t sel_col_col(pos_t n, pos_t* RES result, T* RES param1, T* RES param2) {
 #endif
 }
 
-//--- range (VW_SEL_BETWEEN, BetweenPrimitives.hpp) ---------------------------
+//--- range (VW_SEL_COMPOUND, BetweenPrimitives.hpp) ---------------------------
 // Lo(x, *lo) && Hi(x, *hi): each element is loaded once and compared twice,
 // the second compare under the first's mask, then one compress. No unroll.
 
@@ -572,7 +569,7 @@ pos_t sel_between_256(pos_t n, pos_t* RES result, T* RES param1, T* RES lo,
 }
 #endif // VW_HAVE_SIMD_SEL_256
 
-/// the variant selected by VW_SIMD_SEL_WIDTH / VW_SIMD_SEL_COMPRESS
+/// the variant selected by VW_SIMD_SEL_WIDTH
 template <typename T, template <typename> class Lo, template <typename> class Hi>
 pos_t sel_between(pos_t n, pos_t* RES result, T* RES param1, T* RES lo,
                   T* RES hi) {
@@ -759,7 +756,7 @@ pos_t selsel_col_col(pos_t n, pos_t* RES inSel, pos_t* RES result,
 #endif
 }
 
-//--- range, gathered input (VW_SEL_BETWEEN) ----------------------------------
+//--- range, gathered input (VW_SEL_COMPOUND) ----------------------------------
 // inSel and result may be the same buffer: a group's entries are loaded
 // before its positions are stored, and stores never pass the group.
 

@@ -123,11 +123,13 @@
 #              e.g. CONFIGS="$(echo hash_{murmur,simd,crc32,crc32_fast,crc32_vpclmul})"
 #   HASH_BASE  default   flag config the hash configs build on (e.g. tuned,
 #                        drop_pos16); its crc32 setting is overridden
-#   SEL        by CPU: AVX-512VL "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg",
-#              AVX-512F only "-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg",
-#              otherwise (Zen 3, ARM, ...) "-DVW_SIMD_SEL=OFF"; with AVX-512
-#              and no GDS penalty (manchego) also "-DVW_SIMD_SEL_GATHER=hwgather"
-#              (fair_sel and up on manchego before 2026-11-10: scalar gather)
+#   SEL        by CPU: "-DVW_SIMD_SEL=ON" with AVX-512F (AVX-512 selection
+#              kernels) or on aarch64 (the NEON VW_SEL_COMPOUND kernel), else
+#              (Zen 3, ...) "-DVW_SIMD_SEL=OFF". CMake picks the width (256 on
+#              dubliner / kafir, 512 elsewhere) and the gather (hwgather where
+#              the CPU has no GDS penalty, i.e. manchego). Before 2026-11-10:
+#              256-bit on every AVX-512 machine, scalar gather on manchego
+#              until 1ec7af6, VW_SIMD_SEL off on aarch64.
 #   MACHINE    $(hostname -s) if it is a preset (dubliner, roquefort, manchego, burrata, kafir, rpi5), else custom
 #   BENCH      tpch      tpch (run_tpch, TPCH.* tests) or ssb (run_ssb, SSB.*
 #                        tests); ssb adds _ssb to every config name
@@ -209,18 +211,11 @@ CONFIGS=$(for c in $CONFIGS; do if [ "$c" = join_valid ]; then printf "%s\n" $JO
 if [ "${PRINT_CONFIGS:-0}" = 1 ]; then echo $CONFIGS; exit 0; fi
 HASH_BASE=${HASH_BASE:-default}
 # SIMD selection only where the CPU has the kernels' ISA, so a config never
-# claims SIMD selection while silently running the scalar fallback
+# claims SIMD selection while silently running the scalar fallback; CMake
+# chooses width and gather for the target
 if [ -z "${SEL:-}" ]; then
-  if grep -q -w avx512vl /proc/cpuinfo; then SEL="-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=256 -DVW_SIMD_SEL_COMPRESS=reg"
-  elif grep -q -w avx512f /proc/cpuinfo; then SEL="-DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg"
+  if grep -q -w avx512f /proc/cpuinfo || grep -q -w asimd /proc/cpuinfo; then SEL="-DVW_SIMD_SEL=ON"
   else SEL="-DVW_SIMD_SEL=OFF"; fi
-  # gathered selections with vpgather where the CPU has no Gather Data
-  # Sampling (Downfall) penalty (manchego); under the mitigation (dubliner)
-  # hwgather is 1.2-3.5x slower, so those keep the scalar gather
-  if [ "$SEL" != "-DVW_SIMD_SEL=OFF" ] &&
-     grep -qx "Not affected" /sys/devices/system/cpu/vulnerabilities/gather_data_sampling 2> /dev/null; then
-    SEL="$SEL -DVW_SIMD_SEL_GATHER=hwgather"
-  fi
 fi
 # MACHINE defaults to this host's short name when it is a TARGET_MACHINE
 # preset, else "custom" (-march=native, CMake topology defaults).
@@ -488,14 +483,14 @@ tlimit() { if [ "$TIMEOUT" -gt 0 ]; then timeout --kill-after=30 "$TIMEOUT" "$@"
 # kernel options, so nothing leaks in from an earlier configure.
 flags() {
   echo "-DVW_POS_16=$1 -DVW_USE_CRC32=$2 -DHUGE_2MB_MALLOC_HUGE=$3" \
-       "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg -DVW_SIMD_SEL_UNROLL=1" \
-       "-DVW_SIMD_SEL_GATHER=scalar -DVW_SIMD_SEL_CHAR=OFF -DVW_SIMD_HASH=OFF -DVW_SIMD_HASH_WIDTH=512 -DVW_JOIN_PREFETCH=OFF" \
+       "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_WIDTH=auto -DVW_SIMD_SEL_UNROLL=1 -DVW_SEL_COMPOUND=OFF" \
+       "-DVW_SIMD_SEL_GATHER=auto -DVW_SIMD_SEL_CHAR=OFF -DVW_SIMD_HASH=OFF -DVW_SIMD_HASH_WIDTH=512 -DVW_JOIN_PREFETCH=OFF" \
        "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF -DVW_JOIN_TWOPHASE=OFF -DVW_JOIN_TWOPHASE_CACHE=L1 -DVW_JOIN_SIMD=OFF" \
        "-DVW_NEW_JOIN=OFF -DVW_NEW_JOIN_FULL=tag -DVW_SIMD_HASH_GATHER=insert" \
        "-DVW_GROUP_BATCH_CREATE=OFF -DVW_GROUP_GLOBAL_DIRECT=OFF -DVW_GROUP_GLOBAL_TAGS=OFF -DVW_GROUP_AGGR=OFF -DVW_GROUP_AGGR_SEL=OFF" \
        "-DVW_AGGR_FUSED=OFF -DVW_AGGR_FUSED_BUCKET=OFF -DVW_AGGR_DIRECT=OFF -DVW_AGGR_DIRECT_ISA=auto -DVW_AGGR_KINDS=OFF -DVW_PROJ_COMPOUND=OFF" \
        "-DVW_GROUP_DISPATCH=OFF -DVW_JOIN_FUSED_PROBE=OFF -DVW_JOIN_SEMI=OFF" \
-       "-DVW_GROUP_HAVING=OFF" \
+       "-DVW_GROUP_HAVING=OFF -DVW_CONCAT_COMPOUND=OFF -DVW_CONCAT_HASH_COMPOUND=OFF" \
        "-DAUTOVECTORIZE=$AUTOVEC" "$SEL" # last -D wins, so SEL overrides the SIMD_SEL defaults above
 }
 # group dispatch with the parts it implied until the aggregation branch
@@ -504,12 +499,12 @@ flags() {
 # Global direct is untagged since VW_GROUP_GLOBAL_TAGS was split out: every
 # config with GDISP or VW_GROUP_GLOBAL_DIRECT measured before that commit had
 # the tagged directory.
-GDISP="-DVW_GROUP_DISPATCH=ON -DVW_GROUP_BATCH_CREATE=ON -DVW_GROUP_GLOBAL_DIRECT=ON -DVW_AGGR_FUSED=ON"
+GDISP="-DVW_GROUP_LOOKUP=ON -DVW_AGGR_FUSED=ON"
 # Q1 hash study (q1s_*): the best Q1 stack of 2026-11-09 (cmake_defaults plus
 # these, POS_16 on; run with AUTOVEC=ON), one hash option per config. Under
 # VW_GROUP_DISPATCH the group keys are hashed with the option's SIMD kernel
 # when it has one (VW_SIMD_HASH tiers, VW_CRC32_VPCLMUL), else scalar.
-Q1S="-DVW_AGGR_FUSED=ON -DVW_AGGR_KINDS=ON -DVW_PROJ_COMPOUND=ON -DVW_SIMD_SEL=ON -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_HASH=ON -DVW_GROUP_DISPATCH=ON -DVW_POS_16=ON"
+Q1S="-DVW_AGGR_UPDATE=ON -DVW_PROJ_COMPOUND=ON -DVW_SIMD_SEL=ON -DVW_CONCAT_COMPOUND=ON -DVW_CONCAT_HASH_COMPOUND=ON -DVW_GROUP_DISPATCH=ON -DVW_POS_16=ON"
 config_flags() {
   case "$1" in
     # no option flags at all: every VW option at its CMakeLists.txt default
@@ -524,7 +519,7 @@ config_flags() {
     # VW_FLAGS="VW_USE_CRC32=ON VW_CRC32_FAST=ON"
     par_crc32)           echo "-DVW_USE_CRC32=ON" ;;
     par_semi)            echo "-DVW_JOIN_SEMI=ON" ;;
-    par_having)          echo "$(config_flags par_semi) -DVW_GROUP_HAVING=ON" ;;
+    par_having)          echo "-DVW_PARITY=ON" ;;  # par_semi + VW_GROUP_HAVING
     # safe ladder: par_having plus jd_all_pc's engine options, one group per
     # step; safe_compound is the last step and has jd_all_pc's defines.
     # (safe_jdisp, the Bloom filter and fused probe, and beyond_bitmap were
@@ -561,69 +556,52 @@ config_flags() {
     fair_compound)       echo "$(config_flags fair_kinds) -DVW_PROJ_COMPOUND=ON" ;;
     # compound group key construction (user, 2026-11-07: fair): row kernels
     # and vector kernels for all-dense keys, fixed-size wide columns, keys
-    # padded to 4 / 8 / 16 bytes
-    fair_concat)         echo "$(config_flags fair_compound) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_WIDE=ON -DVW_GROUP_KEY_PAD=ON" ;;
-    # one-pass compound key concatenation (Q1, Q3, Q18 group keys), on the
-    # cmake_defaults baseline: the vector kernels for every shape, selection-
-    # vector keys staged or gathered, or (row) the row kernels first; flags
-    # spelled out so they keep the meaning of the 2026-11-06 runs
-    base_concat)         echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=OFF -DVW_GROUP_CONCAT_SHUFFLE=all" ;;
-    base_concat_gather)  echo "$(config_flags base_concat) -DVW_GROUP_CONCAT_SEL=gather" ;;
-    base_concat_row)     echo "$(config_flags cmake_defaults) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=ON -DVW_GROUP_CONCAT_SHUFFLE=all" ;;
-    # the row kernels on the AVX-512 MurmurHash base, unfused and with the
-    # packed-key hash fused into them (VW_GROUP_CONCAT_HASH)
-    hash_simd_row)       echo "$(config_flags hash_simd) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_ROW=ON -DVW_GROUP_CONCAT_SHUFFLE=all" ;;
-    hash_simd_fused)     echo "$(config_flags hash_simd_row) -DVW_GROUP_CONCAT_HASH=ON" ;;
-    # the default concatenation (row kernels, vector kernels for all-dense
-    # keys) on the AVX-512 MurmurHash base, and both with group dispatch
-    hash_simd_concat)    echo "$(config_flags hash_simd) -DVW_GROUP_CONCAT_SIMD=ON" ;;
+    # padded to 4 / 8 / 16 bytes (VW_CONCAT_COMPOUND)
+    fair_concat)         echo "$(config_flags fair_compound) -DVW_CONCAT_COMPOUND=ON" ;;
+    # The concat study configs base_concat, base_concat_gather,
+    # base_concat_row, hash_simd_row, hash_simd_fused, hash_simd_concat,
+    # hash_simd_gdisp_concat, hash_simd_blocked, base_pad,
+    # hash_simd_concat_pad and hash_simd_concat_wide were removed (2026-11-10)
+    # with the VW_GROUP_CONCAT_* / VW_GROUP_KEY_PAD options they varied:
+    # VW_CONCAT_COMPOUND fixes the settings that won (row kernels, vector
+    # kernels for dense keys, staged loads, wide copies, padding).
     hash_simd_gdisp)     echo "$(config_flags hash_simd) $GDISP" ;;
     hash_simd_gdisp_tags) echo "$(config_flags hash_simd_gdisp) -DVW_GROUP_GLOBAL_TAGS=ON" ;;
-    hash_simd_gdisp_concat) echo "$(config_flags hash_simd_gdisp) -DVW_GROUP_CONCAT_SIMD=ON" ;;
-    # the default concatenation with the AVX-512 hash pass run per block of
-    # 128 row-kernel keys, in L1 (VW_GROUP_CONCAT_HASH_MODE=blocked)
-    hash_simd_blocked)   echo "$(config_flags hash_simd_concat) -DVW_GROUP_CONCAT_HASH=ON -DVW_GROUP_CONCAT_HASH_MODE=blocked" ;;
-    # compound group keys of 3, 5..7, 9..15 bytes padded to 4 / 8 / 16 (TPC-H
-    # Q3: 12 -> 16), on cmake_defaults and on the default concatenation
-    base_pad)            echo "$(config_flags cmake_defaults) -DVW_GROUP_KEY_PAD=ON" ;;
-    hash_simd_concat_pad) echo "$(config_flags hash_simd_concat) -DVW_GROUP_KEY_PAD=ON" ;;
-    # cmake_defaults with only the AVX-512 MurmurHash kernels (join probe
+    # cmake_defaults with only the SIMD MurmurHash kernels (join probe
     # profiling baseline)
     base_simdhash)       echo "$(config_flags cmake_defaults) -DVW_SIMD_HASH=ON" ;;
     # VW_JOIN_TWOPHASE on cmake_defaults: the two-phase probe for directories
     # of at least L1 (the default) or L2 of the machine it runs on
     base_tp_l2)          echo "$(config_flags cmake_defaults) -DVW_JOIN_TWOPHASE=ON -DVW_JOIN_TWOPHASE_CACHE=L2" ;;
     base_tp_l1)          echo "$(config_flags cmake_defaults) -DVW_JOIN_TWOPHASE=ON -DVW_JOIN_TWOPHASE_CACHE=L1" ;;
-    # the default concatenation with fixed-size wide columns, and with padding
-    hash_simd_concat_wide) echo "$(config_flags hash_simd_concat) -DVW_GROUP_CONCAT_WIDE=ON" ;;
-    hash_simd_concat_wide_pad) echo "$(config_flags hash_simd_concat_wide) -DVW_GROUP_KEY_PAD=ON" ;;
-    # compound key study on base_simdhash (the SIMD hash compiles away
-    # without AVX-512, so these also run on roquefort and burrata): the key
-    # operators (concat kernels + wide + pad, then the fused hash) on the
+    # compound key construction on the SIMD MurmurHash base
+    hash_simd_concat_wide_pad) echo "$(config_flags hash_simd) -DVW_CONCAT_COMPOUND=ON" ;;
+    # compound key study on base_simdhash: the key operators
+    # (VW_CONCAT_COMPOUND, then VW_CONCAT_HASH_COMPOUND) on the
     # Concat/Hash/Lookup loop, against VW_GROUP_DISPATCH's key loop alone and
     # with the same operators (it never calls the fused hash: ck_disp_fused
     # should match ck_disp_concat)
-    ck_concat)           echo "$(config_flags base_simdhash) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_WIDE=ON -DVW_GROUP_KEY_PAD=ON" ;;
-    ck_fused)            echo "$(config_flags ck_concat) -DVW_GROUP_CONCAT_HASH=ON" ;;
+    ck_concat)           echo "$(config_flags base_simdhash) -DVW_CONCAT_COMPOUND=ON" ;;
+    ck_fused)            echo "$(config_flags ck_concat) -DVW_CONCAT_HASH_COMPOUND=ON" ;;
     ck_disp)             echo "$(config_flags base_simdhash) -DVW_GROUP_DISPATCH=ON" ;;
-    ck_disp_concat)      echo "$(config_flags ck_disp) -DVW_GROUP_CONCAT_SIMD=ON -DVW_GROUP_CONCAT_WIDE=ON -DVW_GROUP_KEY_PAD=ON" ;;
-    ck_disp_fused)       echo "$(config_flags ck_disp_concat) -DVW_GROUP_CONCAT_HASH=ON" ;;
+    ck_disp_concat)      echo "$(config_flags ck_disp) -DVW_CONCAT_COMPOUND=ON" ;;
+    ck_disp_fused)       echo "$(config_flags ck_disp_concat) -DVW_CONCAT_HASH_COMPOUND=ON" ;;
     # compound range selection: on top of the fair pool, and against fair_sel
     # alone (one Select, the work Typer's && does; Q5, Q6, SSB Q1.x, Q3.x)
     simd_sel)            echo "$(config_flags cmake_defaults) $SEL" ;;
-    base_between)        echo "$(config_flags cmake_defaults) -DVW_SEL_BETWEEN=ON" ;;
-    simd_between)        echo "$(config_flags cmake_defaults) $SEL -DVW_SEL_BETWEEN=ON" ;;
-    fair_between)        echo "$(config_flags fair_compound) -DVW_SEL_BETWEEN=ON" ;;
-    sel_between)         echo "$(config_flags fair_sel) -DVW_SEL_BETWEEN=ON" ;;
+    base_between)        echo "$(config_flags cmake_defaults) -DVW_SEL_COMPOUND=ON" ;;
+    simd_between)        echo "$(config_flags cmake_defaults) $SEL -DVW_SEL_COMPOUND=ON" ;;
+    fair_between)        echo "$(config_flags fair_compound) -DVW_SEL_COMPOUND=ON" ;;
+    sel_between)         echo "$(config_flags fair_sel) -DVW_SEL_COMPOUND=ON" ;;
     # the full fair pool: compound key construction and compound range
     # selection together
-    fair_best)           echo "$(config_flags fair_concat) -DVW_SEL_BETWEEN=ON" ;;
+    fair_best)           echo "$(config_flags fair_concat) -DVW_SEL_COMPOUND=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)
     jdpc_av)             echo "$(config_flags jd_all_pc) -DAUTOVECTORIZE=ON" ;;
     jdpc_nosel)          echo "$(config_flags jd_all_pc) -DVW_SIMD_SEL=OFF" ;;
-    jdpc_sel512)         echo "$(config_flags jd_all_pc) -DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512 -DVW_SIMD_SEL_COMPRESS=reg" ;;
+    jdpc_sel512)         echo "$(config_flags jd_all_pc) -DVW_SIMD_SEL=ON -DVW_SIMD_SEL_WIDTH=512" ;;
     #                         pos16 crc32 huge2mb
     default)             flags OFF   OFF   OFF ;;
     add_pos16)           flags ON    OFF   OFF ;;

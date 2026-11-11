@@ -130,7 +130,7 @@ pos_t CompoundOp::run(pos_t n) {
                  static_cast<const int64_t*>(b), static_cast<const int64_t*>(c));
 }
 #endif
-#ifdef VW_SEL_BETWEEN
+#ifdef VW_SEL_COMPOUND
 pos_t BetweenOp::run(pos_t n) {
    return kernel(n, static_cast<pos_t*>(sel), static_cast<pos_t*>(out), col, lo,
                  hi);

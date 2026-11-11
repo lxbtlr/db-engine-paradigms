@@ -1,7 +1,7 @@
 // Range selection (BetweenPrimitives.hpp): differential tests. Every kernel,
 // scalar and AVX-512, must match the chain of two selection primitives it
 // replaces, also when its output overwrites its input selection; under
-// VW_SEL_BETWEEN, ExpressionBuilder must fuse exactly the pairs it may.
+// VW_SEL_COMPOUND, ExpressionBuilder must fuse exactly the pairs it may.
 #include "vectorwise/BetweenPrimitives.hpp"
 #include "common/runtime/Types.hpp"
 #include "vectorwise/Operations.hpp"
@@ -170,7 +170,7 @@ TEST(Between, DescriptorsMatchPrimitives) {
    EXPECT_FALSE(describe((const void*)proj_plus_int64_t_col_int64_t_val, d));
 }
 
-#ifdef VW_SEL_BETWEEN
+#ifdef VW_SEL_COMPOUND
 namespace {
 // the builder types are protected: re-export them
 struct Exposed : QueryBuilder {

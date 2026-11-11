@@ -5,6 +5,11 @@ cmake_minimum_required(VERSION 2.8 FATAL_ERROR)
 if(POLICY CMP0126)
   cmake_policy(SET CMP0126 NEW)
 endif()
+# CMP0077 NEW: option() keeps a normal variable of the same name, so the
+# option bundles (VW_PARITY, ...) can turn their members on.
+if(POLICY CMP0077)
+  cmake_policy(SET CMP0077 NEW)
+endif()
 
 if(UNIX AND NOT APPLE)
   set(LINUX true)
@@ -116,6 +121,30 @@ message(STATUS "TARGET_MACHINE=${TARGET_MACHINE}  =>  ${SOCKETS_COUNT}S x ${CORE
 OPTION(NO_HUGE_PAGES "Disable huge pages for malloc_huge" OFF)
 OPTION(HUGE_2MB_MALLOC_HUGE "Use 2MB hugetlb pages for malloc_huge" OFF)
 set(MORSEL_SIZE 10000 CACHE STRING "Morsel size for parallel scan loops")
+
+# VectorWise option bundles: each turns on its member options (which stay
+# usable one by one for ablations). Set before the members are declared.
+#   VW_PARITY        VW_JOIN_SEMI, VW_GROUP_HAVING: plan facts Typer's plans
+#                    already use (semi join probe, HAVING in the group-by)
+#   VW_AGGR_UPDATE   VW_AGGR_FUSED, VW_AGGR_KINDS: HashGroup's aggregate
+#                    update fused over all aggregates and specialized by kind
+#   VW_GROUP_LOOKUP  VW_GROUP_DISPATCH, VW_GROUP_BATCH_CREATE,
+#                    VW_GROUP_GLOBAL_DIRECT: HashGroup's key loop, group
+#                    creation and global-phase find-or-create
+OPTION(VW_PARITY "VW_JOIN_SEMI + VW_GROUP_HAVING" OFF)
+OPTION(VW_AGGR_UPDATE "VW_AGGR_FUSED + VW_AGGR_KINDS" OFF)
+OPTION(VW_GROUP_LOOKUP "VW_GROUP_DISPATCH + VW_GROUP_BATCH_CREATE + VW_GROUP_GLOBAL_DIRECT" OFF)
+set(VW_BUNDLE_VW_PARITY VW_JOIN_SEMI VW_GROUP_HAVING)
+set(VW_BUNDLE_VW_AGGR_UPDATE VW_AGGR_FUSED VW_AGGR_KINDS)
+set(VW_BUNDLE_VW_GROUP_LOOKUP VW_GROUP_DISPATCH VW_GROUP_BATCH_CREATE VW_GROUP_GLOBAL_DIRECT)
+foreach(bundle VW_PARITY VW_AGGR_UPDATE VW_GROUP_LOOKUP)
+  if(${bundle})
+    foreach(opt ${VW_BUNDLE_${bundle}})
+      set(${opt} ON)
+    endforeach()
+    message(STATUS "Building with ${bundle} (${VW_BUNDLE_${bundle}})")
+  endif()
+endforeach()
 
 OPTION(VW_USE_CRC32 "Set the default hashing method to CRC32hash for VectorWise" OFF)
 
@@ -248,85 +277,55 @@ if(VW_GROUP_DISPATCH)
   message(STATUS "Building with VW_GROUP_DISPATCH")
 endif()
 
-# VW_GROUP_CONCAT_SIMD: HashGroup packs its key columns in one pass, planned
-# once from the key shape (SimdConcat.hpp), in Concat and in
-# VW_GROUP_DISPATCH's compound key step:
-#   VW_GROUP_CONCAT_ROW (default ON): key shapes with a row kernel (TPC-H
-#     Q1's) are assembled per row in a 64-bit register: one index load and
-#     one store per row; the only kernel that wins on keys read through a
-#     selection vector (run_concatbench, 2026-11-06)
-#   VW_GROUP_CONCAT_SHUFFLE: which other shapes take the vector kernels (a
-#     byte permute per column; AVX-512 VBMI on Ice Lake and newer, else
-#     AVX2, else NEON): dense (default; every key column dense, where they
-#     win), all, or off; the rest keep the per-column copy
-#   VW_GROUP_CONCAT_SEL: how the vector kernels load keys read through a
-#     selection vector: stage (scalar loads into a stack buffer) or gather
-#     (vpgather / NEON lane loads)
-OPTION(VW_GROUP_CONCAT_SIMD "One-pass compound key concatenation in VectorWise HashGroup" OFF)
-OPTION(VW_GROUP_CONCAT_ROW "VW_GROUP_CONCAT_SIMD: per-row register kernels for the instantiated key shapes" ON)
-set(VW_GROUP_CONCAT_SHUFFLE "dense" CACHE STRING "VW_GROUP_CONCAT_SIMD vector kernels for: dense, all or off")
-set(VW_GROUP_CONCAT_SEL "stage" CACHE STRING "VW_GROUP_CONCAT_SIMD selection-vector loads: stage or gather")
-if(VW_GROUP_CONCAT_SIMD)
-  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_SIMD=1)
-  if(VW_GROUP_CONCAT_ROW)
-    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_ROW=1)
+# VW_CONCAT_COMPOUND: compound group key construction in HashGroup (in Concat
+# and in VW_GROUP_DISPATCH's compound key step):
+#   - the key columns are packed in one pass, planned once from the key shape
+#     (SimdConcat.hpp): shapes with a row kernel (TPC-H Q1's) are assembled
+#     per row in a 64-bit register (one index load and one store per row);
+#     other shapes whose key columns are all dense take the vector kernels (a
+#     byte permute per column: AVX-512 VBMI on Ice Lake and newer, else AVX2,
+#     else NEON); the rest keep the per-column copy
+#   - key columns wider than 8 bytes (and of 3, 5..7 bytes) are copied with
+#     two fixed-size moves that overlap in the value's middle, chosen once
+#     from the width, instead of a memcpy whose length is known only at run
+#     time (TPC-H Q9 / Q18 Char(25), SSB Char(7..15))
+#   - compound keys of 3, 5..7 or 9..15 bytes are padded with zero bytes to
+#     4, 8 or 16 (TPC-H Q3: 12 -> 16), so they take the 4/8-byte integer hash
+#     and compare or a fixed-length 16-byte path; entries grow by the padding
+# VW_CONCAT_HASH_COMPOUND (needs VW_CONCAT_COMPOUND): for key shapes with a
+# row kernel, the packed key is hashed (MurmurHash64A, AVX-512 where
+# available) in the same pass that builds it, and HashGroup's hash pass is
+# skipped. VW_GROUP_DISPATCH's key loop never calls it; no effect under
+# VW_USE_CRC32 (the fused kernels hash with Murmur).
+# Both set the internal VW_GROUP_CONCAT_* / VW_GROUP_KEY_PAD defines. They
+# replace (2026-11-10) the options VW_GROUP_CONCAT_SIMD, _ROW, _SHUFFLE, _SEL,
+# _WIDE, _HASH, _HASH_MODE and VW_GROUP_KEY_PAD with the settings that won
+# end to end (2026-11-06..09 runs): row kernels, vector kernels for dense
+# shapes, staged selection-vector loads, the hash fused into the row loop.
+OPTION(VW_CONCAT_COMPOUND "Compound group key construction in VectorWise HashGroup" OFF)
+OPTION(VW_CONCAT_HASH_COMPOUND "VW_CONCAT_COMPOUND: packed-key hash fused into the row kernels" OFF)
+foreach(opt VW_GROUP_CONCAT_SIMD VW_GROUP_CONCAT_WIDE VW_GROUP_CONCAT_HASH VW_GROUP_KEY_PAD)
+  if(${opt})
+    message(FATAL_ERROR "${opt} was replaced by VW_CONCAT_COMPOUND / VW_CONCAT_HASH_COMPOUND (see the comment above this check)")
   endif()
-  if(VW_GROUP_CONCAT_SHUFFLE STREQUAL "all")
-    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_SHUFFLE_ALL=1)
-  elseif(VW_GROUP_CONCAT_SHUFFLE STREQUAL "off")
-    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_SHUFFLE_OFF=1)
-  elseif(NOT VW_GROUP_CONCAT_SHUFFLE STREQUAL "dense")
-    message(FATAL_ERROR "VW_GROUP_CONCAT_SHUFFLE must be dense, all or off")
-  endif()
-  if(VW_GROUP_CONCAT_SEL STREQUAL "gather")
-    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_GATHER=1)
-  elseif(NOT VW_GROUP_CONCAT_SEL STREQUAL "stage")
-    message(FATAL_ERROR "VW_GROUP_CONCAT_SEL must be stage or gather")
-  endif()
-  message(STATUS "Building with VW_GROUP_CONCAT_SIMD (row ${VW_GROUP_CONCAT_ROW}, shuffle ${VW_GROUP_CONCAT_SHUFFLE}, sel ${VW_GROUP_CONCAT_SEL})")
+endforeach()
+if((DEFINED VW_GROUP_CONCAT_ROW AND NOT VW_GROUP_CONCAT_ROW)
+   OR (DEFINED VW_GROUP_CONCAT_SHUFFLE AND NOT VW_GROUP_CONCAT_SHUFFLE STREQUAL "dense")
+   OR (DEFINED VW_GROUP_CONCAT_SEL AND NOT VW_GROUP_CONCAT_SEL STREQUAL "stage")
+   OR (DEFINED VW_GROUP_CONCAT_HASH_MODE AND NOT VW_GROUP_CONCAT_HASH_MODE STREQUAL "fused"))
+  message(FATAL_ERROR "VW_GROUP_CONCAT_ROW/_SHUFFLE/_SEL/_HASH_MODE were removed: VW_CONCAT_COMPOUND fixes them to ON/dense/stage/fused")
 endif()
-# VW_GROUP_CONCAT_HASH (needs VW_GROUP_CONCAT_SIMD and VW_GROUP_CONCAT_ROW):
-# for key shapes with a row kernel, the packed key is hashed (MurmurHash64A,
-# AVX-512 where available) in the same pass that builds it, and HashGroup's
-# hash pass is skipped. Without effect under VW_USE_CRC32 (the fused kernels
-# hash with Murmur). Slower than the row kernel plus the separate AVX-512
-# hash pass on Sapphire Rapids (port 5), faster on Zen 4.
-# VW_GROUP_CONCAT_HASH_MODE: fused (the hash in the row loop) or blocked (the
-# row kernel over 128 rows, then the AVX-512 hash pass over them in L1).
-OPTION(VW_GROUP_CONCAT_HASH "VW_GROUP_CONCAT_ROW: fuse the packed-key hash into the row kernels" OFF)
-set(VW_GROUP_CONCAT_HASH_MODE "fused" CACHE STRING "VW_GROUP_CONCAT_HASH: fused or blocked")
-if(VW_GROUP_CONCAT_HASH)
-  if(NOT VW_GROUP_CONCAT_SIMD OR NOT VW_GROUP_CONCAT_ROW)
-    message(FATAL_ERROR "VW_GROUP_CONCAT_HASH needs VW_GROUP_CONCAT_SIMD and VW_GROUP_CONCAT_ROW")
+if(VW_CONCAT_COMPOUND)
+  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_SIMD=1 -DVW_GROUP_CONCAT_ROW=1
+                  -DVW_GROUP_CONCAT_WIDE=1 -DVW_GROUP_KEY_PAD=1)
+  message(STATUS "Building with VW_CONCAT_COMPOUND")
+endif()
+if(VW_CONCAT_HASH_COMPOUND)
+  if(NOT VW_CONCAT_COMPOUND)
+    message(FATAL_ERROR "VW_CONCAT_HASH_COMPOUND needs VW_CONCAT_COMPOUND")
   endif()
   ADD_DEFINITIONS(-DVW_GROUP_CONCAT_HASH=1)
-  if(VW_GROUP_CONCAT_HASH_MODE STREQUAL "blocked")
-    ADD_DEFINITIONS(-DVW_GROUP_CONCAT_HASH_BLOCKED=1)
-  elseif(NOT VW_GROUP_CONCAT_HASH_MODE STREQUAL "fused")
-    message(FATAL_ERROR "VW_GROUP_CONCAT_HASH_MODE must be fused or blocked")
-  endif()
-  message(STATUS "Building with VW_GROUP_CONCAT_HASH ()")
-endif()
-# VW_GROUP_CONCAT_WIDE: HashGroup copies key columns wider than 8 bytes (and
-# of 3, 5..7 bytes) into the packed key with two fixed-size moves that
-# overlap in the value's middle, chosen once from the width, instead of a
-# memcpy per row whose length is only known at run time (TPC-H Q9 / Q18
-# Char(25), SSB Char(7..15)). Independent of VW_GROUP_CONCAT_SIMD.
-OPTION(VW_GROUP_CONCAT_WIDE "Fixed-size copies of wide key columns in VectorWise HashGroup" OFF)
-if(VW_GROUP_CONCAT_WIDE)
-  ADD_DEFINITIONS(-DVW_GROUP_CONCAT_WIDE=1)
-  message(STATUS "Building with VW_GROUP_CONCAT_WIDE")
-endif()
-# VW_GROUP_KEY_PAD: HashGroup pads a compound key of 3, 5..7 or 9..15 bytes
-# with zero bytes to 4, 8 or 16 (TPC-H Q3: 12 -> 16): such keys take the
-# 4/8-byte integer hash and compare, or a 16-byte path with the length fixed
-# (inlined byte hash and compare), instead of the variable-length one. Entries
-# grow by the padding; hashes of padded keys differ from unpadded ones (they
-# never leave the operator).
-OPTION(VW_GROUP_KEY_PAD "Pad compound group keys to 4/8/16 bytes in VectorWise HashGroup" OFF)
-if(VW_GROUP_KEY_PAD)
-  ADD_DEFINITIONS(-DVW_GROUP_KEY_PAD=1)
-  message(STATUS "Building with VW_GROUP_KEY_PAD")
+  message(STATUS "Building with VW_CONCAT_HASH_COMPOUND")
 endif()
 # dubliner (Cascade Lake) drops from ~2.6 to ~2.3 GHz under the AVX-512 hash
 # (TPC-H Q18 hash_simd, 2026-11-06): the fused concat + hash kernels use the
@@ -422,16 +421,21 @@ if(VW_PROJ_COMPOUND)
   message(STATUS "Building with VW_PROJ_COMPOUND")
 endif()
 
-# VW_SEL_BETWEEN: compound range selection (X100-style). Inside one Select
+# VW_SEL_COMPOUND: compound range selection (X100-style). Inside one Select
 # expression, a lower (>=, >) and an upper (<=, <) bound comparison of the
 # same int32/int64/Date column with constants, the second reading the first's
 # selection, run as one pass (BetweenPrimitives.hpp); pairs are found by
 # ExpressionBuilder at build time and the selection between them is not
-# written. Kernels follow VW_SIMD_SEL and its WIDTH/COMPRESS/GATHER options.
-OPTION(VW_SEL_BETWEEN "Compound range selection in VectorWise expressions" OFF)
+# written. The kernel follows VW_SIMD_SEL: scalar without it, AVX-512 or NEON
+# with it (width and gather as VW_SIMD_SEL chooses). Named VW_SEL_BETWEEN
+# before 2026-11-10.
+OPTION(VW_SEL_COMPOUND "Compound range selection in VectorWise expressions" OFF)
 if(VW_SEL_BETWEEN)
-  ADD_DEFINITIONS(-DVW_SEL_BETWEEN=1)
-  message(STATUS "Building with VW_SEL_BETWEEN")
+  message(FATAL_ERROR "VW_SEL_BETWEEN was renamed VW_SEL_COMPOUND")
+endif()
+if(VW_SEL_COMPOUND)
+  ADD_DEFINITIONS(-DVW_SEL_COMPOUND=1)
+  message(STATUS "Building with VW_SEL_COMPOUND")
 endif()
 
 OPTION(VW_POS_16 "Use uint16_t for VectorWise pos_t" OFF)
@@ -440,44 +444,66 @@ if(VW_POS_16)
   message(STATUS "Building with VW_POS_16")
 endif(VW_POS_16)
 
-# AVX-512 selection kernels (include/vectorwise/SimdSelection.hpp). The
+# SIMD selection kernels (include/vectorwise/SimdSelection.hpp, AVX-512). The
 # existing sel_*/selsel_* primitive names are redirected to the SIMD kernels
-# for supported types; without AVX-512F in ARCH_FLAGS they stay scalar.
-OPTION(VW_SIMD_SEL "AVX-512 selection kernels for int32/int64/Date (sel/selsel, col_val/col_col)" OFF)
+# for supported types; without AVX-512F in ARCH_FLAGS they stay scalar. On
+# aarch64 VW_SIMD_SEL selects only the NEON kernel of VW_SEL_COMPOUND (the
+# other selection primitives have no NEON kernels).
+# VW_SIMD_SEL is the one switch: width and gather are chosen for the target
+# (auto) and can be forced for ablations; the compress form is the register
+# compress (VW_SIMD_SEL_COMPRESS was removed 2026-11-10: the memory form is
+# microcoded on Zen 4 and never won).
+OPTION(VW_SIMD_SEL "SIMD selection kernels for int32/int64/Date (AVX-512; NEON for VW_SEL_COMPOUND)" OFF)
 if(VW_SIMD_SEL)
   ADD_DEFINITIONS(-DVW_SIMD_SEL=1)
   message(STATUS "Building with VW_SIMD_SEL")
 endif(VW_SIMD_SEL)
+if(DEFINED VW_SIMD_SEL_COMPRESS AND NOT VW_SIMD_SEL_COMPRESS STREQUAL "reg")
+  message(FATAL_ERROR "VW_SIMD_SEL_COMPRESS was removed: the kernels always use the register compress")
+endif()
 
 # Gathered-input selection (selsel_*) under VW_SIMD_SEL:
-#   scalar     : keep the scalar _bf templates (default; on GDS-mitigated
-#                Cascade Lake neither SIMD variant beats them)
+#   scalar     : keep the scalar _bf templates (on GDS-mitigated Cascade Lake
+#                neither SIMD variant beats them)
 #   scalarload : scalar loads through inSel -> mask -> compress
 #   hwgather   : vpgatherdd/vpgatherdq -> compare -> compress
-set(VW_SIMD_SEL_GATHER "scalar" CACHE STRING "VW_SIMD_SEL gathered-input kernels: scalar, scalarload, hwgather")
-set_property(CACHE VW_SIMD_SEL_GATHER PROPERTY STRINGS scalar scalarload hwgather)
-if(VW_SIMD_SEL_GATHER STREQUAL "scalarload")
+#   auto       : hwgather on a native x86 AVX-512 build where the kernel
+#                reports no Gather Data Sampling (Downfall) penalty
+#                (manchego: TPC-H Q6 1.29x -> 1.57x, 2026-11-06), else scalar
+set(VW_SIMD_SEL_GATHER "auto" CACHE STRING "VW_SIMD_SEL gathered-input kernels: auto, scalar, scalarload, hwgather")
+set_property(CACHE VW_SIMD_SEL_GATHER PROPERTY STRINGS auto scalar scalarload hwgather)
+set(VW_SIMD_SEL_GATHER_EFFECTIVE "${VW_SIMD_SEL_GATHER}")
+if(VW_SIMD_SEL_GATHER STREQUAL "auto")
+  set(VW_SIMD_SEL_GATHER_EFFECTIVE "scalar")
+  set(gds_file /sys/devices/system/cpu/vulnerabilities/gather_data_sampling)
+  # (before project(): no CMAKE_CROSSCOMPILING yet; a toolchain file means
+  # a cross build, and only x86 lists avx512f in /proc/cpuinfo)
+  if(VW_SIMD_SEL AND NOT CMAKE_TOOLCHAIN_FILE
+     AND EXISTS /proc/cpuinfo AND EXISTS ${gds_file})
+    # file(STRINGS) reads procfs/sysfs line by line (file(READ) sees size 0)
+    file(STRINGS /proc/cpuinfo cpu_avx512f REGEX "^flags.* avx512f( |$)" LIMIT_COUNT 1)
+    file(STRINGS ${gds_file} gds LIMIT_COUNT 1)
+    if(cpu_avx512f AND gds STREQUAL "Not affected")
+      set(VW_SIMD_SEL_GATHER_EFFECTIVE "hwgather")
+    endif()
+  endif()
+endif()
+if(VW_SIMD_SEL_GATHER_EFFECTIVE STREQUAL "scalarload")
   ADD_DEFINITIONS(-DVW_SIMD_SEL_GATHER_SCALARLOAD=1)
-elseif(VW_SIMD_SEL_GATHER STREQUAL "hwgather")
+elseif(VW_SIMD_SEL_GATHER_EFFECTIVE STREQUAL "hwgather")
   ADD_DEFINITIONS(-DVW_SIMD_SEL_GATHER_HWGATHER=1)
-elseif(NOT VW_SIMD_SEL_GATHER STREQUAL "scalar")
-  message(FATAL_ERROR "VW_SIMD_SEL_GATHER must be scalar, scalarload or hwgather (got '${VW_SIMD_SEL_GATHER}')")
+elseif(NOT VW_SIMD_SEL_GATHER_EFFECTIVE STREQUAL "scalar")
+  message(FATAL_ERROR "VW_SIMD_SEL_GATHER must be auto, scalar, scalarload or hwgather (got '${VW_SIMD_SEL_GATHER}')")
 endif()
 # Contiguous selection kernels under VW_SIMD_SEL:
-#   VW_SIMD_SEL_COMPRESS reg : register vpcompressd + masked store (default;
-#                              safe on Zen 4 where the memory form is slow)
-#                        mem : memory-form vpcompressd, like the old kernels
 #   VW_SIMD_SEL_UNROLL   1|2 : vectors of 16 per loop iteration
-#   VW_SIMD_SEL_WIDTH  512|256 : zmm kernels (default) or ymm kernels
-#                              (AVX512VL; avoids the AVX-512 frequency
-#                              license drop; UNROLL is ignored at 256)
-set(VW_SIMD_SEL_COMPRESS "reg" CACHE STRING "VW_SIMD_SEL compress form: reg, mem")
-set_property(CACHE VW_SIMD_SEL_COMPRESS PROPERTY STRINGS reg mem)
-if(VW_SIMD_SEL_COMPRESS STREQUAL "mem")
-  ADD_DEFINITIONS(-DVW_SIMD_SEL_COMPRESS_MEM=1)
-elseif(NOT VW_SIMD_SEL_COMPRESS STREQUAL "reg")
-  message(FATAL_ERROR "VW_SIMD_SEL_COMPRESS must be reg or mem (got '${VW_SIMD_SEL_COMPRESS}')")
-endif()
+#   VW_SIMD_SEL_WIDTH    512 : zmm kernels
+#                        256 : ymm kernels (AVX512VL; UNROLL is ignored)
+#                       auto : with VW_SIMD_SEL, 256 on Skylake-SP / Cascade Lake (dubliner,
+#                              kafir), whose clock drops under 512-bit code
+#                              (dubliner Q1 +8-9% at 512), 512 elsewhere
+#                              (manchego TPC-H Q3/Q6 and SSB Q1.x 2-4%
+#                              faster than 256, 2026-11-10)
 set(VW_SIMD_SEL_UNROLL "1" CACHE STRING "VW_SIMD_SEL contiguous unroll: 1, 2")
 set_property(CACHE VW_SIMD_SEL_UNROLL PROPERTY STRINGS 1 2)
 if(VW_SIMD_SEL_UNROLL STREQUAL "2")
@@ -485,9 +511,17 @@ if(VW_SIMD_SEL_UNROLL STREQUAL "2")
 elseif(NOT VW_SIMD_SEL_UNROLL STREQUAL "1")
   message(FATAL_ERROR "VW_SIMD_SEL_UNROLL must be 1 or 2 (got '${VW_SIMD_SEL_UNROLL}')")
 endif()
-set(VW_SIMD_SEL_WIDTH "512" CACHE STRING "VW_SIMD_SEL contiguous vector width: 512, 256")
-set_property(CACHE VW_SIMD_SEL_WIDTH PROPERTY STRINGS 512 256)
-if(VW_SIMD_SEL_WIDTH STREQUAL "256")
+set(VW_SIMD_SEL_WIDTH "auto" CACHE STRING "VW_SIMD_SEL contiguous vector width: auto, 512, 256")
+set_property(CACHE VW_SIMD_SEL_WIDTH PROPERTY STRINGS auto 512 256)
+set(VW_SIMD_SEL_WIDTH_EFFECTIVE "${VW_SIMD_SEL_WIDTH}")
+if(VW_SIMD_SEL_WIDTH STREQUAL "auto")
+  if(VW_SIMD_SEL AND (TARGET_MACHINE STREQUAL "dubliner" OR TARGET_MACHINE STREQUAL "kafir"))
+    set(VW_SIMD_SEL_WIDTH_EFFECTIVE "256")
+  else()
+    set(VW_SIMD_SEL_WIDTH_EFFECTIVE "512")
+  endif()
+endif()
+if(VW_SIMD_SEL_WIDTH_EFFECTIVE STREQUAL "256")
   ADD_DEFINITIONS(-DVW_SIMD_SEL_WIDTH_256=1)
   # Without this, clang on hosts tuned for 512-bit vectors (e.g. Zen 4
   # -march=native) merges the two 4-lane int64 ymm compares into one zmm
@@ -499,11 +533,11 @@ if(VW_SIMD_SEL_WIDTH STREQUAL "256")
     ${CMAKE_SOURCE_DIR}/src/test/vectorwise/between.cpp
     ${CMAKE_SOURCE_DIR}/src/test/vectorwise/simd_selection.cpp
     PROPERTIES COMPILE_OPTIONS "-mprefer-vector-width=256")
-elseif(NOT VW_SIMD_SEL_WIDTH STREQUAL "512")
-  message(FATAL_ERROR "VW_SIMD_SEL_WIDTH must be 512 or 256 (got '${VW_SIMD_SEL_WIDTH}')")
+elseif(NOT VW_SIMD_SEL_WIDTH_EFFECTIVE STREQUAL "512")
+  message(FATAL_ERROR "VW_SIMD_SEL_WIDTH must be auto, 512 or 256 (got '${VW_SIMD_SEL_WIDTH}')")
 endif()
 if(VW_SIMD_SEL)
-  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER} COMPRESS=${VW_SIMD_SEL_COMPRESS} UNROLL=${VW_SIMD_SEL_UNROLL} WIDTH=${VW_SIMD_SEL_WIDTH}")
+  message(STATUS "VW_SIMD_SEL_GATHER=${VW_SIMD_SEL_GATHER_EFFECTIVE} UNROLL=${VW_SIMD_SEL_UNROLL} WIDTH=${VW_SIMD_SEL_WIDTH_EFFECTIVE}")
 endif()
 
 # Software prefetch in the hash join probe loops (joinAllParallel /
@@ -688,7 +722,7 @@ endif()
 # else NEON. Bit-identical to the scalar hash. Only applies to the default
 # MurMurHash (not with VW_USE_CRC32 or HASH_SIZE_32).
 # VW_SIMD_HASH_WIDTH=256 makes an AVX-512 target use the AVX2 tier, here and
-# in the packed-key hash of VW_GROUP_CONCAT_HASH (no effect elsewhere);
+# in the packed-key hash of VW_CONCAT_HASH_COMPOUND (no effect elsewhere);
 # dubliner always uses it. HashGroup hashes its packed group keys with the
 # selected tier with or without VW_GROUP_DISPATCH.
 OPTION(VW_SIMD_HASH "SIMD MurmurHash64A kernels (AVX-512 / AVX2 / NEON) for VectorWise hashing" OFF)

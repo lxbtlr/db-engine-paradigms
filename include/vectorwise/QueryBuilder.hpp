@@ -203,8 +203,8 @@ class QueryBuilder {
       bool fuse(const HeldProjection& first, const HeldProjection& second);
       void flushHeld();
 #endif
-#ifdef VW_SEL_BETWEEN
-      /// VW_SEL_BETWEEN: a column-constant comparison is held back until
+#ifdef VW_SEL_COMPOUND
+      /// VW_SEL_COMPOUND: a column-constant comparison is held back until
       /// the next op shows whether it closes a range with it
       struct HeldSelection {
          primitives::between::Desc desc;
