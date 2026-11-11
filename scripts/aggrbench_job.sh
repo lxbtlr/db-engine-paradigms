@@ -12,6 +12,10 @@
 #   GROUP_LIST  -g list                                 [its defaults]
 #   REPS      vectors per trial, -r                     [2000]
 #   CPU       core the benchmark is pinned to           [0]
+#   AUTOVEC   ON | OFF: -DAUTOVECTORIZE                  [OFF]
+#   DIRECT_ISA  auto | avx512 | avx2 | scalar: the direct kernels' ISA
+#             (-DVW_AGGR_DIRECT=ON -DVW_AGGR_DIRECT_ISA=); empty keeps the
+#             build without VW_AGGR_DIRECT, whose header picks auto  [empty]
 #
 # Output: results/aggrbench_<host>_<stamp>/ with machine.txt, aggrbench.csv,
 # build.log.
@@ -24,12 +28,19 @@ DISTS=${DISTS:-q1,runs}
 SELS=${SELS:-98,100}
 REPS=${REPS:-2000}
 CPU=${CPU:-0}
+AUTOVEC=${AUTOVEC:-OFF}
+case "$AUTOVEC" in ON|OFF) ;; *) echo "AUTOVEC must be ON or OFF" >&2; exit 2 ;; esac
+DIRECT_ISA=${DIRECT_ISA:-}
+case "$DIRECT_ISA" in ""|auto|avx512|avx2|scalar) ;;
+  *) echo "DIRECT_ISA must be auto, avx512, avx2 or scalar" >&2; exit 2 ;; esac
+ISA_FLAGS=()
+[ -n "$DIRECT_ISA" ] && ISA_FLAGS=(-DVW_AGGR_DIRECT=ON -DVW_AGGR_DIRECT_ISA="$DIRECT_ISA")
 case "$BENCH_HOST" in
   dubliner|roquefort|manchego|burrata|kafir|rpi5) MACHINE=$BENCH_HOST ;;
   *) MACHINE=custom ;;
 esac
 OUT="$ROOT/results/aggrbench_${BENCH_HOST}_$(date +%Y%m%d_%H%M%S)"
-B="$ROOT/build_flags/$BENCH_HOST/aggrbench_$COMPILER"
+B="$ROOT/build_flags/$BENCH_HOST/aggrbench_${COMPILER}_av${AUTOVEC}${DIRECT_ISA:+_$DIRECT_ISA}"
 mkdir -p "$OUT"
 
 {
@@ -39,10 +50,12 @@ mkdir -p "$OUT"
   lscpu | grep -E 'Model name|MHz' || true
   echo "isa flags: $(grep -o -w -E 'avx2|avx512f|asimd' /proc/cpuinfo | sort -u | tr '\n' ' ')"
   echo "DISTS: $DISTS  SELS: $SELS  GROUP_LIST: ${GROUP_LIST:-defaults}  REPS: $REPS"
+  echo "AUTOVEC: $AUTOVEC  DIRECT_ISA: ${DIRECT_ISA:-unset}"
 } | tee "$OUT/machine.txt"
 
 cmake -S "$ROOT" -B "$B" -DCMAKE_BUILD_TYPE=Release -DCOMPILER="$COMPILER" \
-  -DTARGET_MACHINE="$MACHINE" -DTARGET_ARCH= > "$OUT/build.log" 2>&1 &&
+  -DTARGET_MACHINE="$MACHINE" -DTARGET_ARCH= -DAUTOVECTORIZE="$AUTOVEC" \
+  ${ISA_FLAGS[@]+"${ISA_FLAGS[@]}"} > "$OUT/build.log" 2>&1 &&
   cmake --build "$B" -j "$(nproc)" --target run_aggrbench >> "$OUT/build.log" 2>&1 ||
   { echo "build failed (see build.log)" >&2; tail -40 "$OUT/build.log" >&2; exit 1; }
 grep -m1 -E 'CXX_FLAGS|ARCH' "$B/CMakeCache.txt" >> "$OUT/machine.txt" || true
