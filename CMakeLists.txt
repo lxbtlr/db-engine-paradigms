@@ -887,6 +887,15 @@ if(VW_NOVECTORIZE_ATTR)
   message(STATUS "Building with VW_NOVECTORIZE_ATTR")
 endif()
 
+# VW_INLINE_EXTRACT_YEAR: define extractYear in Types.hpp instead of Types.cpp,
+# so the VW apply_extract_year primitives (Q9) can vectorize and the Hyper Q9
+# loop loses its per-tuple call. Affects both engines.
+OPTION(VW_INLINE_EXTRACT_YEAR "Header-inline extractYear (VW and Hyper Q9)" OFF)
+if(VW_INLINE_EXTRACT_YEAR)
+  ADD_DEFINITIONS(-DVW_INLINE_EXTRACT_YEAR=1)
+  message(STATUS "Building with VW_INLINE_EXTRACT_YEAR")
+endif()
+
 # PGO: profile-guided optimization
 # Usage: build with -DPGO=generate, run workload, rebuild with -DPGO=use
 set(PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, generate, or use")

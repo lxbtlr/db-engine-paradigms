@@ -722,8 +722,33 @@ class Date {
    static Date castString(std::string s);
 };
 //---------------------------------------------------------------------------
+/// Split a julian day into year, month and day
+inline void splitJulianDay(unsigned jd, unsigned& year, unsigned& month,
+                           unsigned& day)
+// Algorithm from the Calendar FAQ
+{
+   unsigned a = jd + 32044;
+   unsigned b = (4 * a + 3) / 146097;
+   unsigned c = a - ((146097 * b) / 4);
+   unsigned d = (4 * c + 3) / 1461;
+   unsigned e = c - ((1461 * d) / 4);
+   unsigned m = (5 * e + 2) / 153;
+
+   day = e - ((153 * m + 2) / 5) + 1;
+   month = m + 3 - (12 * (m / 10));
+   year = (100 * b) + d - 4800 + (m / 10);
+}
+//---------------------------------------------------------------------------
 /// Extract year
+#ifdef VW_INLINE_EXTRACT_YEAR
+inline Integer extractYear(const Date& d) {
+   unsigned year, month, day;
+   splitJulianDay(d.value, year, month, day);
+   return Integer(year);
+}
+#else
 Integer extractYear(const Date& d);
+#endif
 //---------------------------------------------------------------------------
 std::ostream& operator<<(std::ostream& out, const Date& value);
 //---------------------------------------------------------------------------

@@ -618,6 +618,9 @@ config_flags() {
     # the full fair pool: compound key construction and compound range
     # selection together
     fair_best)           echo "$(config_flags fair_concat) -DVW_SEL_BETWEEN=ON" ;;
+    # fair_best with extractYear inlined into the header (VW apply_extract_year
+    # and Hyper Q9); run in one job with fair_best
+    fair_best_ey)        echo "$(config_flags fair_best) -DVW_INLINE_EXTRACT_YEAR=ON" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)
