@@ -124,10 +124,12 @@
 #   HASH_BASE  default   flag config the hash configs build on (e.g. tuned,
 #                        drop_pos16); its crc32 setting is overridden
 #   SEL        by CPU: "-DVW_SIMD_SEL=ON" with AVX-512F (AVX-512 selection
-#              kernels) or on aarch64 (the NEON VW_SEL_COMPOUND kernel), else
-#              (Zen 3, ...) "-DVW_SIMD_SEL=OFF". CMake picks the width (256 on
-#              dubliner / kafir, 512 elsewhere) and the gather (hwgather where
-#              the CPU has no GDS penalty, i.e. manchego). Before 2026-11-10:
+#              kernels), with AVX2 (Zen 3, ...: the AVX2 kernels) or on aarch64
+#              (the NEON VW_SEL_COMPOUND kernel), else "-DVW_SIMD_SEL=OFF".
+#              CMake picks the width (256 on dubliner / kafir, 512 elsewhere)
+#              and the gather (hwgather where the CPU has no GDS penalty, i.e.
+#              manchego; scalarload for the AVX2 kernels). Before 2026-11-12
+#              VW_SIMD_SEL was off on AVX2-only machines. Before 2026-11-10:
 #              256-bit on every AVX-512 machine, scalar gather on manchego
 #              until 1ec7af6, VW_SIMD_SEL off on aarch64.
 #   MACHINE    $(hostname -s) if it is a preset (dubliner, roquefort, manchego, burrata, kafir, rpi5), else custom
@@ -214,7 +216,7 @@ HASH_BASE=${HASH_BASE:-default}
 # claims SIMD selection while silently running the scalar fallback; CMake
 # chooses width and gather for the target
 if [ -z "${SEL:-}" ]; then
-  if grep -q -w avx512f /proc/cpuinfo || grep -q -w asimd /proc/cpuinfo; then SEL="-DVW_SIMD_SEL=ON"
+  if grep -q -w -E 'avx512f|avx2|asimd' /proc/cpuinfo; then SEL="-DVW_SIMD_SEL=ON"
   else SEL="-DVW_SIMD_SEL=OFF"; fi
 fi
 # MACHINE defaults to this host's short name when it is a TARGET_MACHINE
@@ -483,7 +485,7 @@ tlimit() { if [ "$TIMEOUT" -gt 0 ]; then timeout --kill-after=30 "$TIMEOUT" "$@"
 # kernel options, so nothing leaks in from an earlier configure.
 flags() {
   echo "-DVW_POS_16=$1 -DVW_USE_CRC32=$2 -DHUGE_2MB_MALLOC_HUGE=$3" \
-       "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_WIDTH=auto -DVW_SIMD_SEL_UNROLL=1 -DVW_SEL_COMPOUND=OFF" \
+       "-DVW_SIMD_SEL=OFF -DVW_SIMD_SEL_WIDTH=auto -DVW_SIMD_SEL_ISA=auto -DVW_SIMD_SEL_UNROLL=1 -DVW_SEL_COMPOUND=OFF" \
        "-DVW_SIMD_SEL_GATHER=auto -DVW_SIMD_SEL_CHAR=OFF -DVW_SIMD_HASH=OFF -DVW_SIMD_HASH_WIDTH=512 -DVW_JOIN_PREFETCH=OFF" \
        "-DVW_CRC32_FAST=OFF -DVW_CRC32_VPCLMUL=OFF -DVW_JOIN_TWOPHASE=OFF -DVW_JOIN_TWOPHASE_CACHE=L1 -DVW_JOIN_SIMD=OFF" \
        "-DVW_NEW_JOIN=OFF -DVW_NEW_JOIN_FULL=tag -DVW_SIMD_HASH_GATHER=insert" \
@@ -605,6 +607,10 @@ config_flags() {
     # the full fair pool: compound key construction and compound range
     # selection together
     fair_best)           echo "$(config_flags fair_concat) -DVW_SEL_COMPOUND=ON" ;;
+    # fair_best without SIMD selection; with the AVX2 kernels forced (also on
+    # AVX-512 machines, scalarload gather) for cross-machine comparisons
+    fair_best_nosel)     echo "$(config_flags fair_best) -DVW_SIMD_SEL=OFF" ;;
+    fair_best_avx2)      echo "$(config_flags fair_best) -DVW_SIMD_SEL=ON -DVW_SIMD_SEL_ISA=avx2 -DVW_SIMD_SEL_GATHER=scalarload" ;;
     # jd_all_pc variants for one job with their base (dubliner's run-to-run
     # drift rules out pairs across jobs): autovectorized, scalar selection,
     # 512-bit selection (AVX-512 machines only)
