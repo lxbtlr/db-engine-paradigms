@@ -604,9 +604,10 @@ config_flags() {
     simd_between)        echo "$(config_flags cmake_defaults) $SEL -DVW_SEL_COMPOUND=ON" ;;
     fair_between)        echo "$(config_flags fair_compound) -DVW_SEL_COMPOUND=ON" ;;
     sel_between)         echo "$(config_flags fair_sel) -DVW_SEL_COMPOUND=ON" ;;
-    # the full fair pool: compound key construction and compound range
-    # selection together
-    fair_best)           echo "$(config_flags fair_concat) -DVW_SEL_COMPOUND=ON" ;;
+    # the full fair pool: compound key construction, the fused key hash and
+    # compound range selection together (VW_CONCAT_HASH_COMPOUND since
+    # 2026-11-15; fair_best results before that are without it)
+    fair_best)           echo "$(config_flags fair_concat) -DVW_CONCAT_HASH_COMPOUND=ON -DVW_SEL_COMPOUND=ON" ;;
     # fair_best without SIMD selection; with the AVX2 kernels forced (also on
     # AVX-512 machines, scalarload gather) for cross-machine comparisons
     fair_best_nosel)     echo "$(config_flags fair_best) -DVW_SIMD_SEL=OFF" ;;
