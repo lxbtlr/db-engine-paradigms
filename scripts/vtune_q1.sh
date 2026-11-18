@@ -207,7 +207,10 @@ build() {
   local B=$BUILDS_DIR/$name D=$OUT/builds/$name
   mkdir -p "$D"
   if [ "$SKIP_BUILD" != 1 ]; then
-    if ! cmake -S "$src" -B "$B" "${cmake_common[@]}" "$@" > "$D/cmake.log" 2>&1; then
+    # configure twice: CMakeLists.txt rebuilds CMAKE_CXX_FLAGS_RELEASE from
+    # itself, so a build dir's first configure has no -DNDEBUG (asserts on)
+    if ! { cmake -S "$src" -B "$B" "${cmake_common[@]}" "$@" && cmake -S "$src" -B "$B" "${cmake_common[@]}" "$@"; } \
+         > "$D/cmake.log" 2>&1; then
       fail "$name cmake (see $D/cmake.log)"; excerpt "$D/cmake.log"; return 1
     fi
     if ! cmake --build "$B" -j "$JOBS" --target run_tpch > "$D/build.log" 2>&1; then
