@@ -137,7 +137,7 @@ class QueryBuilder {
 
    struct LUTGroupBuilder {
       QueryBuilder& base;
-      LUTGroup* group;
+      vectorwise::LUTGroup* group;
 
       LUTGroupBuilder(QueryBuilder& base);
 
