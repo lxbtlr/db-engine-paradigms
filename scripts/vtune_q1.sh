@@ -214,7 +214,10 @@ build() {
       fail "$name cmake (see $D/cmake.log)"; excerpt "$D/cmake.log"; return 1
     fi
     if ! cmake --build "$B" -j "$JOBS" --target run_tpch > "$D/build.log" 2>&1; then
-      fail "$name build (see $D/build.log)"; excerpt "$D/build.log"; return 1
+      fail "$name build (see $D/build.log)"
+      # the first errors, then the tail: build.log may not outlive the checkout
+      grep -m 8 -E 'error:|fatal error|No such file' "$D/build.log" | sed 's/^/    | /' | tee -a "$OUT/driver.log"
+      excerpt "$D/build.log"; return 1
     fi
     # kept beside the binary, so SKIP_BUILD=1 runs still know them
     { echo "cmake ${cmake_common[*]} $*"; echo "commit: $(git -C "$src" rev-parse HEAD)"; } > "$B/buildcmds.txt"
@@ -225,7 +228,7 @@ build() {
   cp "$B/buildcmds.txt" "$B/topology.txt" "$B/arch.txt" "$D/" 2> /dev/null
   # the effective defines, as flag_ablation.sh records them
   cat "$B/build.ninja" "$B/CMakeFiles/vectorwise.dir/flags.make" 2> /dev/null |
-    grep -o -E -- '-D(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE|THREAD_PIN_PACKED|PROF_ITT)(=[^ ]*)?' | sort -u | tr '\n' ' ' > "$D/defines.txt"
+    grep -o -E -- '-D(VW_[A-Z0-9_]+|HUGE_2MB_MALLOC_HUGE|THREAD_PIN_PACKED|PROF_ITT|NDEBUG)(=[^ ]*)?' | sort -u | tr '\n' ' ' > "$D/defines.txt"
   # grep -c, not -q: -q exits early, nm gets SIGPIPE and pipefail fails the check
   [ "$(nm "$B/run_tpch" 2> /dev/null | grep -c __itt_resume)" -gt 0 ] || { fail "$name: run_tpch has no ITT symbols"; return 1; }
   log "$name built: $(cat "$D/defines.txt")"
@@ -272,8 +275,10 @@ if [ -n "$BASE_REF" ]; then
       { fail "worktree for $BASE_REF (see $OUT/worktree.log)"; WT=; }
   fi
   if [ -n "$WT" ] && [ -d "$WT" ]; then
-    # the header-only submodule (as q1_ab.sh)
-    if [ ! -e "$WT/3rdparty/simde/simde" ] && [ -d "$ROOT/3rdparty/simde/simde" ]; then
+    # the header-only submodule (as q1_ab.sh), always from this checkout: the
+    # worktree is shared across checkouts, and a link into an earlier one
+    # breaks mid-build when that checkout is removed (bridge runs)
+    if [ -d "$ROOT/3rdparty/simde/simde" ]; then
       rm -rf "$WT/3rdparty/simde" && ln -s "$ROOT/3rdparty/simde" "$WT/3rdparty/simde"
     fi
     if apply_scope "$WT"; then
