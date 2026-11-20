@@ -3,6 +3,7 @@
 #include "common/runtime/MemoryPool.hpp"
 #include "common/runtime/Mmap.hpp"
 #include "common/runtime/Util.hpp"
+#include <algorithm>
 #include <array>
 #include <deque>
 #include <exception>
@@ -158,6 +159,14 @@ class BlockRelation {
    Block createBlock(size_t minNrElements);
    Attribute addAttribute(std::string name, size_t elementSize);
    inline Attribute getAttribute(std::string name);
+   /// (name, element size) of every attribute, sorted by name
+   std::vector<std::pair<std::string, size_t>> attributeSizes() const {
+      std::vector<std::pair<std::string, size_t>> r;
+      for (auto& kv : attributeNames)
+         r.emplace_back(kv.first, attributes[kv.second].elementSize);
+      std::sort(r.begin(), r.end());
+      return r;
+   }
 
  private:
    std::mutex insertMutex;

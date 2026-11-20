@@ -92,6 +92,92 @@ static void dumpQ1Result(const char* label, runtime::Query* query) {
    fprintf(stderr, "=== END ===\n\n");
 }
 
+/// Order-independent result digest (env digest=1): per row a hash over its
+/// columns in name order; row hashes and per-column value hashes are summed,
+/// so block and row order (thread count, dispatch) do not change it.
+static uint64_t mix64(uint64_t x) {
+   x ^= x >> 30;
+   x *= 0xbf58476d1ce4e5b9ull;
+   x ^= x >> 27;
+   x *= 0x94d049bb133111ebull;
+   return x ^ (x >> 31);
+}
+static uint64_t hashBytes(const char* p, size_t n) {
+   uint64_t h = 0xcbf29ce484222325ull;
+   for (size_t i = 0; i < n; ++i) h = (h ^ uint8_t(p[i])) * 0x100000001b3ull;
+   return h;
+}
+/// "q1 h  t8  " -> "q1h_t8"
+static std::string compactLabel(const std::string& label) {
+   std::string s;
+   for (char c : label)
+      if (c != ' ') s += c;
+   auto t = s.find('t', 1);
+   if (t != std::string::npos) s.insert(t, "_");
+   return s;
+}
+struct DigestColumn {
+   std::string name;
+   size_t size;
+   uint64_t sum = 0;
+};
+static void printDigest(const std::string& label, size_t rows, uint64_t sum,
+                        const std::vector<DigestColumn>& cols) {
+   fprintf(stderr, "[RESULT] q=%s rows=%zu row=%016llx cols=",
+           compactLabel(label).c_str(), rows, (unsigned long long)sum);
+   for (size_t c = 0; c < cols.size(); ++c)
+      fprintf(stderr, "%s%s:%zu:%016llx", c ? "," : "", cols[c].name.c_str(),
+              cols[c].size, (unsigned long long)cols[c].sum);
+   fprintf(stderr, "\n");
+}
+static void printDigest(const std::string& label,
+                        std::unique_ptr<runtime::Query>& q) {
+   auto& rel = *q->result;
+   std::vector<DigestColumn> cols;
+   std::vector<BlockRelation::Attribute> ids;
+   for (auto& a : rel.attributeSizes()) {
+      cols.push_back({a.first, a.second});
+      ids.push_back(rel.getAttribute(a.first));
+   }
+   size_t rows = 0;
+   uint64_t sum = 0;
+   std::vector<const char*> base(cols.size());
+   for (auto& block : rel) {
+      for (size_t c = 0; c < cols.size(); ++c)
+         base[c] = static_cast<const char*>(block.data(ids[c]));
+      for (size_t i = 0, n = block.size(); i < n; ++i, ++rows) {
+         uint64_t h = 0;
+         for (size_t c = 0; c < cols.size(); ++c) {
+            auto v = hashBytes(base[c] + i * cols[c].size, cols[c].size);
+            cols[c].sum += mix64(v);
+            h = mix64(h ^ v);
+         }
+         sum += h;
+      }
+   }
+   printDigest(label, rows, sum, cols);
+}
+static void printDigest(const std::string& label, runtime::Relation& rel) {
+   std::vector<std::pair<std::string, runtime::Attribute*>> attrs;
+   for (auto& kv : rel.attributes) attrs.emplace_back(kv.first, &kv.second);
+   std::sort(attrs.begin(), attrs.end(),
+             [](auto& a, auto& b) { return a.first < b.first; });
+   std::vector<DigestColumn> cols;
+   for (auto& a : attrs) cols.push_back({a.first, a.second->type->rt_size()});
+   uint64_t sum = 0;
+   for (size_t i = 0; i < rel.nrTuples; ++i) {
+      uint64_t h = 0;
+      for (size_t c = 0; c < cols.size(); ++c) {
+         auto p = static_cast<const char*>(attrs[c].second->data());
+         auto v = hashBytes(p + i * cols[c].size, cols[c].size);
+         cols[c].sum += mix64(v);
+         h = mix64(h ^ v);
+      }
+      sum += h;
+   }
+   printDigest(label, rel.nrTuples, sum, cols);
+}
+
 size_t nrTuples(Database& db, std::vector<std::string> tables) {
    size_t sum = 0;
    for (auto& table : tables) sum += db[table].nrTuples;
@@ -339,6 +425,8 @@ int main(int argc, char* argv[]) {
     if (auto v = std::getenv("SIMDsel")) conf.useSimdSel = atoi(v);
     if (auto v = std::getenv("SIMDproj")) conf.useSimdProj = atoi(v);
     if (auto v = std::getenv("clearCaches")) clearCaches = atoi(v);
+    bool digest = false;
+    if (auto v = std::getenv("digest")) digest = atoi(v);
 
     // Helper to build query label with thread count suffix
     auto label = [](const char* base, size_t t) {
@@ -414,6 +502,20 @@ int main(int argc, char* argv[]) {
              escape(&result);
           },
           repetitions);
+
+   if (digest) {
+      // one untimed run per query, result digest to stderr
+      auto dv = [&](const char* name, auto fn) {
+         auto r = fn(tpch, nrThreads, vectorSize);
+         printDigest(label(name, nrThreads), r);
+      };
+      if (q.count("1v")) dv("q1 v ", q1_vectorwise);
+      if (q.count("3v")) dv("q3 v ", q3_vectorwise);
+      if (q.count("5v")) dv("q5 v ", q5_vectorwise);
+      if (q.count("6v")) dv("q6 v ", q6_vectorwise);
+      if (q.count("9v")) dv("q9 v ", q9_vectorwise);
+      if (q.count("18v")) dv("q18 v", q18_vectorwise);
+   }
 
     // --- Hyper queries after VW (TBB threads can't interfere) ---
     {
@@ -511,6 +613,21 @@ int main(int argc, char* argv[]) {
              });
           },
           repetitions);
+   if (digest) {
+      auto dh = [&](const char* name, auto fn) {
+         arena.execute([&] {
+            auto r = fn(tpch, nrThreads);
+            printDigest(label(name, nrThreads), r);
+         });
+      };
+      if (q.count("1h")) dh("q1 h ", q1_hyper);
+      if (q.count("3h")) dh("q3 h ", q3_hyper);
+      if (q.count("5h")) dh("q5 h ", q5_hyper);
+      if (q.count("6h")) dh("q6 h ", q6_hyper);
+      if (q.count("6b")) dh("q6 b ", q6_hyper_branching);
+      if (q.count("9h")) dh("q9 h ", q9_hyper);
+      if (q.count("18h")) dh("q18 h", q18_hyper);
+   }
     } // TBB arena + global_control destroyed here
 
    } // end thread count loop

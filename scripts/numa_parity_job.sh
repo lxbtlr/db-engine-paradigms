@@ -23,6 +23,9 @@
 #   DEBUG     ON | OFF                                      [OFF]
 #   HUGE      ON | OFF, HUGE_2MB_MALLOC_HUGE                [ON]
 #   TIMEOUT   seconds per run_tpch invocation               [3600]
+#   DIGEST    ON: one extra untimed run per query and thread
+#             count, printing an order-independent result
+#             digest (run_tpch env digest=1)                [OFF]
 #
 # Output: results/numa_parity_<host>_<stamp>/
 #   machine.txt               host, topology, numa_balancing, git
@@ -30,6 +33,8 @@
 #   <config>_e<engine>.log    run_tpch stdout+stderr
 #   timing.csv                config,engine,query,threads,rep,ms
 #   nt.txt                    NUMA_DEBUG trace lines ([NT] ...), prefixed
+#                             with config and engine
+#   results.txt               result digests ([RESULT] ...), prefixed
 #                             with config and engine
 set -u -o pipefail
 
@@ -46,6 +51,7 @@ SETTLE=${SETTLE:-10}
 DEBUG=${DEBUG:-OFF}
 HUGE=${HUGE:-ON}
 TIMEOUT=${TIMEOUT:-3600}
+DIGEST=${DIGEST:-OFF}
 TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf$SF}
 case "$BENCH_HOST" in
   dubliner|roquefort|manchego|burrata|kafir|rpi5) MACHINE=$BENCH_HOST ;;
@@ -72,7 +78,7 @@ mkdir -p "$OUT"
   echo "date: $(date -Is)"
   echo "git:  $(git -C "$ROOT" rev-parse --short HEAD)"
   echo "CONFIGS: $CONFIGS  ENGINES: $ENGINES  QUERIES: $QUERIES  THREADS: $THREADS"
-  echo "SF: $SF  REPS: $REPS  SETTLE: $SETTLE  DEBUG: $DEBUG  HUGE: $HUGE"
+  echo "SF: $SF  REPS: $REPS  SETTLE: $SETTLE  DEBUG: $DEBUG  HUGE: $HUGE  DIGEST: $DIGEST"
   echo "numa_balancing: $(cat /proc/sys/kernel/numa_balancing 2>/dev/null)"
   lscpu | grep -E 'Model name|^CPU\(s\)|Socket|NUMA node' || true
   grep -E 'HugePages_(Total|Free)' /proc/meminfo || true
@@ -80,6 +86,8 @@ mkdir -p "$OUT"
 
 echo "config,engine,query,threads,rep,ms" > "$OUT/timing.csv"
 : > "$OUT/nt.txt"
+: > "$OUT/results.txt"
+[ "$DIGEST" = ON ] && export digest=1
 status=0
 for c in $CONFIGS; do
   B="$ROOT/build_flags/$BENCH_HOST/numa_${COMPILER}_${c}_dbg${DEBUG}_huge${HUGE}"
@@ -112,7 +120,8 @@ for c in $CONFIGS; do
         for (i = 1; i <= m; i++) printf "%s,%s,%s,%s,%d,%s\n", c, e, q, t, i, ms[i]
       }' "$log" >> "$OUT/timing.csv"
     grep '^\[NT\]' "$log" | sed "s/^/$c e=$e /" >> "$OUT/nt.txt"
+    grep '^\[RESULT\]' "$log" | sed "s/^/$c e=$e /" >> "$OUT/results.txt"
   done
 done
-echo "$(($(wc -l < "$OUT/timing.csv") - 1)) timings, $(wc -l < "$OUT/nt.txt") trace lines in $OUT"
+echo "$(($(wc -l < "$OUT/timing.csv") - 1)) timings, $(wc -l < "$OUT/nt.txt") trace lines, $(wc -l < "$OUT/results.txt") digests in $OUT"
 exit $status
