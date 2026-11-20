@@ -1,5 +1,6 @@
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/Stack.hpp"
+#include "hyper/NumaTrace.hpp"
 #include "tbb/tbb.h"
 
 template <typename K, typename V, typename HASH, typename UPDATE>
@@ -111,7 +112,9 @@ class GroupBy {
    }
    /// Spill all
    void spillAll() {
+      NT_SCOPE("GroupBy::spillAll");
       tbb::parallel_for(entries.range(), [&](const auto& e) {
+         NT_TASK();
 
          bool exists;
          auto& deque = partitionedDeques.local(exists);
@@ -138,7 +141,9 @@ class GroupBy {
       // aggregate from spill partitions
       auto nrPartitions = partitionedDeques.begin()->getPartitions().size();
 
+      NT_SCOPE("GroupBy::forallGroups");
       tbb::parallel_for(0ul, nrPartitions, [&](auto partitionNr) {
+         NT_TASK();
          bool exists = false;
          auto& ht = groups.local(exists);
          size_t maxFill;

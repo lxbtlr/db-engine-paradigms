@@ -23,6 +23,7 @@
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD)
 #include "common/runtime/NumaAlloc.hpp"
 #endif
+#include "hyper/NumaTrace.hpp"
 
 #ifndef HYPER_FLOAT
 /// Pins each TBB worker thread to a CPU using the same policy as
@@ -425,6 +426,7 @@ int main(int argc, char* argv[]) {
    if (q.count("1h")) {
       e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q1 h ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
                              auto result = q1_hyper(tpch, nrThreads);
@@ -440,6 +442,7 @@ int main(int argc, char* argv[]) {
       e.timeAndProfile(label("q3 h ", nrThreads),
                        nrTuples(tpch, {"customer", "orders", "lineitem"}),
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q3 h ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
                              auto result = q3_hyper(tpch, nrThreads);
@@ -452,6 +455,7 @@ int main(int argc, char* argv[]) {
                        nrTuples(tpch, {"supplier", "region", "nation",
                                        "customer", "orders", "lineitem"}),
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q5 h ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
                              auto result = q5_hyper(tpch, nrThreads);
@@ -462,6 +466,7 @@ int main(int argc, char* argv[]) {
    if (q.count("6h"))
       e.timeAndProfile(label("q6 h ", nrThreads), tpch["lineitem"].nrTuples,
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q6 h ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
                              auto result = q6_hyper(tpch, nrThreads);
@@ -472,6 +477,7 @@ int main(int argc, char* argv[]) {
    if (q.count("6b"))
       e.timeAndProfile(label("q6 b ", nrThreads), tpch["lineitem"].nrTuples,
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q6 b ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
                              auto result = q6_hyper_branching(tpch, nrThreads);
@@ -484,6 +490,7 @@ int main(int argc, char* argv[]) {
                        nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
                                        "lineitem", "orders"}),
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q9 h ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           arena.execute([&] {
                              auto result = q9_hyper(tpch, nrThreads);
@@ -496,6 +503,7 @@ int main(int argc, char* argv[]) {
           label("q18 h", nrThreads),
           nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
           [&]() {
+             NUMA_TRACE_QUERY(label("q18 h", nrThreads));
              if (clearCaches) clearOsCaches();
              arena.execute([&] {
                 auto result = q18_hyper(tpch, nrThreads);

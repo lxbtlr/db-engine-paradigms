@@ -1,6 +1,7 @@
 #include "common/runtime/Query.hpp"
 #include <deque>
 #include <tbb/tbb.h>
+#include "hyper/NumaTrace.hpp"
 #ifdef NUMA_SHARD
 #include "common/runtime/Concurrency.hpp"
 #include "common/runtime/Database.hpp"
@@ -25,7 +26,9 @@ inline ProcessingResources initQuery(size_t nrThreads) {
    runtime::Barrier b(nrThreads);
    r.workers.resize(nrThreads);
 
+   NT_SCOPE("initQuery");
    tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](auto i) {
+      NT_TASK();
       auto& worker = r.workers[i];
       // save thread local worker pointer
       worker.previousWorker = runtime::this_worker;
@@ -39,7 +42,9 @@ inline ProcessingResources initQuery(size_t nrThreads) {
 
 inline void leaveQuery(size_t nrThreads) {
    runtime::Barrier b(nrThreads);
+   NT_SCOPE("leaveQuery");
    tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](auto) {
+      NT_TASK();
       // reset thread local worker pointer
       runtime::this_worker = runtime::this_worker->previousWorker;
       b.wait();
@@ -47,8 +52,10 @@ inline void leaveQuery(size_t nrThreads) {
 }
 
 #define PARALLEL_SCAN(N, ENTRIES, BLOCK)                                       \
+   NT_SCOPE_TMP("PARALLEL_SCAN"),                                              \
    tbb::parallel_for(tbb::blocked_range<size_t>(0, N, morselSize),             \
                      [&](const tbb::blocked_range<size_t>& r) {                \
+                        NT_TASK();                                             \
                         auto& entries = ENTRIES.local();                       \
                         for (auto i = r.begin(), end = r.end(); i != end; ++i) \
                            BLOCK                                               \
@@ -56,8 +63,10 @@ inline void leaveQuery(size_t nrThreads) {
 
 template <typename E, typename L>
 void parallel_scan(size_t n, E& entriesGlobal, L& cb) {
+   NT_SCOPE("parallel_scan");
    tbb::parallel_for(tbb::blocked_range<size_t>(0, n, morselSize),
                      [&](const tbb::blocked_range<size_t>& r) {
+                        NT_TASK();
                         auto& entries = entriesGlobal.local();
                         for (auto i = r.begin(), end = r.end(); i != end; ++i)
                            cb(i, entries);
@@ -65,18 +74,22 @@ void parallel_scan(size_t n, E& entriesGlobal, L& cb) {
 }
 
 #define PARALLEL_SELECT(N, ENTRIES, BLOCK)                                     \
+   (NT_SCOPE_TMP("PARALLEL_SELECT"),                                           \
    tbb::parallel_reduce(                                                       \
        tbb::blocked_range<size_t>(0, N, morselSize), 0,                        \
        [&](const tbb::blocked_range<size_t>& r, const size_t& f) {             \
+          NT_TASK();                                                           \
           auto& entries = ENTRIES.local();                                     \
           auto found = f;                                                      \
           for (size_t i = r.begin(), end = r.end(); i != end; ++i) BLOCK       \
           return found;                                                        \
        },                                                                      \
-       [](const size_t& a, const size_t& b) { return a + b; })
+       [](const size_t& a, const size_t& b) { return a + b; }))
 
 template <typename E, typename HT> void parallel_insert(E& entries, HT& ht) {
+   NT_SCOPE("parallel_insert");
    tbb::parallel_for(entries.range(), [&ht](const auto& r) {
+      NT_TASK();
       for (auto& entries : r) ht.insertAll(entries);
    });
 }
@@ -118,6 +131,9 @@ void numa_parallel_scan(size_t nrThreads, const runtime::Relation& rel,
       shardTuples[r] = rel.numaShards[r].tupleEnd - rel.numaShards[r].tupleBegin;
 
    std::array<PaddedAtomicPos, N> nodePos;
+#ifdef NUMA_DEBUG
+   numa_trace::Scope ntScope("numa_parallel_scan", true);
+#endif
 
    tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](size_t /*tid*/) {
       // Use the actual TBB slot (which PinningObserver pinned to a specific
@@ -125,6 +141,10 @@ void numa_parallel_scan(size_t nrThreads, const runtime::Relation& rel,
       size_t slot = static_cast<size_t>(
           tbb::this_task_arena::current_thread_index());
       size_t home = runtime::regionOf(slot);
+#ifdef NUMA_DEBUG
+      auto ntTask = numa_trace::task(ntScope.p);
+      std::array<size_t, N> ntTaken{};
+#endif
 
       size_t rank;
 #ifdef THREAD_PIN_PACKED
@@ -151,8 +171,14 @@ void numa_parallel_scan(size_t nrThreads, const runtime::Relation& rel,
             if (begin >= nodeTup) break;
             size_t end = std::min(begin + morselSz, nodeTup);
             body(begin, end, node);
+#ifdef NUMA_DEBUG
+            ntTaken[node]++;
+#endif
          }
       }
+#ifdef NUMA_DEBUG
+      numa_trace::morsels(ntScope.p, home, ntTask.region, ntTaken);
+#endif
    });
 }
 
@@ -171,6 +197,9 @@ T numa_parallel_reduce(size_t nrThreads, const runtime::Relation& rel,
       shardTuples[r] = rel.numaShards[r].tupleEnd - rel.numaShards[r].tupleBegin;
 
    std::array<PaddedAtomicPos, N> nodePos;
+#ifdef NUMA_DEBUG
+   numa_trace::Scope ntScope("numa_parallel_reduce", true);
+#endif
 
    // One task per thread; each resolves its NUMA identity from the actual
    // TBB slot (pinned by PinningObserver), not from the iteration variable.
@@ -180,6 +209,10 @@ T numa_parallel_reduce(size_t nrThreads, const runtime::Relation& rel,
       size_t slot = static_cast<size_t>(
           tbb::this_task_arena::current_thread_index());
       size_t home = runtime::regionOf(slot);
+#ifdef NUMA_DEBUG
+      auto ntTask = numa_trace::task(ntScope.p);
+      std::array<size_t, N> ntTaken{};
+#endif
 
       size_t rank;
 #ifdef THREAD_PIN_PACKED
@@ -208,8 +241,14 @@ T numa_parallel_reduce(size_t nrThreads, const runtime::Relation& rel,
             if (begin >= nodeTup) break;
             size_t end = std::min(begin + morselSz, nodeTup);
             body(begin, end, node, acc);
+#ifdef NUMA_DEBUG
+            ntTaken[node]++;
+#endif
          }
       }
+#ifdef NUMA_DEBUG
+      numa_trace::morsels(ntScope.p, home, ntTask.region, ntTaken);
+#endif
    });
 
    T result = identity;
