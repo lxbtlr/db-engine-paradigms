@@ -41,22 +41,17 @@ public:
       if (slot < 0) return;
       size_t target = runtime::cpuOfThread(static_cast<size_t>(slot));
 #ifdef NUMA_SHARD
-      // Keep a thread that is already pinned to one CPU of the target's
-      // region (the numa_* helpers take the home region from the CPU).
-      // If a thread kept its CPU after a slot change, the thread taking its
-      // old slot would share that CPU; the NUMA_DEBUG trace counts such
-      // pipelines (cpu_shared).
+      // Skip the re-pin when the thread is already pinned to exactly the
+      // target CPU. Keeping any CPU of the target's region instead would let
+      // a thread keep its CPU after a slot change while the thread taking its
+      // old slot is pinned there too: on a 1-region host this put the main
+      // thread (still on Tectorwise's cpuOfThread(n-1)) and slot n-1 on one
+      // CPU, and Q1's scan took 3x longer (trace: cpu_shared).
       cpu_set_t current;
       if (pthread_getaffinity_np(pthread_self(), sizeof(current), &current) ==
               0 &&
-          CPU_COUNT(&current) == 1) {
-         for (size_t c = 0; c < CPU_SETSIZE; ++c)
-            if (CPU_ISSET(c, &current)) {
-               if (runtime::regionOfCpu(c) == runtime::regionOfCpu(target))
-                  return;
-               break;
-            }
-      }
+          CPU_COUNT(&current) == 1 && CPU_ISSET(target, &current))
+         return;
 #endif
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
