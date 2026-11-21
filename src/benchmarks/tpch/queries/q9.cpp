@@ -65,12 +65,17 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
    auto& supp = db["supplier"];
 
    // --- build ht for nation
+#ifdef NUMA_SHARD
+   auto n_nationkey = numaShardPtrs<types::Integer>(na, "n_nationkey");
+   auto n_name = numaShardPtrs<types::Char<25>>(na, "n_name");
+#else
+   auto n_nationkey = na["n_nationkey"].data<types::Integer>();
+   auto n_name = na["n_name"].data<types::Char<25>>();
+#endif
    Hashmapx<types::Integer, types::Char<25>, hash> ht1;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
        entries1;
 #ifdef NUMA_SHARD
-   auto n_nationkey = numaShardPtrs<types::Integer>(na, "n_nationkey");
-   auto n_name = numaShardPtrs<types::Char<25>>(na, "n_name");
    numa_parallel_scan(nrThreads, na, morselSize,
        [&](size_t begin, size_t end, size_t node) {
           auto& entries = entries1.local();
@@ -80,8 +85,6 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
           }
        });
 #else
-   auto n_nationkey = na["n_nationkey"].data<types::Integer>();
-   auto n_name = na["n_name"].data<types::Char<25>>();
    PARALLEL_SCAN(na.nrTuples, entries1, {
       auto& key = n_nationkey[i];
       entries.emplace_back(ht1.hash(key), key, n_name[i]);

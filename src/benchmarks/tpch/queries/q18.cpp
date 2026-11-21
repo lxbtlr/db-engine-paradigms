@@ -125,13 +125,18 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
 
    // build customer hashtable
    auto& cu = db["customer"];
+#ifdef NUMA_SHARD
+   auto c_custkey = numaShardPtrs<types::Integer>(cu, "c_custkey");
+   auto c_name = numaShardPtrs<types::Char<25>>(cu, "c_name");
+#else
+   auto c_custkey = cu["c_custkey"].data<types::Integer>();
+   auto c_name = cu["c_name"].data<types::Char<25>>();
+#endif
    Hashmapx<types::Integer, types::Char<25>, hash> ht2;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht2)::Entry>>
        entries2;
 
 #ifdef NUMA_SHARD
-   auto c_custkey = numaShardPtrs<types::Integer>(cu, "c_custkey");
-   auto c_name = numaShardPtrs<types::Char<25>>(cu, "c_name");
    numa_parallel_scan(nrThreads, cu, morselSize,
        [&](size_t begin, size_t end, size_t node) {
           auto& entries = entries2.local();
@@ -140,8 +145,6 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
                                   c_custkey[node][i], c_name[node][i]);
        });
 #else
-   auto c_custkey = cu["c_custkey"].data<types::Integer>();
-   auto c_name = cu["c_name"].data<types::Char<25>>();
    PARALLEL_SCAN(cu.nrTuples, entries2, {
       entries.emplace_back(ht2.hash(c_custkey[i]), c_custkey[i], c_name[i]);
    });
