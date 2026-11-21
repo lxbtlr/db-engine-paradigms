@@ -108,8 +108,30 @@ void Scan::addConsumer(void** colPtr, size_t typeSize,
    consumers.push_back(c);
 }
 
+#ifdef NUMA_DEBUG
+Scan::~Scan() {
+   // one record per worker's scan: arrival, CPU region, morsels per shard
+   if (!ntArriveNs) return; // never pulled
+   numa_trace::VwScan v;
+   v.shared = &shared;
+   v.arriveNs = ntArriveNs;
+   v.cpu = ntCpu;
+   v.tid = ntTid;
+   v.home = homeNode;
+   v.taken = ntTaken;
+   numa_trace::vwScan(v);
+}
+#endif
+
 size_t Scan::next() {
    constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+#ifdef NUMA_DEBUG
+   if (!ntArriveNs) {
+      ntArriveNs = numa_trace::nowNs();
+      ntCpu = sched_getcpu();
+      ntTid = syscall(SYS_gettid);
+   }
+#endif
    size_t morselTuples = scanChunkSize * vecSize;
 
    // Try to continue within current chunk (intra-chunk relative advance)
@@ -146,6 +168,9 @@ size_t Scan::next() {
 
          currentChunk = chunk;
          vecInChunk = 1;
+#ifdef NUMA_DEBUG
+         ntTaken[node]++;
+#endif
 
          size_t nextBatchSize =
              std::min(nodeTuples - localOffset, vecSize);

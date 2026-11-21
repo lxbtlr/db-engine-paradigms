@@ -59,12 +59,25 @@ struct Pipeline {
    uint64_t gateWaitNs = 0; // time tasks spun at the steal gate
 };
 
+/// One Tectorwise worker's vectorwise::Scan (NUMA_DEBUG + NUMA_SHARD):
+/// arrival = its first next() call; a scan's arrivals are reported relative
+/// to its earliest one (Typer: relative to the launch).
+struct VwScan {
+   const void* shared;
+   uint64_t arriveNs;
+   int cpu;
+   long tid;
+   size_t home;
+   std::array<size_t, N> taken;
+};
+
 struct State {
    std::mutex m;
    bool active = false;
    std::string query;
    std::vector<std::unique_ptr<Pipeline>> pipes;
    Pipeline* cur = nullptr;
+   std::vector<VwScan> vw;
 };
 inline State& state() {
    static State s;
@@ -81,6 +94,7 @@ inline void beginQuery(const std::string& label) {
       if (c != ' ') s.query += c;
    auto t = s.query.find('t', 1);
    if (t != std::string::npos) s.query.insert(t, "_");
+   s.vw.clear();
    s.pipes.clear();
    s.cur = nullptr;
 }
@@ -91,6 +105,12 @@ struct Query {
    explicit Query(const std::string& label) { beginQuery(label); }
    ~Query() { endQuery(); }
 };
+
+inline void vwScan(const VwScan& v) {
+   auto& s = state();
+   std::lock_guard<std::mutex> l(s.m);
+   if (s.active) s.vw.push_back(v);
+}
 
 /// Opens a pipeline for its lifetime (nested scopes restore the outer one).
 struct Scope {
@@ -247,6 +267,54 @@ inline void endQuery() {
                  join(p.local).c_str(), join(p.remote).c_str(),
                  (unsigned long long)(p.gateWaitNs / 1000));
       fprintf(stderr, "\n");
+   }
+   // Tectorwise scans: one pipeline per Shared state, in order of creation
+   {
+      std::map<const void*, std::vector<const VwScan*>> byShared;
+      for (auto& v : s.vw) byShared[v.shared].push_back(&v);
+      std::vector<std::vector<const VwScan*>> groups;
+      for (auto& kv : byShared) groups.push_back(kv.second);
+      std::sort(groups.begin(), groups.end(), [](auto& a, auto& b) {
+         return a.front()->arriveNs < b.front()->arriveNs;
+      });
+      size_t pi = s.pipes.size();
+      for (auto& g : groups) {
+         std::array<int64_t, N> firstUs, lastUs;
+         firstUs.fill(-1);
+         lastUs.fill(-1);
+         std::array<size_t, N> regionTasks{}, home{}, stolen{}, local{},
+             remote{};
+         std::set<long> tids;
+         std::map<int, std::set<long>> tidsOnCpu;
+         uint64_t t0 = g.front()->arriveNs;
+         for (auto* v : g) t0 = std::min(t0, v->arriveNs);
+         for (auto* v : g) {
+            size_t r = runtime::regionOfCpu(static_cast<size_t>(v->cpu));
+            int64_t us = static_cast<int64_t>((v->arriveNs - t0) / 1000);
+            if (firstUs[r] < 0 || us < firstUs[r]) firstUs[r] = us;
+            lastUs[r] = std::max(lastUs[r], us);
+            regionTasks[r]++;
+            tids.insert(v->tid);
+            tidsOnCpu[v->cpu].insert(v->tid);
+            for (size_t n = 0; n < N; ++n) {
+               (n == v->home ? home : stolen)[n] += v->taken[n];
+               (n == r ? local : remote)[n] += v->taken[n];
+            }
+         }
+         bool cpuShared = false;
+         for (auto& kv : tidsOnCpu) cpuShared |= kv.second.size() > 1;
+         fprintf(stderr,
+                 "[NT] pipe q=%s i=%zu name=vw_scan numa=1 us=0 tasks=%zu"
+                 " tids=%zu region_tasks=%s first_us=%s last_us=%s"
+                 " region_change=0 slot_change=0 cpu_shared=%d iters_max=1"
+                 " tids_multi=0 home=%s stolen=%s local=%s remote=%s"
+                 " gate_wait_us=0\n",
+                 q, pi++, g.size(), tids.size(), join(regionTasks).c_str(),
+                 join(firstUs).c_str(), join(lastUs).c_str(), cpuShared ? 1 : 0,
+                 join(home).c_str(), join(stolen).c_str(), join(local).c_str(),
+                 join(remote).c_str());
+      }
+      s.vw.clear();
    }
    fprintf(stderr,
            "[NT] query q=%s pipes=%zu tasks=%zu tids=%zu transitions=%zu"

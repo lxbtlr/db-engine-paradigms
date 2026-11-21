@@ -495,6 +495,7 @@ int main(int argc, char* argv[]) {
    if (q.count("1v")) {
       e.timeAndProfile(label("q1 v ", nrThreads), nrTuples(tpch, {"lineitem"}),
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q1 v ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           auto result =
                               q1_vectorwise(tpch, nrThreads, vectorSize);
@@ -508,6 +509,7 @@ int main(int argc, char* argv[]) {
       e.timeAndProfile(
           label("q3 v ", nrThreads), nrTuples(tpch, {"customer", "orders", "lineitem"}),
           [&]() {
+             NUMA_TRACE_QUERY(label("q3 v ", nrThreads));
              if (clearCaches) clearOsCaches();
              auto result = q3_vectorwise(tpch, nrThreads, vectorSize);
              escape(&result);
@@ -518,6 +520,7 @@ int main(int argc, char* argv[]) {
                        nrTuples(tpch, {"supplier", "region", "nation",
                                        "customer", "orders", "lineitem"}),
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q5 v ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           auto result =
                               q5_vectorwise(tpch, nrThreads, vectorSize);
@@ -527,6 +530,7 @@ int main(int argc, char* argv[]) {
    if (q.count("6v"))
       e.timeAndProfile(label("q6 v ", nrThreads), tpch["lineitem"].nrTuples,
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q6 v ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           auto result =
                               q6_vectorwise(tpch, nrThreads, vectorSize);
@@ -538,6 +542,7 @@ int main(int argc, char* argv[]) {
                        nrTuples(tpch, {"nation", "supplier", "part", "partsupp",
                                        "lineitem", "orders"}),
                        [&]() {
+                          NUMA_TRACE_QUERY(label("q9 v ", nrThreads));
                           if (clearCaches) clearOsCaches();
                           auto result =
                               q9_vectorwise(tpch, nrThreads, vectorSize);
@@ -549,6 +554,7 @@ int main(int argc, char* argv[]) {
           label("q18 v", nrThreads),
           nrTuples(tpch, {"customer", "lineitem", "orders", "lineitem"}),
           [&]() {
+             NUMA_TRACE_QUERY(label("q18 v", nrThreads));
              if (clearCaches) clearOsCaches();
              auto result = q18_vectorwise(tpch, nrThreads, vectorSize);
              escape(&result);

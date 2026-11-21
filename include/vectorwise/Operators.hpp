@@ -8,6 +8,9 @@
 #include "common/runtime/PartitionedDeque.hpp"
 #include "common/runtime/Query.hpp"
 #include "vectorwise/Primitives.hpp"
+#if defined(NUMA_DEBUG) && defined(NUMA_SHARD)
+#include "hyper/NumaTrace.hpp"
+#endif
 #include <atomic>
 #include <cstdint>
 #include <deque>
@@ -214,6 +217,12 @@ class Scan : public Operator {
    size_t homeNode;
    std::array<size_t, runtime::NUM_NUMA_REGIONS> stealOrder;
    size_t currentStealIdx;  // index into stealOrder for current node
+#ifdef NUMA_DEBUG
+   uint64_t ntArriveNs = 0; // first next() call
+   int ntCpu = -1;
+   long ntTid = 0;
+   std::array<size_t, runtime::NUM_NUMA_REGIONS> ntTaken{};
+#endif
 #elif defined(SCAN_STATIC_PARTITION)
    struct PartConsumer {
       void** location;   // pointer-to-pointer updated each batch
@@ -230,6 +239,9 @@ class Scan : public Operator {
 
  public:
    Scan(Shared& sm, size_t nrTuples, size_t vecSize);
+#if defined(NUMA_DEBUG) && defined(NUMA_SHARD)
+   ~Scan() override;
+#endif
 #ifdef NUMA_SHARD
    void addConsumer(void** colPtr, size_t typeSize,
                     std::array<void*, runtime::NUM_NUMA_REGIONS> shardBases);
