@@ -14,7 +14,8 @@
 # Environment (defaults in brackets):
 #   COMPILER  gcc | clang                                   [gcc]
 #   CONFIGS   see above                                     [shard_spread]
-#   ENGINES   h, v or h,v (one run_tpch invocation each)    [h]
+#   ENGINES   h, v, h,v (one invocation each) or hv (both  [h]
+#             engines in one invocation, as run_tpch runs)
 #   QUERIES   run_tpch -q                                   [1,3,9,18]
 #   THREADS   run_tpch -t, comma list, one run per count    [1]
 #   SF        data /tank/alexb/swole/tpch/sf<SF>            [10]
@@ -26,9 +27,11 @@
 #   DIGEST    ON: one extra untimed run per query and thread
 #             count, printing an order-independent result
 #             digest (run_tpch env digest=1)                [OFF]
+#   BEFORE    commit sha: also build and run every config from
+#             that commit's source, configs suffixed _before []
 #
 # Output: results/numa_parity_<host>_<stamp>/
-#   machine.txt               host, topology, numa_balancing, git
+#   machine.txt               host, topology, memory, numa_balancing, git
 #   <config>/build.log
 #   <config>_e<engine>_t<threads>.log  run_tpch stdout+stderr
 #   timing.csv                config,engine,query,threads,rep,ms
@@ -52,6 +55,7 @@ DEBUG=${DEBUG:-OFF}
 HUGE=${HUGE:-ON}
 TIMEOUT=${TIMEOUT:-3600}
 DIGEST=${DIGEST:-OFF}
+BEFORE=${BEFORE:-}
 TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf$SF}
 case "$BENCH_HOST" in
   dubliner|roquefort|manchego|burrata|kafir|rpi5) MACHINE=$BENCH_HOST ;;
@@ -80,6 +84,8 @@ mkdir -p "$OUT"
   echo "CONFIGS: $CONFIGS  ENGINES: $ENGINES  QUERIES: $QUERIES  THREADS: $THREADS"
   echo "SF: $SF  REPS: $REPS  SETTLE: $SETTLE  DEBUG: $DEBUG  HUGE: $HUGE  DIGEST: $DIGEST"
   echo "numa_balancing: $(cat /proc/sys/kernel/numa_balancing 2>/dev/null)"
+  echo "BEFORE: ${BEFORE:-none}"
+  free -g | head -2 || true
   lscpu | grep -E 'Model name|^CPU\(s\)|Socket|NUMA node' || true
   grep -E 'HugePages_(Total|Free)' /proc/meminfo || true
 } | tee "$OUT/machine.txt"
@@ -88,45 +94,76 @@ echo "config,engine,query,threads,rep,ms" > "$OUT/timing.csv"
 : > "$OUT/nt.txt"
 : > "$OUT/results.txt"
 [ "$DIGEST" = ON ] && export digest=1
+
+# Sources: the checked-out commit, and with BEFORE=<sha> that commit's source
+# too (git archive, simde copied from this checkout), built and run with the
+# same harness; its configs get the suffix _before.
+SOURCES="after"
+if [ -n "$BEFORE" ]; then
+  SRC_BEFORE="$ROOT/build_flags/$BENCH_HOST/src_$BEFORE"
+  if [ ! -f "$SRC_BEFORE/CMakeLists.txt" ]; then
+    rm -rf "$SRC_BEFORE" && mkdir -p "$SRC_BEFORE" &&
+      git -C "$ROOT" archive "$BEFORE" | tar -x -C "$SRC_BEFORE" &&
+      cp -a "$ROOT/3rdparty/simde/." "$SRC_BEFORE/3rdparty/simde/" ||
+      { echo "cannot export $BEFORE" >&2; exit 1; }
+  fi
+  SOURCES="after before"
+fi
+
 status=0
+for src in $SOURCES; do
 for c in $CONFIGS; do
-  B="$ROOT/build_flags/$BENCH_HOST/numa_${COMPILER}_${c}_dbg${DEBUG}_huge${HUGE}"
-  mkdir -p "$OUT/$c"
+  if [ "$src" = before ]; then
+    S="$SRC_BEFORE"; name="${c}_before"; tag="_ref$BEFORE"
+  else
+    S="$ROOT"; name="$c"; tag=""
+  fi
+  B="$ROOT/build_flags/$BENCH_HOST/numa_${COMPILER}_${c}_dbg${DEBUG}_huge${HUGE}$tag"
+  mkdir -p "$OUT/$name"
+  # Configured twice: CMakeLists.txt rebuilds CMAKE_CXX_FLAGS_RELEASE from
+  # itself, so the first configure of a build dir drops -DNDEBUG.
   # shellcheck disable=SC2046
-  if ! { cmake -S "$ROOT" -B "$B" -DCMAKE_BUILD_TYPE=Release \
+  if ! { cmake -S "$S" -B "$B" -DCMAKE_BUILD_TYPE=Release \
            -DCOMPILER="$COMPILER" -DTARGET_MACHINE="$MACHINE" \
            -DNUMA_DEBUG="$DEBUG" -DHUGE_2MB_MALLOC_HUGE="$HUGE" \
-           $(config_flags "$c") > "$OUT/$c/build.log" 2>&1 &&
+           $(config_flags "$c") > "$OUT/$name/build.log" 2>&1 &&
+         cmake "$B" >> "$OUT/$name/build.log" 2>&1 &&
          cmake --build "$B" -j "$(nproc)" --target run_tpch \
-           >> "$OUT/$c/build.log" 2>&1; }; then
-    echo "build $c failed (see $c/build.log)" >&2
-    tail -30 "$OUT/$c/build.log" >&2
+           >> "$OUT/$name/build.log" 2>&1; }; then
+    echo "build $name failed (see $name/build.log)" >&2
+    tail -30 "$OUT/$name/build.log" >&2
     status=1
     continue
   fi
+  grep -qs -- -DNDEBUG "$B/CMakeFiles/tpch.dir/flags.make" "$B/build.ninja" &&
+    echo "$name: NDEBUG" >> "$OUT/machine.txt" ||
+    echo "$name: asserts ON (no -DNDEBUG)" | tee -a "$OUT/machine.txt" >&2
   for e in ${ENGINES//,/ }; do
+  # hv: both engines in one invocation (no -e; Tectorwise runs first)
+  eflag=(-e "$e"); [ "$e" = hv ] && eflag=()
   # one invocation per thread count: run_tpch shards over the regions the
   # largest -t count occupies, so a list would leave smaller packed counts
   # with shards on regions that have no threads
   for t in ${THREADS//,/ }; do
-    log="$OUT/${c}_e${e}_t$t.log"
-    echo "== $c -e $e -t $t"
-    timeout "$TIMEOUT" "$B/run_tpch" -p "$TPCH_PATH/" -e "$e" -q "$QUERIES" \
-      -t "$t" -r "$REPS" -s "$SETTLE" > "$log" 2>&1
+    log="$OUT/${name}_e${e}_t$t.log"
+    echo "== $name -e $e -t $t"
+    timeout "$TIMEOUT" "$B/run_tpch" -p "$TPCH_PATH/" "${eflag[@]}" \
+      -q "$QUERIES" -t "$t" -r "$REPS" -s "$SETTLE" > "$log" 2>&1
     rc=$?
-    [ $rc -eq 0 ] || { echo "run_tpch $c -e $e -t $t exited $rc" >&2; status=1; }
+    [ $rc -eq 0 ] || { echo "run_tpch $name -e $e -t $t exited $rc" >&2; status=1; }
     grep -m1 'malloc_huge: MAP_HUGETLB failed' "$log" >&2 || true
-    # "per-rep q18 h t88 : 12.3 45.6 ..."
-    awk -v c="$c" -v e="$e" '/^per-rep /{
+    # "per-rep q18 h t88 : 12.3 45.6 ..." (engine from the label)
+    awk -v c="$name" '/^per-rep /{
         split($0, a, ":"); h = a[1]; sub(/^per-rep /, "", h)
-        n = split(h, f, " "); q = f[1]; t = f[n]; sub(/^t/, "", t)
+        n = split(h, f, " "); q = f[1]; e = f[2]; t = f[n]; sub(/^t/, "", t)
         m = split(a[2], ms, " ")
         for (i = 1; i <= m; i++) printf "%s,%s,%s,%s,%d,%s\n", c, e, q, t, i, ms[i]
       }' "$log" >> "$OUT/timing.csv"
-    grep '^\[NT\]' "$log" | sed "s/^/$c e=$e /" >> "$OUT/nt.txt"
-    grep '^\[RESULT\]' "$log" | sed "s/^/$c e=$e /" >> "$OUT/results.txt"
+    grep '^\[NT\]' "$log" | sed "s/^/$name e=$e /" >> "$OUT/nt.txt"
+    grep '^\[RESULT\]' "$log" | sed "s/^/$name e=$e /" >> "$OUT/results.txt"
   done
   done
+done
 done
 echo "$(($(wc -l < "$OUT/timing.csv") - 1)) timings, $(wc -l < "$OUT/nt.txt") trace lines, $(wc -l < "$OUT/results.txt") digests in $OUT"
 exit $status
