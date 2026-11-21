@@ -75,8 +75,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
    auto r_regionkey = re["r_regionkey"].data<types::Integer>();
 #endif
    Hashset<types::Integer, hash> ht1;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
-       entries1;
+   EntryStacks<decltype(ht1)::Entry> entries1;
 #ifdef NUMA_SHARD
    auto found1 = numa_parallel_reduce(
        nrThreads, re, morselSize, size_t(0),
@@ -113,8 +112,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
    auto n_name = na["n_name"].data<types::Char<25>>();
 #endif
    Hashmapx<types::Integer, types::Char<25>, hash> ht2;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht2)::Entry>>
-       entries2;
+   EntryStacks<decltype(ht2)::Entry> entries2;
 #ifdef NUMA_SHARD
    auto found2 = numa_parallel_reduce(
        nrThreads, na, morselSize, size_t(0),
@@ -151,8 +149,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
 #endif
    Hashmapx<types::Integer, std::tuple<types::Integer, types::Char<25>>, hash>
        ht3;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht3)::Entry>>
-       entries3;
+   EntryStacks<decltype(ht3)::Entry> entries3;
 
 #ifdef NUMA_SHARD
    auto found3 = numa_parallel_reduce(
@@ -194,8 +191,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
 #endif
    Hashmapx<types::Integer, std::tuple<types::Integer, types::Char<25>>, hash>
        ht4;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht4)::Entry>>
-       entries4;
+   EntryStacks<decltype(ht4)::Entry> entries4;
 
 #ifdef NUMA_SHARD
    auto found4 = numa_parallel_reduce(
@@ -234,8 +230,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
    auto s_nationkey = su["s_nationkey"].data<types::Integer>();
 #endif
    Hashset<std::tuple<types::Integer, types::Integer>, hash> ht5;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht5)::Entry>>
-       entries5;
+   EntryStacks<decltype(ht5)::Entry> entries5;
 
 #ifdef NUMA_SHARD
    numa_parallel_scan(nrThreads, su, morselSize,

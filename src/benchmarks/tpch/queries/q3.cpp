@@ -85,8 +85,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
 
    // build ht for first join
    Hashset<types::Integer, hash> ht1;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
-       entries1;
+   EntryStacks<decltype(ht1)::Entry> entries1;
 #ifdef NUMA_SHARD
    auto found1 = numa_parallel_reduce(
        nrThreads, cu, morselSize, size_t(0),
@@ -121,8 +120,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q3_hyper(Database& db,
 
    // join and build second ht
    Hashmapx<types::Integer, std::tuple<types::Date, types::Integer>, hash> ht2;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht2)::Entry>>
-       entries2;
+   EntryStacks<decltype(ht2)::Entry> entries2;
 #ifdef NUMA_SHARD
    auto found2 = numa_parallel_reduce(
        nrThreads, ord, morselSize, size_t(0),

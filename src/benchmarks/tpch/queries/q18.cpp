@@ -102,8 +102,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
 #endif
 
    Hashset<types::Integer, hash> ht1;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
-       entries1;
+   EntryStacks<decltype(ht1)::Entry> entries1;
    const auto threeHundret = types::Numeric<12, 2>::castString("300");
    std::atomic<size_t> nrGroups;
    nrGroups = 0;
@@ -133,8 +132,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
    auto c_name = cu["c_name"].data<types::Char<25>>();
 #endif
    Hashmapx<types::Integer, types::Char<25>, hash> ht2;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht2)::Entry>>
-       entries2;
+   EntryStacks<decltype(ht2)::Entry> entries2;
 
 #ifdef NUMA_SHARD
    numa_parallel_scan(nrThreads, cu, morselSize,
@@ -157,8 +155,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q18_hyper(Database& db,
                                        types::Numeric<12, 2>, types::Char<25>>,
             hash>
        ht3;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht3)::Entry>>
-       entries3;
+   EntryStacks<decltype(ht3)::Entry> entries3;
 
    auto& ord = db["orders"];
 #ifdef NUMA_SHARD

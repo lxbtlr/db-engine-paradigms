@@ -1,6 +1,7 @@
 #include "common/runtime/Hashmap.hpp"
 #include "common/runtime/Stack.hpp"
 #include "hyper/NumaTrace.hpp"
+#include "hyper/ParallelHelper.hpp"
 #include "tbb/tbb.h"
 
 template <typename K, typename V, typename HASH, typename UPDATE>
@@ -14,7 +15,8 @@ class GroupBy {
 
  private:
    /// Memory for materialized entries in hashmap
-   tbb::enumerable_thread_specific<runtime::Stack<group_t>> entries;
+   /// (under NUMA_SHARD tagged with the owner's region, see spillAll)
+   EntryStacks<group_t> entries;
    /// Memory for spilling hastable entries
    tbb::enumerable_thread_specific<runtime::PartitionedDeque<1024>>
        partitionedDeques;
@@ -112,6 +114,17 @@ class GroupBy {
    }
    /// Spill all
    void spillAll() {
+#ifdef NUMA_SHARD
+      // each stack is spilled by a thread of its owner's region when one is
+      // free (Tectorwise spills by owner), into that thread's deque
+      numa_for_each_stack("GroupBy::spillAll", entries, [&](auto& stack) {
+         bool exists;
+         auto& deque = partitionedDeques.local(exists);
+         if (!exists) deque.postConstruct(nrThreads * 4, sizeof(group_t));
+         for (auto block : stack)
+            for (auto& entry : block) deque.push_back(&entry, entry.h.hash);
+      });
+#else
       NT_SCOPE("GroupBy::spillAll");
       tbb::parallel_for(entries.range(), [&](const auto& e) {
          NT_TASK();
@@ -123,6 +136,7 @@ class GroupBy {
             for (auto block : entries)
                for (auto& entry : block) deque.push_back(&entry, entry.h.hash);
       });
+#endif
    }
 
    /// Grow hashtable
@@ -134,6 +148,12 @@ class GroupBy {
    }
 
    /// Iterate over all groups of tuples consumed by Locals::consume
+   /// Merge phase: partitions go to threads dynamically (parallel_for), and
+   /// each merges partition p of every thread's deque, so it reads spills of
+   /// all regions. Tectorwise's HashGroup does the same (shared.partition
+   /// fetch_add, all threads' spill partitions), as does the HyPer 2014
+   /// morsel-driven aggregation; a fixed partition -> region assignment would
+   /// make Typer differ from Tectorwise here, so it is left dynamic.
    template <typename C> inline void forallGroups(C consume) {
 
       spillAll();

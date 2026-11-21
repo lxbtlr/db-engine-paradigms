@@ -73,8 +73,7 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
    auto n_name = na["n_name"].data<types::Char<25>>();
 #endif
    Hashmapx<types::Integer, types::Char<25>, hash> ht1;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
-       entries1;
+   EntryStacks<decltype(ht1)::Entry> entries1;
 #ifdef NUMA_SHARD
    numa_parallel_scan(nrThreads, na, morselSize,
        [&](size_t begin, size_t end, size_t node) {
@@ -96,8 +95,7 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
 
    // --- ht for bushy join
    Hashmapx<types::Integer, types::Char<25>, hash> ht2;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht2)::Entry>>
-     entries2;
+   EntryStacks<decltype(ht2)::Entry> entries2;
    // do join nation-supplier and put result into bushy ht
 #ifdef NUMA_SHARD
    auto s_suppkey = numaShardPtrs<types::Integer>(supp, "s_suppkey");
@@ -135,8 +133,7 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
 
    // --- ht for join part-partsupp
    Hashset<types::Integer, hash> ht3;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht3)::Entry>>
-     entries3;
+   EntryStacks<decltype(ht3)::Entry> entries3;
    auto& part = db["part"];
    // do selection on part and put selected elements into ht
 #ifdef NUMA_SHARD
@@ -175,8 +172,7 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
    Hashmapx<tuple<types::Integer, types::Integer>,
             tuple<types::Char<25>, types::Numeric<12, 2>>, hash>
        ht4;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht4)::Entry>>
-       entries4;
+   EntryStacks<decltype(ht4)::Entry> entries4;
    auto& partsupp = db["partsupp"];
 #ifdef NUMA_SHARD
    auto ps_partkey = numaShardPtrs<types::Integer>(partsupp, "ps_partkey");
@@ -224,8 +220,7 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
              types::Numeric<12, 2>, types::Numeric<12, 2>, types::Char<25>>,
        hash>
        ht5;
-   tbb::enumerable_thread_specific<runtime::Stack<decltype(ht5)::Entry>>
-       entries5;
+   EntryStacks<decltype(ht5)::Entry> entries5;
    auto& li = db["lineitem"];
 #ifdef NUMA_SHARD
    auto l_orderkey = numaShardPtrs<types::Integer>(li, "l_orderkey");

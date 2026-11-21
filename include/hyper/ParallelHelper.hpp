@@ -1,4 +1,6 @@
+#pragma once
 #include "common/runtime/Query.hpp"
+#include "common/runtime/Stack.hpp"
 #include <deque>
 #include <tbb/tbb.h>
 #include "hyper/NumaTrace.hpp"
@@ -7,6 +9,8 @@
 #include "common/runtime/Database.hpp"
 #include <array>
 #include <atomic>
+#include <sched.h>
+#include <vector>
 #endif
 
 #ifndef CFG_MORSEL_SIZE
@@ -86,7 +90,30 @@ void parallel_scan(size_t n, E& entriesGlobal, L& cb) {
        },                                                                      \
        [](const size_t& a, const size_t& b) { return a + b; }))
 
+#ifdef NUMA_SHARD
+/// ETS element that records the region of the thread that created it (ETS
+/// creates an element in local() on its owner thread), so the NUMA helpers can
+/// hand it to a thread of that region.
+template <typename T> struct RegionTagged : T {
+   size_t region = runtime::regionOfCpu(static_cast<size_t>(sched_getcpu()));
+};
+#endif
+
+/// Thread-local entry stacks of a hash-table build (input of parallel_insert).
+/// Under NUMA_SHARD each stack carries its owner's region.
+template <typename Entry>
+#ifdef NUMA_SHARD
+using EntryStacks =
+    tbb::enumerable_thread_specific<RegionTagged<runtime::Stack<Entry>>>;
+#else
+using EntryStacks = tbb::enumerable_thread_specific<runtime::Stack<Entry>>;
+#endif
+
 template <typename E, typename HT> void parallel_insert(E& entries, HT& ht) {
+#ifdef NUMA_SHARD
+   static_assert(sizeof(E) == 0,
+                 "under NUMA_SHARD, declare build stacks as EntryStacks<Entry>");
+#endif
    NT_SCOPE("parallel_insert");
    tbb::parallel_for(entries.range(), [&ht](const auto& r) {
       NT_TASK();
@@ -255,5 +282,41 @@ T numa_parallel_reduce(size_t nrThreads, const runtime::Relation& rel,
    for (auto& local : locals)
       result = combine(result, local);
    return result;
+}
+
+/// Region-aware pass over region-tagged thread-local stacks: each non-empty
+/// stack is one item of its owner's region; nrThreads launcher tasks take
+/// their home region's stacks first, then steal in ring order (NumaCursor).
+template <typename S, typename F>
+void numa_for_each_stack(
+    [[maybe_unused]] const char* name,
+    tbb::enumerable_thread_specific<RegionTagged<S>>& stacks, F f) {
+   constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+   std::array<std::vector<RegionTagged<S>*>, N> byRegion;
+   for (auto& s : stacks)
+      if (!s.empty()) byRegion[s.region].push_back(&s);
+   std::array<size_t, N> items;
+   for (size_t r = 0; r < N; ++r) items[r] = byRegion[r].size();
+   std::array<PaddedAtomicPos, N> pos;
+#ifdef NUMA_DEBUG
+   numa_trace::Scope ntScope(name, true);
+#endif
+   size_t nrThreads =
+       static_cast<size_t>(tbb::this_task_arena::max_concurrency());
+   tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](size_t /*tid*/) {
+      NumaCursor cursor(pos, items);
+      size_t node, i;
+      while (cursor.next(node, i)) f(*byRegion[node][i]);
+   });
+}
+
+/// Region-local hash-table insert: each stack is inserted by a thread of its
+/// owner's region when one is free (Tectorwise's insertAllEntries has each
+/// worker insert its own entries).
+template <typename S, typename HT>
+void parallel_insert(tbb::enumerable_thread_specific<RegionTagged<S>>& entries,
+                     HT& ht) {
+   numa_for_each_stack("parallel_insert", entries,
+                       [&](auto& stack) { ht.insertAll(stack); });
 }
 #endif // NUMA_SHARD
