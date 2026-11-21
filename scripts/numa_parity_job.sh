@@ -16,7 +16,7 @@
 #   CONFIGS   see above                                     [shard_spread]
 #   ENGINES   h, v or h,v (one run_tpch invocation each)    [h]
 #   QUERIES   run_tpch -q                                   [1,3,9,18]
-#   THREADS   run_tpch -t, comma list                       [1]
+#   THREADS   run_tpch -t, comma list, one run per count    [1]
 #   SF        data /tank/alexb/swole/tpch/sf<SF>            [10]
 #   REPS      run_tpch -r                                   [5]
 #   SETTLE    run_tpch -s                                   [10]
@@ -30,7 +30,7 @@
 # Output: results/numa_parity_<host>_<stamp>/
 #   machine.txt               host, topology, numa_balancing, git
 #   <config>/build.log
-#   <config>_e<engine>.log    run_tpch stdout+stderr
+#   <config>_e<engine>_t<threads>.log  run_tpch stdout+stderr
 #   timing.csv                config,engine,query,threads,rep,ms
 #   nt.txt                    NUMA_DEBUG trace lines ([NT] ...), prefixed
 #                             with config and engine
@@ -105,12 +105,16 @@ for c in $CONFIGS; do
     continue
   fi
   for e in ${ENGINES//,/ }; do
-    log="$OUT/${c}_e$e.log"
-    echo "== $c -e $e"
+  # one invocation per thread count: run_tpch shards over the regions the
+  # largest -t count occupies, so a list would leave smaller packed counts
+  # with shards on regions that have no threads
+  for t in ${THREADS//,/ }; do
+    log="$OUT/${c}_e${e}_t$t.log"
+    echo "== $c -e $e -t $t"
     timeout "$TIMEOUT" "$B/run_tpch" -p "$TPCH_PATH/" -e "$e" -q "$QUERIES" \
-      -t "$THREADS" -r "$REPS" -s "$SETTLE" > "$log" 2>&1
+      -t "$t" -r "$REPS" -s "$SETTLE" > "$log" 2>&1
     rc=$?
-    [ $rc -eq 0 ] || { echo "run_tpch $c -e $e exited $rc" >&2; status=1; }
+    [ $rc -eq 0 ] || { echo "run_tpch $c -e $e -t $t exited $rc" >&2; status=1; }
     grep -m1 'malloc_huge: MAP_HUGETLB failed' "$log" >&2 || true
     # "per-rep q18 h t88 : 12.3 45.6 ..."
     awk -v c="$c" -v e="$e" '/^per-rep /{
@@ -121,6 +125,7 @@ for c in $CONFIGS; do
       }' "$log" >> "$OUT/timing.csv"
     grep '^\[NT\]' "$log" | sed "s/^/$c e=$e /" >> "$OUT/nt.txt"
     grep '^\[RESULT\]' "$log" | sed "s/^/$c e=$e /" >> "$OUT/results.txt"
+  done
   done
 done
 echo "$(($(wc -l < "$OUT/timing.csv") - 1)) timings, $(wc -l < "$OUT/nt.txt") trace lines, $(wc -l < "$OUT/results.txt") digests in $OUT"
