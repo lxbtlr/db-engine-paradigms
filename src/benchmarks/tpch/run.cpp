@@ -6,7 +6,9 @@
 #include <iostream>
 #include <iterator>
 #include <sstream>
+#include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 #include <unordered_set>
 
 #include "benchmarks/tpch/Queries.hpp"
@@ -196,6 +198,42 @@ static void printDigest(const std::string& label, runtime::Relation& rel) {
    }
    printDigest(label, rel.nrTuples, sum, cols);
 }
+
+#if defined(NUMA_DEBUG) && defined(NUMA_SHARD)
+/// Placement check: while Typer runs, the base columns of the sharded tables
+/// are PROT_NONE, so a Typer pipeline that reads a base column instead of its
+/// shard faults. Columns are file mmaps (page aligned); a column that is not
+/// (loaded without the binary cache) is skipped and counted.
+static void protectBaseColumns(Database& db, const char* const* tables,
+                               size_t nTables, int prot) {
+   const uintptr_t page = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
+   size_t cols = 0, skipped = 0, bytes = 0;
+   for (size_t t = 0; t < nTables; ++t) {
+      if (!db.hasRelation(tables[t])) continue;
+      auto& rel = db[tables[t]];
+      for (auto& kv : rel.attributes) {
+         auto p = reinterpret_cast<uintptr_t>(kv.second.data());
+         size_t n = rel.nrTuples * kv.second.type->rt_size();
+         if (!p || n == 0) continue;
+         if (p % page) {
+            skipped++;
+            continue;
+         }
+         size_t len = (n + page - 1) / page * page;
+         if (mprotect(reinterpret_cast<void*>(p), len, prot) != 0) {
+            perror("mprotect");
+            std::abort();
+         }
+         cols++;
+         bytes += len;
+      }
+   }
+   fprintf(stderr,
+           "[PLACEMENT] base columns %s: %zu columns, %zu MB, %zu skipped\n",
+           prot == PROT_NONE ? "PROT_NONE during Typer" : "readable again",
+           cols, bytes >> 20, skipped);
+}
+#endif
 
 size_t nrTuples(Database& db, std::vector<std::string> tables) {
    size_t sum = 0;
@@ -543,6 +581,9 @@ int main(int argc, char* argv[]) {
 #ifndef HYPER_FLOAT
     PinningObserver pinner(arena);
 #endif
+#if defined(NUMA_DEBUG) && defined(NUMA_SHARD)
+    protectBaseColumns(tpch, shardTables, std::size(shardTables), PROT_NONE);
+#endif
 
    if (q.count("1h")) {
       e.timeAndProfile(label("q1 h ", nrThreads), nrTuples(tpch, {"lineitem"}),
@@ -647,6 +688,9 @@ int main(int argc, char* argv[]) {
       if (q.count("9h")) dh("q9 h ", q9_hyper);
       if (q.count("18h")) dh("q18 h", q18_hyper);
    }
+#if defined(NUMA_DEBUG) && defined(NUMA_SHARD)
+    protectBaseColumns(tpch, shardTables, std::size(shardTables), PROT_READ);
+#endif
     } // TBB arena + global_control destroyed here
 
    } // end thread count loop
