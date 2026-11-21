@@ -56,6 +56,7 @@ struct Pipeline {
    // per shard: morsels taken by a task whose dispatch home is that shard /
    // by another; by a task whose CPU is on that region / elsewhere
    std::array<size_t, N> home{}, stolen{}, local{}, remote{};
+   uint64_t gateWaitNs = 0; // time tasks spun at the steal gate
 };
 
 struct State {
@@ -135,7 +136,7 @@ inline Task task(Pipeline* p = nullptr) {
 /// Add one numa_parallel_* task's morsel counts (indexed by shard) to
 /// pipeline p (nullptr: the current pipeline).
 inline void morsels(Pipeline* p, size_t dispatchHome, size_t cpuRegion,
-                    const std::array<size_t, N>& taken) {
+                    const std::array<size_t, N>& taken, uint64_t waitNs = 0) {
    auto& s = state();
    std::lock_guard<std::mutex> l(s.m);
    if (!p) p = s.cur;
@@ -144,6 +145,7 @@ inline void morsels(Pipeline* p, size_t dispatchHome, size_t cpuRegion,
       (n == dispatchHome ? p->home : p->stolen)[n] += taken[n];
       (n == cpuRegion ? p->local : p->remote)[n] += taken[n];
    }
+   p->gateWaitNs += waitNs;
 }
 
 template <typename A> std::string join(const A& a) {
@@ -167,12 +169,14 @@ inline void endQuery() {
    size_t transitions = 0, slotChanges = 0, regionChanges = 0;
    size_t pipesRegionChange = 0, pipesSlotChange = 0, intraRegion = 0;
    size_t slotCpuMismatch = 0, nTasks = 0;
+   size_t pipesCpuShared = 0;
    std::set<long> allTids, migratedTids;
 
    for (size_t pi = 0; pi < s.pipes.size(); ++pi) {
       auto& p = *s.pipes[pi];
       std::map<long, std::pair<std::set<int>, std::set<size_t>>> seen;
       std::map<long, size_t> iters;
+      std::map<int, std::set<long>> tidsOnCpu;
       std::array<int64_t, N> firstUs, lastUs;
       std::array<size_t, N> tasksPerRegion{};
       firstUs.fill(-1);
@@ -181,6 +185,7 @@ inline void endQuery() {
          seen[t.tid].first.insert(t.slot);
          seen[t.tid].second.insert(t.region);
          iters[t.tid]++;
+         tidsOnCpu[t.cpu].insert(t.tid);
          allTids.insert(t.tid);
          int64_t us = static_cast<int64_t>(t.startNs / 1000);
          if (firstUs[t.region] < 0 || us < firstUs[t.region])
@@ -215,6 +220,9 @@ inline void endQuery() {
          last[kv.first] = {*slots.rbegin(), *regions.rbegin()};
       }
       pipesRegionChange += rc;
+      bool cpuShared = false;
+      for (auto& kv : tidsOnCpu) cpuShared |= kv.second.size() > 1;
+      pipesCpuShared += cpuShared;
       pipesSlotChange += sc;
 
       size_t maxIters = 0, multi = 0;
@@ -225,28 +233,30 @@ inline void endQuery() {
       fprintf(stderr,
               "[NT] pipe q=%s i=%zu name=%s numa=%d us=%llu tasks=%zu tids=%zu"
               " region_tasks=%s first_us=%s last_us=%s region_change=%d"
-              " slot_change=%d",
+              " slot_change=%d cpu_shared=%d",
               q, pi, p.name.c_str(), p.numa ? 1 : 0,
               (unsigned long long)((p.t1 - p.t0) / 1000), p.tasks.size(),
               seen.size(), join(tasksPerRegion).c_str(),
               join(firstUs).c_str(), join(lastUs).c_str(), rc ? 1 : 0,
-              sc ? 1 : 0);
+              sc ? 1 : 0, cpuShared ? 1 : 0);
       if (p.numa)
          fprintf(stderr,
                  " iters_max=%zu tids_multi=%zu home=%s stolen=%s local=%s"
-                 " remote=%s",
+                 " remote=%s gate_wait_us=%llu",
                  maxIters, multi, join(p.home).c_str(), join(p.stolen).c_str(),
-                 join(p.local).c_str(), join(p.remote).c_str());
+                 join(p.local).c_str(), join(p.remote).c_str(),
+                 (unsigned long long)(p.gateWaitNs / 1000));
       fprintf(stderr, "\n");
    }
    fprintf(stderr,
            "[NT] query q=%s pipes=%zu tasks=%zu tids=%zu transitions=%zu"
            " slot_changes=%zu region_changes=%zu pipes_slot_change=%zu"
            " pipes_region_change=%zu tids_migrated=%zu intra_pipe_region=%zu"
-           " slot_cpu_mismatch=%zu\n",
+           " slot_cpu_mismatch=%zu pipes_cpu_shared=%zu\n",
            q, s.pipes.size(), nTasks, allTids.size(), transitions, slotChanges,
            regionChanges, pipesSlotChange, pipesRegionChange,
-           migratedTids.size(), intraRegion, slotCpuMismatch);
+           migratedTids.size(), intraRegion, slotCpuMismatch,
+           pipesCpuShared);
    s.pipes.clear();
    s.cur = nullptr;
 }

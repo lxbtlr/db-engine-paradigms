@@ -37,9 +37,28 @@ public:
    void on_scheduler_entry(bool /*is_worker*/) override {
       int slot = tbb::this_task_arena::current_thread_index();
       if (slot < 0) return;
+      size_t target = runtime::cpuOfThread(static_cast<size_t>(slot));
+#ifdef NUMA_SHARD
+      // Keep a thread that is already pinned to one CPU of the target's
+      // region (the numa_* helpers take the home region from the CPU).
+      // If a thread kept its CPU after a slot change, the thread taking its
+      // old slot would share that CPU; the NUMA_DEBUG trace counts such
+      // pipelines (cpu_shared).
+      cpu_set_t current;
+      if (pthread_getaffinity_np(pthread_self(), sizeof(current), &current) ==
+              0 &&
+          CPU_COUNT(&current) == 1) {
+         for (size_t c = 0; c < CPU_SETSIZE; ++c)
+            if (CPU_ISSET(c, &current)) {
+               if (runtime::regionOfCpu(c) == runtime::regionOfCpu(target))
+                  return;
+               break;
+            }
+      }
+#endif
       cpu_set_t cpuset;
       CPU_ZERO(&cpuset);
-      CPU_SET(runtime::cpuOfThread(static_cast<size_t>(slot)), &cpuset);
+      CPU_SET(target, &cpuset);
       pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
    }
    ~PinningObserver() override { observe(false); }

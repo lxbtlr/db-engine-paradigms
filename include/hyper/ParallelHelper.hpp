@@ -9,6 +9,8 @@
 #include "common/runtime/Database.hpp"
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <sched.h>
 #include <vector>
 #endif
@@ -143,40 +145,93 @@ struct alignas(64) PaddedAtomicPos {
    std::atomic<size_t> pos{0};
 };
 
+#ifndef CFG_NUMA_STEAL_GATE_US
+#define CFG_NUMA_STEAL_GATE_US 150
+#endif
+/// Steal gate: a launcher task steals from region r only once r has an
+/// arrived participant or this long after the dispatch started. Default
+/// 150 us: the p90 of the latest region's first arrival in the step-0
+/// trace at physical-core counts (dubliner 88 threads: 88-114 us, median
+/// 58 us; manchego 16 threads: 7-30 us). Env NUMA_STEAL_GATE_US overrides it.
+inline uint64_t numaStealGateNs() {
+   static const uint64_t ns = [] {
+      const char* v = std::getenv("NUMA_STEAL_GATE_US");
+      return uint64_t(v ? std::atoll(v) : CFG_NUMA_STEAL_GATE_US) * 1000;
+   }();
+   return ns;
+}
+
+inline void cpuRelax() {
+#if defined(__x86_64__) || defined(__i386__)
+   __builtin_ia32_pause();
+#elif defined(__aarch64__)
+   asm volatile("yield");
+#endif
+}
+
+/// Shared state of one numa_* dispatch: items per region (morsels, stacks),
+/// claim counters, participants arrived per region, start time.
+struct NumaDispatch {
+   static constexpr size_t N = runtime::NUM_NUMA_REGIONS;
+   std::array<size_t, N> items;
+   std::array<PaddedAtomicPos, N> pos;
+   std::array<PaddedAtomicPos, N> arrived;
+   std::chrono::steady_clock::time_point t0;
+   explicit NumaDispatch(const std::array<size_t, N>& it)
+       : items(it), t0(std::chrono::steady_clock::now()) {}
+};
+
 /// Dispatch state of one launcher task of the numa_* helpers: its home
-/// region and intra-region rank, the ring-and-rank steal order (as
-/// vectorwise::Scan), and claiming of items (morsels, stacks) from per-region
-/// counters. items[r] = number of items of region r.
+/// region (region of the CPU it runs on) and intra-region rank, the
+/// ring-and-rank steal order (as vectorwise::Scan), and claiming of items
+/// with the steal gate. Never blocks: a gated region opens at the latest
+/// numaStealGateNs() after the dispatch started.
 class NumaCursor {
    static constexpr size_t N = runtime::NUM_NUMA_REGIONS;
-   std::array<PaddedAtomicPos, N>& pos;
-   const std::array<size_t, N>& items;
+   NumaDispatch& d;
    std::array<size_t, N> stealOrder;
-   size_t si = 0;
+   size_t si = 0;          // first steal-order index not known exhausted
+   uint64_t exhausted = 0; // bit k: stealOrder[k] has no items left
+   bool gateOpen = false;
 #ifdef NUMA_DEBUG
    numa_trace::Task ntTask;
    std::array<size_t, N> ntTaken{};
+   uint64_t ntWaitNs = 0;
 #endif
+
+   bool open(size_t n) {
+      if (gateOpen || d.arrived[n].pos.load(std::memory_order_relaxed) > 0)
+         return true;
+      gateOpen = std::chrono::steady_clock::now() - d.t0 >=
+                 std::chrono::nanoseconds(numaStealGateNs());
+      return gateOpen;
+   }
 
  public:
    size_t home;
 
-   NumaCursor(std::array<PaddedAtomicPos, N>& p,
-              const std::array<size_t, N>& it)
-       : pos(p), items(it) {
-      // Use the actual TBB slot (which PinningObserver pinned to a specific
-      // CPU) rather than the loop variable, which TBB may assign to any worker.
-      size_t slot =
-          static_cast<size_t>(tbb::this_task_arena::current_thread_index());
-      home = runtime::regionOf(slot);
+   explicit NumaCursor(NumaDispatch& dispatch) : d(dispatch) {
+      // Home is the region of the CPU this task runs on (PinningObserver
+      // pins by arena slot), not derived from the slot number.
+      size_t cpu = static_cast<size_t>(sched_getcpu());
+      home = runtime::regionOfCpu(cpu);
+      d.arrived[home].pos.fetch_add(1, std::memory_order_relaxed);
 #ifdef NUMA_DEBUG
       ntTask = numa_trace::task();
 #endif
       size_t rank;
+#ifdef CPU_LAYOUT_CONTIGUOUS
+      size_t slot =
+          static_cast<size_t>(tbb::this_task_arena::current_thread_index());
 #ifdef THREAD_PIN_PACKED
       rank = slot % runtime::THREADS_PER_REGION;
 #else
       rank = slot / runtime::NUM_NUMA_REGIONS;
+#endif
+#else
+      // interleaved numbering (cpu c on region c % N): the CPU's index within
+      // its region; equals the slot-based rank of both pinning layouts
+      rank = cpu / runtime::NUM_NUMA_REGIONS;
 #endif
       stealOrder[0] = home;
       if constexpr (N > 1) {
@@ -185,27 +240,69 @@ class NumaCursor {
       }
    }
 #ifdef NUMA_DEBUG
-   ~NumaCursor() { numa_trace::morsels(nullptr, home, ntTask.region, ntTaken); }
+   ~NumaCursor() {
+      numa_trace::morsels(nullptr, home, ntTask.region, ntTaken, ntWaitNs);
+   }
 #endif
 
-   /// Claim the next item: home region first, then steal in ring order.
+   /// Claim the next item: home region first, then the other regions in
+   /// steal order as their gate opens.
    bool next(size_t& node, size_t& item) {
-      for (; si < N; ++si) {
-         size_t n = stealOrder[si];
-         if (items[n] == 0) continue;
-         size_t i = pos[n].pos.fetch_add(1, std::memory_order_relaxed);
-         if (i < items[n]) {
-            node = n;
-            item = i;
 #ifdef NUMA_DEBUG
-            ntTaken[n]++;
+      auto waitStart = std::chrono::steady_clock::time_point{};
 #endif
-            return true;
+      while (true) {
+         bool pending = false;
+         for (size_t k = si; k < N; ++k) {
+            if (exhausted >> k & 1) continue;
+            size_t n = stealOrder[k];
+            if (d.items[n] == 0) {
+               exhausted |= uint64_t(1) << k;
+               continue;
+            }
+            if (k > 0 && !open(n)) {
+               pending = true;
+               continue;
+            }
+            size_t i = d.pos[n].pos.fetch_add(1, std::memory_order_relaxed);
+            if (i < d.items[n]) {
+               node = n;
+               item = i;
+#ifdef NUMA_DEBUG
+               ntTaken[n]++;
+               if (waitStart != decltype(waitStart){})
+                  ntWaitNs += (std::chrono::steady_clock::now() - waitStart)
+                                  .count();
+#endif
+               return true;
+            }
+            exhausted |= uint64_t(1) << k;
          }
+         while (si < N && (exhausted >> si & 1)) ++si;
+         if (!pending) return false;
+#ifdef NUMA_DEBUG
+         if (waitStart == decltype(waitStart){})
+            waitStart = std::chrono::steady_clock::now();
+#endif
+         cpuRelax();
       }
-      return false;
    }
 };
+
+/// Run nrThreads launcher tasks over one dispatch, each with its own cursor.
+/// simple_partitioner: one task per iteration, so a thread never holds a
+/// second, unstarted launcher iteration (step-0 trace: up to 6 iterations on
+/// one thread with the default partitioner at SMT thread counts).
+template <typename F>
+void numa_launch(size_t nrThreads, NumaDispatch& d, F f) {
+   tbb::parallel_for(
+       size_t(0), nrThreads, size_t(1),
+       [&](size_t /*tid*/) {
+          NumaCursor cursor(d);
+          f(cursor);
+       },
+       tbb::simple_partitioner());
+}
 
 /// Morsels per shard of a NUMA-sharded relation.
 inline std::array<size_t, runtime::NUM_NUMA_REGIONS>
@@ -230,15 +327,11 @@ inline size_t numaShardTuples(const runtime::Relation& rel, size_t node) {
 template <typename Body>
 void numa_parallel_scan(size_t nrThreads, const runtime::Relation& rel,
                         size_t morselSz, Body body) {
-   constexpr size_t N = runtime::NUM_NUMA_REGIONS;
-   auto morsels = numaMorsels(rel, morselSz);
-   std::array<PaddedAtomicPos, N> nodePos;
 #ifdef NUMA_DEBUG
    numa_trace::Scope ntScope("numa_parallel_scan", true);
 #endif
-
-   tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](size_t /*tid*/) {
-      NumaCursor cursor(nodePos, morsels);
+   NumaDispatch d(numaMorsels(rel, morselSz));
+   numa_launch(nrThreads, d, [&](NumaCursor& cursor) {
       size_t node, m;
       while (cursor.next(node, m)) {
          size_t begin = m * morselSz;
@@ -256,19 +349,12 @@ template <typename T, typename Body, typename Combine>
 T numa_parallel_reduce(size_t nrThreads, const runtime::Relation& rel,
                        size_t morselSz, T identity, Body body,
                        Combine combine) {
-   constexpr size_t N = runtime::NUM_NUMA_REGIONS;
-   auto morsels = numaMorsels(rel, morselSz);
-   std::array<PaddedAtomicPos, N> nodePos;
 #ifdef NUMA_DEBUG
    numa_trace::Scope ntScope("numa_parallel_reduce", true);
 #endif
-
-   // One task per thread; each resolves its NUMA identity from the actual
-   // TBB slot (pinned by PinningObserver), not from the iteration variable.
+   NumaDispatch d(numaMorsels(rel, morselSz));
    tbb::enumerable_thread_specific<T> locals(identity);
-
-   tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](size_t /*tid*/) {
-      NumaCursor cursor(nodePos, morsels);
+   numa_launch(nrThreads, d, [&](NumaCursor& cursor) {
       T& acc = locals.local();
       size_t node, m;
       while (cursor.next(node, m)) {
@@ -297,14 +383,13 @@ void numa_for_each_stack(
       if (!s.empty()) byRegion[s.region].push_back(&s);
    std::array<size_t, N> items;
    for (size_t r = 0; r < N; ++r) items[r] = byRegion[r].size();
-   std::array<PaddedAtomicPos, N> pos;
 #ifdef NUMA_DEBUG
    numa_trace::Scope ntScope(name, true);
 #endif
+   NumaDispatch d(items);
    size_t nrThreads =
        static_cast<size_t>(tbb::this_task_arena::max_concurrency());
-   tbb::parallel_for(size_t(0), nrThreads, size_t(1), [&](size_t /*tid*/) {
-      NumaCursor cursor(pos, items);
+   numa_launch(nrThreads, d, [&](NumaCursor& cursor) {
       size_t node, i;
       while (cursor.next(node, i)) f(*byRegion[node][i]);
    });
