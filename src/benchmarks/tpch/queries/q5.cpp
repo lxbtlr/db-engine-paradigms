@@ -64,29 +64,66 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
 
    using hash = runtime::CRC32Hash;
 
-   // Dimension tables are tiny — no benefit from sharding; use global pointers
-   auto r_name = re["r_name"].data<types::Char<25>>();
-   auto r_regionkey = re["r_regionkey"].data<types::Integer>();
+   // Dimension tables are tiny, but Tectorwise's Scan reads them from the
+   // shards too, so Typer does the same under NUMA_SHARD
    // --- select region and build ht
    Hashset<types::Integer, hash> ht1;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
        entries1;
+#ifdef NUMA_SHARD
+   auto r_name = numaShardPtrs<types::Char<25>>(re, "r_name");
+   auto r_regionkey = numaShardPtrs<types::Integer>(re, "r_regionkey");
+   auto found1 = numa_parallel_reduce(
+       nrThreads, re, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries1.local();
+          for (size_t i = begin; i < end; ++i) {
+             if (r_name[node][i] == c3) {
+                entries.emplace_back(ht1.hash(r_regionkey[node][i]),
+                                     r_regionkey[node][i]);
+                acc++;
+             }
+          }
+       },
+       [](const size_t& a, const size_t& b) { return a + b; });
+#else
+   auto r_name = re["r_name"].data<types::Char<25>>();
+   auto r_regionkey = re["r_regionkey"].data<types::Integer>();
    auto found1 = PARALLEL_SELECT(re.nrTuples, entries1, {
       if (r_name[i] == c3) {
          entries.emplace_back(ht1.hash(r_regionkey[i]), r_regionkey[i]);
          found++;
       }
    });
+#endif
    ht1.setSize(found1);
    parallel_insert(entries1, ht1);
 
    // --- join on region and build ht
-   auto n_regionkey = na["n_regionkey"].data<types::Integer>();
-   auto n_nationkey = na["n_nationkey"].data<types::Integer>();
-   auto n_name = na["n_name"].data<types::Char<25>>();
    Hashmapx<types::Integer, types::Char<25>, hash> ht2;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht2)::Entry>>
        entries2;
+#ifdef NUMA_SHARD
+   auto n_regionkey = numaShardPtrs<types::Integer>(na, "n_regionkey");
+   auto n_nationkey = numaShardPtrs<types::Integer>(na, "n_nationkey");
+   auto n_name = numaShardPtrs<types::Char<25>>(na, "n_name");
+   auto found2 = numa_parallel_reduce(
+       nrThreads, na, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries2.local();
+          for (size_t i = begin; i < end; ++i) {
+             if (ht1.contains(n_regionkey[node][i])) {
+                entries.emplace_back(ht2.hash(n_nationkey[node][i]),
+                                     n_nationkey[node][i], n_name[node][i]);
+                acc++;
+             }
+          }
+       },
+       [](const size_t& a, const size_t& b) { return a + b; });
+#else
+   auto n_regionkey = na["n_regionkey"].data<types::Integer>();
+   auto n_nationkey = na["n_nationkey"].data<types::Integer>();
+   auto n_name = na["n_name"].data<types::Char<25>>();
    auto found2 = PARALLEL_SELECT(na.nrTuples, entries2, {
       if (ht1.contains(n_regionkey[i])) {
          entries.emplace_back(ht2.hash(n_nationkey[i]), n_nationkey[i],
@@ -94,6 +131,7 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
          found++;
       }
    });
+#endif
    ht2.setSize(found2);
    parallel_insert(entries2, ht2);
 
@@ -182,16 +220,29 @@ NOVECTORIZE std::unique_ptr<runtime::Query> q5_hyper(Database& db,
    parallel_insert(entries4, ht4);
 
    // --- build ht for supplier
-   auto s_suppkey = su["s_suppkey"].data<types::Integer>();
-   auto s_nationkey = su["s_nationkey"].data<types::Integer>();
    Hashset<std::tuple<types::Integer, types::Integer>, hash> ht5;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht5)::Entry>>
        entries5;
 
+#ifdef NUMA_SHARD
+   auto s_suppkey = numaShardPtrs<types::Integer>(su, "s_suppkey");
+   auto s_nationkey = numaShardPtrs<types::Integer>(su, "s_nationkey");
+   numa_parallel_scan(nrThreads, su, morselSize,
+       [&](size_t begin, size_t end, size_t node) {
+          auto& entries = entries5.local();
+          for (size_t i = begin; i < end; ++i) {
+             auto key = make_tuple(s_suppkey[node][i], s_nationkey[node][i]);
+             entries.emplace_back(ht5.hash(key), key);
+          }
+       });
+#else
+   auto s_suppkey = su["s_suppkey"].data<types::Integer>();
+   auto s_nationkey = su["s_nationkey"].data<types::Integer>();
    PARALLEL_SCAN(su.nrTuples, entries5, {
       auto key = make_tuple(s_suppkey[i], s_nationkey[i]);
       entries.emplace_back(ht5.hash(key), key);
    });
+#endif
 
    ht5.setSize(su.nrTuples);
    parallel_insert(entries5, ht5);

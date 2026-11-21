@@ -65,15 +65,28 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
    auto& supp = db["supplier"];
 
    // --- build ht for nation
-   auto n_nationkey = na["n_nationkey"].data<types::Integer>();
-   auto n_name = na["n_name"].data<types::Char<25>>();
    Hashmapx<types::Integer, types::Char<25>, hash> ht1;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht1)::Entry>>
        entries1;
+#ifdef NUMA_SHARD
+   auto n_nationkey = numaShardPtrs<types::Integer>(na, "n_nationkey");
+   auto n_name = numaShardPtrs<types::Char<25>>(na, "n_name");
+   numa_parallel_scan(nrThreads, na, morselSize,
+       [&](size_t begin, size_t end, size_t node) {
+          auto& entries = entries1.local();
+          for (size_t i = begin; i < end; ++i) {
+             auto& key = n_nationkey[node][i];
+             entries.emplace_back(ht1.hash(key), key, n_name[node][i]);
+          }
+       });
+#else
+   auto n_nationkey = na["n_nationkey"].data<types::Integer>();
+   auto n_name = na["n_name"].data<types::Char<25>>();
    PARALLEL_SCAN(na.nrTuples, entries1, {
       auto& key = n_nationkey[i];
       entries.emplace_back(ht1.hash(key), key, n_name[i]);
    });
+#endif
    ht1.setSize(na.nrTuples);
    parallel_insert(entries1, ht1);
 
@@ -82,9 +95,28 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
    Hashmapx<types::Integer, types::Char<25>, hash> ht2;
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht2)::Entry>>
      entries2;
+   // do join nation-supplier and put result into bushy ht
+#ifdef NUMA_SHARD
+   auto s_suppkey = numaShardPtrs<types::Integer>(supp, "s_suppkey");
+   auto s_nationkey = numaShardPtrs<types::Integer>(supp, "s_nationkey");
+   auto found2 = numa_parallel_reduce(
+       nrThreads, supp, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries2.local();
+          for (size_t i = begin; i < end; ++i) {
+             auto& suppkey = s_suppkey[node][i];
+             auto& nationkey = s_nationkey[node][i];
+             auto name = ht1.findOne(nationkey);
+             if (name) {
+                entries.emplace_back(ht2.hash(suppkey), suppkey, *name);
+                acc++;
+             }
+          }
+       },
+       [](const size_t& a, const size_t& b) { return a + b; });
+#else
    auto s_suppkey = supp["s_suppkey"].data<types::Integer>();
    auto s_nationkey = supp["s_nationkey"].data<types::Integer>();
-   // do join nation-supplier and put result into bushy ht
    auto found2 = PARALLEL_SELECT(supp.nrTuples, entries2, {
       auto& suppkey = s_suppkey[i];
       auto& nationkey = s_nationkey[i];
@@ -94,6 +126,7 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
          found++;
       }
    });
+#endif
    ht2.setSize(found2);
    parallel_insert(entries2, ht2);
 
@@ -102,9 +135,28 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
    tbb::enumerable_thread_specific<runtime::Stack<decltype(ht3)::Entry>>
      entries3;
    auto& part = db["part"];
+   // do selection on part and put selected elements into ht
+#ifdef NUMA_SHARD
+   auto p_partkey = numaShardPtrs<types::Integer>(part, "p_partkey");
+   auto p_name = numaShardPtrs<types::Varchar<55>>(part, "p_name");
+   auto found3 = numa_parallel_reduce(
+       nrThreads, part, morselSize, size_t(0),
+       [&](size_t begin, size_t end, size_t node, size_t& acc) {
+          auto& entries = entries3.local();
+          for (size_t i = begin; i < end; ++i) {
+             auto& pk = p_partkey[node][i];
+             auto& pn = p_name[node][i];
+             if (memmem(pn.value, pn.len, contains.value, contains.len) !=
+                 nullptr) {
+                entries.emplace_back(ht3.hash(pk), pk);
+                acc++;
+             }
+          }
+       },
+       [](const size_t& a, const size_t& b) { return a + b; });
+#else
    auto p_partkey = part["p_partkey"].data<types::Integer>();
    auto p_name = part["p_name"].data<types::Varchar<55>>();
-   // do selection on part and put selected elements into ht
    auto found3 = PARALLEL_SELECT(part.nrTuples, entries3, {
        auto& pk = p_partkey[i];
        auto& pn = p_name[i];
@@ -113,6 +165,7 @@ std::unique_ptr<runtime::Query> q9_hyper(runtime::Database& db,
           found++;
        }
      });
+#endif
    ht3.setSize(found3);
    parallel_insert(entries3, ht3);
 
