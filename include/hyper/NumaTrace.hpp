@@ -132,12 +132,14 @@ inline Task task(Pipeline* p = nullptr) {
    return t;
 }
 
-/// Add one numa_parallel_* task's morsel counts (indexed by shard).
+/// Add one numa_parallel_* task's morsel counts (indexed by shard) to
+/// pipeline p (nullptr: the current pipeline).
 inline void morsels(Pipeline* p, size_t dispatchHome, size_t cpuRegion,
                     const std::array<size_t, N>& taken) {
-   if (!p) return;
    auto& s = state();
    std::lock_guard<std::mutex> l(s.m);
+   if (!p) p = s.cur;
+   if (!p) return;
    for (size_t n = 0; n < N; ++n) {
       (n == dispatchHome ? p->home : p->stolen)[n] += taken[n];
       (n == cpuRegion ? p->local : p->remote)[n] += taken[n];
