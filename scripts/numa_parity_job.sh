@@ -39,6 +39,11 @@
 #                             with config and engine
 #   results.txt               result digests ([RESULT] ...), prefixed
 #                             with config and engine
+#   hugepages.csv             2 MB hugetlb pages per node and invocation:
+#                             free before the run and the lowest free count
+#                             sampled while it ran (used = before - min)
+# An invocation fails when its log has a "MAP_HUGETLB failed" line
+# (malloc_huge / malloc_numa fell back to base pages).
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -90,7 +95,28 @@ mkdir -p "$OUT"
   grep -E 'HugePages_(Total|Free)' /proc/meminfo || true
 } | tee "$OUT/machine.txt"
 
+HP_FILES=(/sys/devices/system/node/node*/hugepages/hugepages-2048kB/free_hugepages)
+# free 2 MB hugetlb pages per node, space separated (read builtin: no forks
+# while sampling)
+hp_free() {
+  local f v out=()
+  for f in "${HP_FILES[@]}"; do read -r v < "$f" && out+=("$v"); done
+  echo "${out[*]}"
+}
+# hp_sample FILE: until killed, write the per-node minimum of hp_free to FILE
+hp_sample() {
+  local min cur i
+  read -r -a min <<< "$(hp_free)"
+  while :; do
+    read -r -a cur <<< "$(hp_free)"
+    for i in "${!cur[@]}"; do (( cur[i] < min[i] )) && min[i]=${cur[i]}; done
+    echo "${min[*]}" > "$1"
+    sleep 0.2
+  done
+}
+
 echo "config,engine,query,threads,rep,ms" > "$OUT/timing.csv"
+echo "config,engine,threads,node,free_before,free_min,used_max" > "$OUT/hugepages.csv"
 : > "$OUT/nt.txt"
 : > "$OUT/results.txt"
 [ "$DIGEST" = ON ] && export digest=1
@@ -107,6 +133,10 @@ if [ -n "$BEFORE" ]; then
       cp -a "$ROOT/3rdparty/simde/." "$SRC_BEFORE/3rdparty/simde/" ||
       { echo "cannot export $BEFORE" >&2; exit 1; }
   fi
+  # the hugetlb fallback warning (Memory.hpp) in the reference build too;
+  # Memory.hpp is otherwise unchanged since 98f4a54
+  cp "$ROOT/include/common/runtime/Memory.hpp" "$SRC_BEFORE/include/common/runtime/Memory.hpp"
+  echo "BEFORE source: Memory.hpp from $(git -C "$ROOT" rev-parse --short HEAD)" >> "$OUT/machine.txt"
   SOURCES="after before"
 fi
 
@@ -147,11 +177,23 @@ for c in $CONFIGS; do
   for t in ${THREADS//,/ }; do
     log="$OUT/${name}_e${e}_t$t.log"
     echo "== $name -e $e -t $t"
+    hp_before=$(hp_free)
+    hp_min="$OUT/.hp_min"; echo "$hp_before" > "$hp_min"
+    hp_sample "$hp_min" & hp_pid=$!
     timeout "$TIMEOUT" "$B/run_tpch" -p "$TPCH_PATH/" "${eflag[@]}" \
       -q "$QUERIES" -t "$t" -r "$REPS" -s "$SETTLE" > "$log" 2>&1
     rc=$?
+    kill "$hp_pid" 2> /dev/null; wait "$hp_pid" 2> /dev/null
+    read -r -a hb <<< "$hp_before"; read -r -a hm < "$hp_min"
+    for i in "${!hb[@]}"; do
+      echo "$name,$e,$t,$i,${hb[i]},${hm[i]},$((hb[i] - hm[i]))" >> "$OUT/hugepages.csv"
+    done
+    echo "   hugepages used per node: $(for i in "${!hb[@]}"; do printf '%s ' $((hb[i] - hm[i])); done)"
     [ $rc -eq 0 ] || { echo "run_tpch $name -e $e -t $t exited $rc" >&2; status=1; }
-    grep -m1 'malloc_huge: MAP_HUGETLB failed' "$log" >&2 || true
+    if grep -m1 'MAP_HUGETLB failed' "$log" >&2; then
+      echo "run_tpch $name -e $e -t $t fell back to base pages" >&2
+      status=1
+    fi
     # "per-rep q18 h t88 : 12.3 45.6 ..." (engine from the label)
     awk -v c="$name" '/^per-rep /{
         split($0, a, ":"); h = a[1]; sub(/^per-rep /, "", h)
