@@ -1,15 +1,29 @@
 #pragma once
+#include <atomic>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <linux/mman.h>  // MAP_HUGE_2MB / MAP_HUGE_1GB (not pulled in by sys/mman.h)
 
 #if defined(NUMA_ALLOC) || defined(NUMA_SHARD) || defined(INTERLEAVE_HT)
-#include <cerrno>
-#include <cstring>
 #include <numaif.h>
 #endif
 
 namespace mem {
+/// Report the first hugetlb mmap failure of the process on stderr, so runs
+/// that silently fell back to base pages can be detected from their logs.
+inline void warn_hugetlb_fallback(const char* fn, size_t size) {
+   static std::atomic<bool> warned{false};
+   int err = errno;
+   if (!warned.exchange(true))
+      std::fprintf(stderr,
+                   "%s: MAP_HUGETLB failed for %zu bytes (%s), using base "
+                   "pages\n",
+                   fn, size, std::strerror(err));
+}
+
 inline void* malloc_huge(size_t size) {
 #if defined(HUGE_1GB_MALLOC_HUGE)
    constexpr size_t PAGE = 1UL * 1024 * 1024 * 1024; // 1GB
@@ -18,6 +32,7 @@ inline void* malloc_huge(size_t size) {
                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_1GB,
                   -1, 0);
    if (p == MAP_FAILED) {
+      warn_hugetlb_fallback("malloc_huge", allocSize);
       p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
       if (p == MAP_FAILED)
@@ -29,6 +44,7 @@ inline void* malloc_huge(size_t size) {
    void* p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
    if (p == MAP_FAILED) {
+      warn_hugetlb_fallback("malloc_huge", allocSize);
       p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
       if (p == MAP_FAILED)
@@ -141,6 +157,7 @@ inline void* malloc_numa(size_t size, int node) {
    void* p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
                   MAP_PRIVATE | MAP_ANONYMOUS | HUGETLB_FLAGS, -1, 0);
    if (p == MAP_FAILED) {
+      warn_hugetlb_fallback("malloc_numa", allocSize);
       // Fall back to base pages, keep rounded size
       p = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
