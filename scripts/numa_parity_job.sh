@@ -114,7 +114,9 @@ hp_sample() {
   while :; do
     read -r -a cur <<< "$(hp_free)"
     for i in "${!cur[@]}"; do (( cur[i] < min[i] )) && min[i]=${cur[i]}; done
-    echo "${min[*]}" > "$1"
+    # rename, so a reader never sees a truncated file when the sampler is
+    # killed mid-write
+    echo "${min[*]}" > "$1.tmp" && mv -f "$1.tmp" "$1"
     sleep 0.2
   done
 }
@@ -189,6 +191,7 @@ for c in $CONFIGS; do
     rc=$?
     kill "$hp_pid" 2> /dev/null; wait "$hp_pid" 2> /dev/null
     read -r -a hb <<< "$hp_before"; read -r -a hm < "$hp_min"
+    for i in "${!hb[@]}"; do hm[i]=${hm[i]:-${hb[i]}}; done
     for i in "${!hb[@]}"; do
       echo "$name,$e,$t,$i,${hb[i]},${hm[i]},$((hb[i] - hm[i]))" >> "$OUT/hugepages.csv"
     done
