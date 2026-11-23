@@ -42,8 +42,12 @@
 #   hugepages.csv             2 MB hugetlb pages per node and invocation:
 #                             free before the run and the lowest free count
 #                             sampled while it ran (used = before - min)
-# An invocation fails when its log has a "MAP_HUGETLB failed" line
-# (malloc_huge / malloc_numa fell back to base pages).
+#   failures.txt              failed builds, run_tpch exits, and runs
+#                             whose log has a "MAP_HUGETLB failed" line
+#                             (malloc_huge / malloc_numa fell back to base
+#                             pages); empty when everything ran cleanly
+# Exits 1 only when no timing was recorded, so the bridge still copies the
+# results of a partly failed job.
 set -u -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -119,6 +123,8 @@ echo "config,engine,query,threads,rep,ms" > "$OUT/timing.csv"
 echo "config,engine,threads,node,free_before,free_min,used_max" > "$OUT/hugepages.csv"
 : > "$OUT/nt.txt"
 : > "$OUT/results.txt"
+: > "$OUT/failures.txt"
+fail() { echo "$*" | tee -a "$OUT/failures.txt" >&2; }
 [ "$DIGEST" = ON ] && export digest=1
 
 # Sources: the checked-out commit, and with BEFORE=<sha> that commit's source
@@ -140,7 +146,6 @@ if [ -n "$BEFORE" ]; then
   SOURCES="after before"
 fi
 
-status=0
 for src in $SOURCES; do
 for c in $CONFIGS; do
   if [ "$src" = before ]; then
@@ -160,9 +165,8 @@ for c in $CONFIGS; do
          cmake "$B" >> "$OUT/$name/build.log" 2>&1 &&
          cmake --build "$B" -j "$(nproc)" --target run_tpch \
            >> "$OUT/$name/build.log" 2>&1; }; then
-    echo "build $name failed (see $name/build.log)" >&2
+    fail "build $name failed (see $name/build.log)"
     tail -30 "$OUT/$name/build.log" >&2
-    status=1
     continue
   fi
   grep -qs -- -DNDEBUG "$B/CMakeFiles/tpch.dir/flags.make" "$B/build.ninja" &&
@@ -189,11 +193,9 @@ for c in $CONFIGS; do
       echo "$name,$e,$t,$i,${hb[i]},${hm[i]},$((hb[i] - hm[i]))" >> "$OUT/hugepages.csv"
     done
     echo "   hugepages used per node: $(for i in "${!hb[@]}"; do printf '%s ' $((hb[i] - hm[i])); done)"
-    [ $rc -eq 0 ] || { echo "run_tpch $name -e $e -t $t exited $rc" >&2; status=1; }
-    if grep -m1 'MAP_HUGETLB failed' "$log" >&2; then
-      echo "run_tpch $name -e $e -t $t fell back to base pages" >&2
-      status=1
-    fi
+    [ $rc -eq 0 ] || fail "run_tpch $name -e $e -t $t exited $rc"
+    hl=$(grep -m1 "MAP_HUGETLB failed" "$log") &&
+      fail "run_tpch $name -e $e -t $t fell back to base pages: $hl"
     # "per-rep q18 h t88 : 12.3 45.6 ..." (engine from the label)
     awk -v c="$name" '/^per-rep /{
         split($0, a, ":"); h = a[1]; sub(/^per-rep /, "", h)
@@ -208,4 +210,5 @@ for c in $CONFIGS; do
 done
 done
 echo "$(($(wc -l < "$OUT/timing.csv") - 1)) timings, $(wc -l < "$OUT/nt.txt") trace lines, $(wc -l < "$OUT/results.txt") digests in $OUT"
-exit $status
+[ -s "$OUT/failures.txt" ] && echo "$(wc -l < "$OUT/failures.txt") failures, see failures.txt" >&2
+[ "$(wc -l < "$OUT/timing.csv")" -gt 1 ]
