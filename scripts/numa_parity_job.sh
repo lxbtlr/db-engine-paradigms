@@ -29,6 +29,9 @@
 #             digest (run_tpch env digest=1)                [OFF]
 #   BEFORE    commit sha: also build and run every config from
 #             that commit's source, configs suffixed _before []
+#   GATES     comma list of NUMA_STEAL_GATE_US values for the
+#             shard configs (not _before); "default" = the
+#             compiled-in gate, others run as <config>_gate<v> [default]
 #
 # Output: results/numa_parity_<host>_<stamp>/
 #   machine.txt               host, topology, memory, numa_balancing, git
@@ -65,6 +68,7 @@ HUGE=${HUGE:-ON}
 TIMEOUT=${TIMEOUT:-3600}
 DIGEST=${DIGEST:-OFF}
 BEFORE=${BEFORE:-}
+GATES=${GATES:-default}
 TPCH_PATH=${TPCH_PATH:-/tank/alexb/swole/tpch/sf$SF}
 case "$BENCH_HOST" in
   dubliner|roquefort|manchego|burrata|kafir|rpi5) MACHINE=$BENCH_HOST ;;
@@ -93,7 +97,7 @@ mkdir -p "$OUT"
   echo "CONFIGS: $CONFIGS  ENGINES: $ENGINES  QUERIES: $QUERIES  THREADS: $THREADS"
   echo "SF: $SF  REPS: $REPS  SETTLE: $SETTLE  DEBUG: $DEBUG  HUGE: $HUGE  DIGEST: $DIGEST"
   echo "numa_balancing: $(cat /proc/sys/kernel/numa_balancing 2>/dev/null)"
-  echo "BEFORE: ${BEFORE:-none}"
+  echo "BEFORE: ${BEFORE:-none}  GATES: $GATES"
   free -g | head -2 || true
   lscpu | grep -E 'Model name|^CPU\(s\)|Socket|NUMA node' || true
   grep -E 'HugePages_(Total|Free)' /proc/meminfo || true
@@ -174,6 +178,17 @@ for c in $CONFIGS; do
   grep -qs -- -DNDEBUG "$B/CMakeFiles/tpch.dir/flags.make" "$B/build.ninja" &&
     echo "$name: NDEBUG" >> "$OUT/machine.txt" ||
     echo "$name: asserts ON (no -DNDEBUG)" | tee -a "$OUT/machine.txt" >&2
+  # GATES: steal-gate values (NUMA_STEAL_GATE_US) for the shard configs of
+  # this checkout; "default" leaves the compiled-in gate, any other value
+  # adds a run named <config>_gate<value>
+  gates=default
+  [ "$src" = after ] && [ "${c#shard}" != "$c" ] && gates=$GATES
+  for g in ${gates//,/ }; do
+  if [ "$g" = default ]; then
+    rname=$name; unset NUMA_STEAL_GATE_US
+  else
+    rname=${name}_gate$g; export NUMA_STEAL_GATE_US=$g
+  fi
   for e in ${ENGINES//,/ }; do
   # hv: both engines in one invocation (no -e; Tectorwise runs first)
   eflag=(-e "$e"); [ "$e" = hv ] && eflag=()
@@ -181,8 +196,8 @@ for c in $CONFIGS; do
   # largest -t count occupies, so a list would leave smaller packed counts
   # with shards on regions that have no threads
   for t in ${THREADS//,/ }; do
-    log="$OUT/${name}_e${e}_t$t.log"
-    echo "== $name -e $e -t $t"
+    log="$OUT/${rname}_e${e}_t$t.log"
+    echo "== $rname -e $e -t $t"
     hp_before=$(hp_free)
     hp_min="$OUT/.hp_min"; echo "$hp_before" > "$hp_min"
     hp_sample "$hp_min" & hp_pid=$!
@@ -193,25 +208,27 @@ for c in $CONFIGS; do
     read -r -a hb <<< "$hp_before"; read -r -a hm < "$hp_min"
     for i in "${!hb[@]}"; do hm[i]=${hm[i]:-${hb[i]}}; done
     for i in "${!hb[@]}"; do
-      echo "$name,$e,$t,$i,${hb[i]},${hm[i]},$((hb[i] - hm[i]))" >> "$OUT/hugepages.csv"
+      echo "$rname,$e,$t,$i,${hb[i]},${hm[i]},$((hb[i] - hm[i]))" >> "$OUT/hugepages.csv"
     done
     echo "   hugepages used per node: $(for i in "${!hb[@]}"; do printf '%s ' $((hb[i] - hm[i])); done)"
-    [ $rc -eq 0 ] || fail "run_tpch $name -e $e -t $t exited $rc"
+    [ $rc -eq 0 ] || fail "run_tpch $rname -e $e -t $t exited $rc"
     hl=$(grep -m1 "MAP_HUGETLB failed" "$log") &&
-      fail "run_tpch $name -e $e -t $t fell back to base pages: $hl"
+      fail "run_tpch $rname -e $e -t $t fell back to base pages: $hl"
     # "per-rep q18 h t88 : 12.3 45.6 ..." (engine from the label)
-    awk -v c="$name" '/^per-rep /{
+    awk -v c="$rname" '/^per-rep /{
         split($0, a, ":"); h = a[1]; sub(/^per-rep /, "", h)
         n = split(h, f, " "); q = f[1]; e = f[2]; t = f[n]; sub(/^t/, "", t)
         m = split(a[2], ms, " ")
         for (i = 1; i <= m; i++) printf "%s,%s,%s,%s,%d,%s\n", c, e, q, t, i, ms[i]
       }' "$log" >> "$OUT/timing.csv"
-    grep '^\[NT\]' "$log" | sed "s/^/$name e=$e /" >> "$OUT/nt.txt"
-    grep '^\[RESULT\]' "$log" | sed "s/^/$name e=$e /" >> "$OUT/results.txt"
+    grep '^\[NT\]' "$log" | sed "s/^/$rname e=$e /" >> "$OUT/nt.txt"
+    grep '^\[RESULT\]' "$log" | sed "s/^/$rname e=$e /" >> "$OUT/results.txt"
+  done
   done
   done
 done
 done
+unset NUMA_STEAL_GATE_US
 echo "$(($(wc -l < "$OUT/timing.csv") - 1)) timings, $(wc -l < "$OUT/nt.txt") trace lines, $(wc -l < "$OUT/results.txt") digests in $OUT"
 [ -s "$OUT/failures.txt" ] && echo "$(wc -l < "$OUT/failures.txt") failures, see failures.txt" >&2
 [ "$(wc -l < "$OUT/timing.csv")" -gt 1 ]
